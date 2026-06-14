@@ -308,14 +308,11 @@ description: "Single sentence describing when to invoke this skill."
 ### Via `npx skills`
 
 ```bash
-# Install individual skills
+# Install the full collection (all 7 skills)
+npx skills add whiteua/planforge-toolkit
+
+# Or install a single skill
 npx skills add whiteua/planforge-toolkit/plan-brainstorming
-npx skills add whiteua/planforge-toolkit/plan-writing
-npx skills add whiteua/planforge-toolkit/plan-splitter
-npx skills add whiteua/planforge-toolkit/plan-executor
-npx skills add whiteua/planforge-toolkit/plan-resolver
-npx skills add whiteua/planforge-toolkit/plan-iterative-revision
-npx skills add whiteua/planforge-toolkit/writing-skills
 ```
 
 ### Via git clone
@@ -330,11 +327,11 @@ git clone https://github.com/whiteua/planforge-toolkit.git
 # macOS / Linux
 DEST="$HOME/.claude/skills"
 for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
-  ln -s "$PWD/$skill" "$DEST/$skill"
+  ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 
 # Windows PowerShell (run as Administrator)
-$src = "$PWD"
+$src = "$PWD\skills"
 $dest = "$env:USERPROFILE\.claude\skills"
 foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","writing-skills")) {
   New-Item -ItemType SymbolicLink -Path "$dest\$skill" -Target "$src\$skill"
@@ -348,11 +345,11 @@ foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-e
 DEST="$HOME/.copilot/skills"
 mkdir -p "$DEST"
 for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
-  ln -s "$PWD/$skill" "$DEST/$skill"
+  ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 
 # Windows PowerShell (run as Administrator)
-$src = "$PWD"
+$src = "$PWD\skills"
 $dest = "$env:USERPROFILE\.copilot\skills"
 New-Item -ItemType Directory -Force -Path $dest
 foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","writing-skills")) {

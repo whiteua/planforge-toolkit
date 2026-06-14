@@ -1,0 +1,31 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "notGrouped": "bottom",
+  "groupings": [
+    {
+      "title": "Planning Pipeline",
+      "description": "Core pipeline skills for turning an idea into an executed plan.",
+      "skills": [
+        "plan-brainstorming",
+        "plan-writing",
+        "plan-splitter",
+        "plan-executor"
+      ]
+    },
+    {
+      "title": "Audit & Revision",
+      "description": "Skills for reviewing, iterating, and verifying plan implementation.",
+      "skills": [
+        "plan-iterative-revision",
+        "plan-resolver"
+      ]
+    },
+    {
+      "title": "Authoring",
+      "description": "Skills for writing and testing agent skills.",
+      "skills": [
+        "writing-skills"
+      ]
+    }
+  ]
+}

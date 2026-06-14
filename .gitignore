@@ -1,5 +1,6 @@
 # ----- Working directories (not for publication) -----
 docs/.*/
+.github
 
 # ----- Python -----
 __pycache__/

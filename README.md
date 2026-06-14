@@ -7,6 +7,7 @@
 [![Stars](https://img.shields.io/github/stars/whiteua/planforge-toolkit?style=for-the-badge&color=yellow)](https://github.com/whiteua/planforge-toolkit/stargazers)
 [![License](https://img.shields.io/github/license/whiteua/planforge-toolkit?style=for-the-badge&color=blue)](LICENSE)
 [![Issues](https://img.shields.io/github/issues/whiteua/planforge-toolkit?style=for-the-badge&color=red)](https://github.com/whiteua/planforge-toolkit/issues)
+[![skills.sh](https://skills.sh/b/whiteua/planforge-toolkit)](https://skills.sh/whiteua/planforge-toolkit)
 
 [Overview](#overview) · [Skills](#skills) · [Pipeline](#pipeline) · [Installation](#installation) · [Usage](#usage) · [Contributing](#contributing)
 
@@ -35,13 +36,13 @@ Each skill is an independent, installable module. Together they form a coherent 
 
 | Skill | Description | Depends on |
 |---|---|---|
-| [`plan-brainstorming`](plan-brainstorming/) | Turn ideas into validated design specs through collaborative dialogue | — |
-| [`plan-writing`](plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` |
-| [`plan-splitter`](plan-splitter/) | Decompose a large plan into self-contained stages for parallel execution | — |
-| [`plan-executor`](plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | — |
-| [`plan-iterative-revision`](plan-iterative-revision/) | Iteratively audit and patch a plan until it is error-free | — |
-| [`plan-resolver`](plan-resolver/) | Audit implementation against the plan and produce a structured report | — |
-| [`writing-skills`](writing-skills/) | Create, test, and deploy new agent skills using TDD methodology | — |
+| [`plan-brainstorming`](skills/plan-brainstorming/) | Turn ideas into validated design specs through collaborative dialogue | — |
+| [`plan-writing`](skills/plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` |
+| [`plan-splitter`](skills/plan-splitter/) | Decompose a large plan into self-contained stages for parallel execution | — |
+| [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | — |
+| [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan until it is error-free | — |
+| [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report | — |
+| [`writing-skills`](skills/writing-skills/) | Create, test, and deploy new agent skills using TDD methodology | — |
 
 ---
 
@@ -81,17 +82,16 @@ Each skill is an independent, installable module. Together they form a coherent 
 
 ### Option 1 — Install via `npx skills` (recommended)
 
-Install individual skills into your agent's skills directory:
+Install the full collection with one command:
 
 ```bash
-# Install the full planning pipeline (recommended)
+npx skills add whiteua/planforge-toolkit
+```
+
+Or install a single skill:
+
+```bash
 npx skills add whiteua/planforge-toolkit/plan-brainstorming
-npx skills add whiteua/planforge-toolkit/plan-writing
-npx skills add whiteua/planforge-toolkit/plan-splitter
-npx skills add whiteua/planforge-toolkit/plan-executor
-npx skills add whiteua/planforge-toolkit/plan-resolver
-npx skills add whiteua/planforge-toolkit/plan-iterative-revision
-npx skills add whiteua/planforge-toolkit/writing-skills
 ```
 
 ### Option 2 — Clone and install manually
@@ -107,11 +107,11 @@ cd planforge-toolkit
 # macOS / Linux
 DEST="$HOME/.claude/skills"
 for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
-  ln -s "$PWD/$skill" "$DEST/$skill"
+  ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 
 # Windows PowerShell (run as Administrator)
-$src = "$PWD"; $dest = "$env:USERPROFILE\.claude\skills"
+$src = "$PWD\skills"; $dest = "$env:USERPROFILE\.claude\skills"
 foreach ($s in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","writing-skills")) {
   New-Item -ItemType SymbolicLink -Path "$dest\$s" -Target "$src\$s"
 }
@@ -123,11 +123,11 @@ foreach ($s in @("plan-brainstorming","plan-writing","plan-splitter","plan-execu
 # macOS / Linux
 DEST="$HOME/.copilot/skills"; mkdir -p "$DEST"
 for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
-  ln -s "$PWD/$skill" "$DEST/$skill"
+  ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 
 # Windows PowerShell (run as Administrator)
-$src = "$PWD"; $dest = "$env:USERPROFILE\.copilot\skills"
+$src = "$PWD\skills"; $dest = "$env:USERPROFILE\.copilot\skills"
 New-Item -ItemType Directory -Force -Path $dest
 foreach ($s in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","writing-skills")) {
   New-Item -ItemType SymbolicLink -Path "$dest\$s" -Target "$src\$s"
@@ -142,7 +142,7 @@ Copy the skills into your project's `.github/skills/` directory to activate them
 # macOS / Linux
 DEST=".github/skills"; mkdir -p "$DEST"
 for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
-  cp -r /path/to/planforge-toolkit/$skill "$DEST/$skill"
+  cp -r /path/to/planforge-toolkit/skills/$skill "$DEST/$skill"
 done
 ```
 
@@ -152,7 +152,7 @@ done
 # macOS / Linux
 DEST="$HOME/.agents/skills"; mkdir -p "$DEST"
 for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
-  ln -s "$PWD/$skill" "$DEST/$skill"
+  ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 ```
 
@@ -196,7 +196,7 @@ The skill will guide you through the full brainstorming → spec → plan cycle.
 /plan-iterative-revision docs/plans/plan01-auth-impl.md
 ```
 
-For detailed usage of each skill, see the [`USAGE.md`](plan-brainstorming/USAGE.md) file inside each skill directory, or the full [User Guide](docs/USERGUIDE.md).
+For detailed usage of each skill, see the [`USAGE.md`](skills/plan-brainstorming/USAGE.md) file inside each skill directory, or the full [User Guide](docs/USERGUIDE.md).
 
 ---
 

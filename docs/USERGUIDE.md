@@ -307,21 +307,93 @@ description: "Single sentence describing when to invoke this skill."
 
 ### Via `npx skills`
 
+No installation of the CLI itself is required — `npx` runs it on demand.
+
+#### Flags reference
+
+| Flag | Short | Description |
+|---|---|---|
+| `--global` | `-g` | Install to home directory (`~/`) — available in **all** projects on the machine |
+| `--agent <name...>` | `-a` | Target one or more specific agents; CLI auto-detects if omitted |
+| `--skill <name...>` | `-s` | Install only specific skills by name; use `'*'` for all |
+| `--list` | `-l` | List available skills without installing anything |
+| `--copy` | | Copy files instead of creating symlinks |
+| `--yes` | `-y` | Skip all confirmation prompts (CI/CD friendly) |
+| `--all` | | Shorthand for `--skill '*' --agent '*' -y` |
+
+#### Installation scope
+
+By default skills are installed **project-locally** — into a hidden agent directory at the root of your current working directory (e.g. `.claude/skills/`). These files can be committed and shared with your team.
+
+Add `-g` / `--global` to install into your home directory instead, making the skills available in **every project** on the machine.
+
+| Scope | Flag | Where files land |
+|---|---|---|
+| Project (default) | _(none)_ | `.claude/skills/…`, `.agents/skills/…`, etc. |
+| Global | `-g` | `~/.claude/skills/…`, `~/.copilot/skills/…`, etc. |
+
+#### Supported agents (`--agent`)
+
+The CLI auto-detects which agents are installed on your machine. Use `--agent` to explicitly target one or more.
+
+| Agent | Slug | Project path | Global path |
+|---|---|---|---|
+| Claude Code | `claude-code` | `.claude/skills/` | `~/.claude/skills/` |
+| GitHub Copilot | `github-copilot` | `.agents/skills/` | `~/.copilot/skills/` |
+| Codex | `codex` | `.agents/skills/` | `~/.codex/skills/` |
+| Cursor | `cursor` | `.agents/skills/` | `~/.cursor/skills/` |
+| Windsurf | `windsurf` | `.windsurf/skills/` | `~/.codeium/windsurf/skills/` |
+| Gemini CLI | `gemini-cli` | `.agents/skills/` | `~/.gemini/skills/` |
+| OpenCode | `opencode` | `.agents/skills/` | `~/.config/opencode/skills/` |
+| Cline / Warp / Zed | `cline` / `warp` / `zed` | `.agents/skills/` | `~/.agents/skills/` |
+| Amp / Replit | `amp` / `replit` | `.agents/skills/` | `~/.config/agents/skills/` |
+
+> 70+ supported agents — full list: [skills.sh/docs/cli#supported-agents](https://www.skills.sh/docs/cli#supported-agents)
+
+#### Recipes
+
 ```bash
-# Install the full collection (all 7 skills)
+# Install all 7 skills — CLI auto-detects your agent
 npx skills add whiteua/planforge-toolkit
 
-# Or install a single skill
-npx skills add whiteua/planforge-toolkit/plan-brainstorming
+# Install all skills globally (available in every project on this machine)
+npx skills add whiteua/planforge-toolkit -g
+
+# Install all skills globally for Claude Code only
+npx skills add whiteua/planforge-toolkit -g -a claude-code
+
+# Install all skills project-locally for GitHub Copilot
+npx skills add whiteua/planforge-toolkit -a github-copilot
+
+# Install a single skill globally for Claude Code
+npx skills add whiteua/planforge-toolkit -s plan-executor -g -a claude-code
+
+# Install the core pipeline only — non-interactive (CI/CD)
+npx skills add whiteua/planforge-toolkit \
+  -s plan-brainstorming -s plan-writing -s plan-executor -s plan-resolver \
+  -g -a claude-code -y
+
+# Install to multiple agents at once
+npx skills add whiteua/planforge-toolkit -g -a claude-code -a github-copilot -a cursor
+
+# Install to all detected agents without any prompts
+npx skills add whiteua/planforge-toolkit --all
+
+# Preview what would be installed (dry run)
+npx skills add whiteua/planforge-toolkit --list
 ```
 
 ### Via git clone
 
+Use this option when you want a single source of truth on disk and prefer to
+manage updates via `git pull`.
+
 ```bash
 git clone https://github.com/whiteua/planforge-toolkit.git
+cd planforge-toolkit
 ```
 
-**Claude Code** — symlink or copy into `~/.claude/skills/`:
+**Claude Code** — symlink into `~/.claude/skills/`:
 
 ```bash
 # macOS / Linux
@@ -338,7 +410,7 @@ foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-e
 }
 ```
 
-**VS Code GitHub Copilot** — symlink or copy into `~/.copilot/skills/`:
+**GitHub Copilot** — symlink into `~/.copilot/skills/`:
 
 ```bash
 # macOS / Linux
@@ -355,6 +427,17 @@ New-Item -ItemType Directory -Force -Path $dest
 foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","writing-skills")) {
   New-Item -ItemType SymbolicLink -Path "$dest\$skill" -Target "$src\$skill"
 }
+```
+
+**Codex / Cursor / Cline / Warp** — symlink into agent-specific directory:
+
+```bash
+# macOS / Linux — adjust DEST for your agent
+DEST="$HOME/.codex/skills"   # or ~/.cursor/skills, ~/.agents/skills, etc.
+mkdir -p "$DEST"
+for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
+  ln -s "$PWD/skills/$skill" "$DEST/$skill"
+done
 ```
 
 > **Note:** `plan-writing` reads contract files from `plan-brainstorming`. Both must be installed in the **same parent directory**.

@@ -1,19 +1,9 @@
 ---
 name: plan-iterative-revision
 description: |
-  Итеративная ревизия плана модернизации проекта. Запускает цикл «аудит главного плана → запись
-  ошибок в новый review-файл → имплементация ревью обратно в план → повтор», пока план не станет
-  чист или не будет достигнут лимит итераций. Сверяет план с текущим кодом проекта.
-
   Iterative plan revision loop. Audits a master plan, records issues into a new review file,
-  implements the review back into the master plan, and repeats until the plan is clean or the
-  iteration limit is reached. Cross-checks the plan against the actual codebase.
-
-  Use when: «итеративная ревизия плана», «найти ошибки в плане и внедрить исправления»,
-  «inspect plan and patch it», «plan revision loop», «cycle audit-implement plan», «ревизия
-  плана модернизации», «проверить план на ошибки и обновить». Если текущий режим или набор
-  инструментов не позволяет физически создать review-файл рядом с планом, скилл обязан
-  остановиться до аудита и попросить пользователя включить режим/инструмент записи файлов.
+  implements fixes back into the plan, and repeats until the plan is clean or the iteration
+  limit is reached. Cross-checks the plan against the actual codebase.
 allowed-tools:
   - Read
   - Grep

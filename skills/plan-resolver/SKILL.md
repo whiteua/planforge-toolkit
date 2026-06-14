@@ -1,14 +1,9 @@
 ---
 name: plan-resolver
 description: |
-  Read-mostly аудит реализации мастер-плана. Принимает plans-list (мастер-план + прошлые
-  отчёты), сверяет фазы/задачи и ранее зафиксированные ошибки с кодом, создаёт ровно один
-  новый отчёт <base>-report-<N+1>.md или <base>-report-<N+1>-final.md рядом с мастер-планом.
-
-  Use when: «проверь выполнение плана», «проверка реализации плана», «проверь реализацию
-  плана», «resolve plan», «plan resolver», «resolve master plan», «master plan resolver»,
-  «сформируй отчёт по плану», «audit plan implementation», «сделай очередной проход по плану».
-  Если режим/инструменты не позволяют создать новый отчёт — стоп до аудита.
+  Audit plan implementation against the codebase. Cross-checks phases, tasks, and previously
+  reported issues with actual code, then produces a single structured report file alongside
+  the master plan.
 allowed-tools:
   - Read
   - Grep

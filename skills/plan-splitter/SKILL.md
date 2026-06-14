@@ -1,21 +1,9 @@
 ---
 name: plan-splitter
 description: |
-  Декомпозиция большого markdown-плана на самостоятельные стадии (stages), каждая из которых
-  выполнима за один проход агента. Результат: набор файлов рядом с исходным планом —
-  roadmap (-stg00-roadmap.md) + по одному файлу на стадию (-stg01.md, -stg02.md, ...).
-  Скилл framework-agnostic, оригинальный план НЕ модифицируется.
-
   Decompose a large markdown plan into self-contained stages, each executable in a single
-  agent pass. Output: files alongside the source plan — a roadmap (-stg00-roadmap.md) plus
-  one file per stage (-stg01.md, -stg02.md, ...). Framework-agnostic; the original plan is
-  NEVER modified.
-
-  Use when: «разбить план на стадии», «декомпозировать план», «разбей на этапы»,
-  «plan splitter», «split plan into stages», «decompose markdown plan», «разделить план
-  на части», «нарежь план на стадии». Если текущий режим или набор инструментов не
-  позволяет физически создать stg-файлы рядом с планом, скилл обязан остановиться до
-  генерации и попросить пользователя включить запись файлов.
+  agent pass. Produces a roadmap and per-stage files alongside the source plan without
+  modifying the original.
 allowed-tools:
   - Read
   - Grep

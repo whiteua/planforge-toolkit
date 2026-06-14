@@ -9,7 +9,7 @@
 [![Issues](https://img.shields.io/github/issues/whiteua/planforge-toolkit?style=for-the-badge&color=red)](https://github.com/whiteua/planforge-toolkit/issues)
 <!-- [![skills.sh](https://skills.sh/b/whiteua/planforge-toolkit)](https://skills.sh/whiteua/planforge-toolkit) -->
 
-[Overview](#overview) · [Skills](#skills) · [Pipeline](#pipeline) · [Installation](#installation) · [Usage](#usage) · [Contributing](#contributing)
+[Overview](#overview) · [Skills](#skills) · [Pipeline](#pipeline) · [Installation](#installation) · [Updating](#updating) · [Usage](#usage) · [Contributing](#contributing)
 
 </div>
 
@@ -58,10 +58,10 @@ Each skill is an independent, installable module. Together they form a coherent 
   └──────────┬──────────┘
              │ plan.md
              │
-      ┌──────▼──────┐         ┌───────────────────────────┐
-      │large plan?  │──yes──► │    plan-splitter          │
-      └──────┬──────┘         │  plan → stg00-roadmap.md  │
-             │ no             └──────────┬────────────────┘
+      ┌──────▼──────┐        ┌───────────────────────────┐
+      │large plan?  │──yes──►│    plan-splitter          │
+      └──────┬──────┘        │  plan → stg00-roadmap.md  │
+             │ no            └──────────┬────────────────┘
              │                          │ stg01..stgN.md
              └──────────┬───────────────┘
                         │
@@ -215,6 +215,70 @@ done
 ### Skill dependencies
 
 > `plan-writing` reads contract files from `plan-brainstorming`. Both must be installed in the **same parent directory**.
+
+---
+
+## Updating
+
+This repository follows a **rolling-release model** — every push to `main` is a release. There are no version tags or lockfiles; the latest commit is always the current version.
+
+### How the CLI knows what to update
+
+When you install via `npx skills add whiteua/planforge-toolkit`, the CLI stores the source reference (`whiteua/planforge-toolkit`) alongside each installed skill. On update, it fetches the latest state of the `main` branch from GitHub and replaces local files.
+
+### Update commands
+
+```bash
+# Update all installed PlanForge skills (interactive scope prompt)
+npx skills update
+
+# Update all skills non-interactively (auto-detects scope)
+npx skills update -y
+
+# Update only global skills
+npx skills update -g
+
+# Update only project-local skills
+npx skills update -p
+
+# Update a single skill by name
+npx skills update plan-executor
+
+# Update several specific skills
+npx skills update plan-brainstorming plan-writing plan-executor
+```
+
+#### Update flags
+
+| Flag | Short | Description |
+|---|---|---|
+| `--global` | `-g` | Only update globally installed skills |
+| `--project` | `-p` | Only update project-locally installed skills |
+| `--yes` | `-y` | Skip scope prompt (auto-detect: project if in a project dir, else global) |
+| `[skills...]` | | Update specific skills by name instead of all |
+
+### Updating a manual (git clone) installation
+
+If you installed via Option 2 (clone + symlink), updates are just a `git pull`:
+
+```bash
+cd planforge-toolkit
+git pull origin main
+```
+
+Since your agent directories are symlinked to the cloned repo, updated files are picked up immediately — no reinstallation needed.
+
+### Checking installed versions
+
+```bash
+# List all installed skills with their source
+npx skills list
+
+# List only global skills
+npx skills ls -g
+```
+
+The CLI does not currently display commit hashes or dates. To verify you are on the latest version, compare `npx skills list` output with the [latest commits](https://github.com/whiteua/planforge-toolkit/commits/main).
 
 ---
 

@@ -40,7 +40,7 @@ Each skill is an independent, installable module. Together they form a coherent 
 | [`plan-writing`](skills/plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` | Contract-driven generation, plan lifecycle model |
 | [`plan-splitter`](skills/plan-splitter/) | Decompose a large plan into self-contained stages for parallel execution | — | Gate-decision (5-factor), topological ordering + parallel groups, 3-level VERIFY, self-sufficiency invariant, SHA-256 origin fingerprint |
 | [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | — | Persistent progress ledger, multi-session continuity, gated SDLC workflow |
-| [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan until it is error-free | — | Cyclic audit loop, structured review artifacts, error taxonomy, convergence detection |
+| [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan until it is error-free | — | Set-algebraic flow analysis (new/resolved/persisted/reintroduced), SHA-1 issue fingerprinting, two-phase separation (audit ≠ implement), regression/churn/stagnation hard-stops, 10-class error taxonomy, immutable append-only review trail |
 | [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report | — | task-census completeness gate, evidence anchors (`path#Lx-Ly`), confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only invariant |
 | [`writing-skills`](skills/writing-skills/) | Create, test, and deploy new agent skills using TDD methodology | — | Red-green-refactor for skills, subagent-based behavioural testing |
 
@@ -375,9 +375,60 @@ All three levels must pass before output files are finalised. Up to three retry 
 
 ---
 
-### Cyclic audit loop with convergence detection
+### Set-algebraic flow analysis
 
-`plan-iterative-revision` runs a fixed cycle: audit the plan → write a review file with categorised errors → implement fixes back into the plan → repeat. Each cycle produces a new numbered review file, never overwriting previous ones. The loop terminates when the audit finds zero errors or the configured iteration limit is reached. The final state is recorded in a completion artifact.
+After each audit pass, the tool computes four sets over issue fingerprints:
+
+| Set | Formula | Meaning |
+|---|---|---|
+| **new** | `current − cumulative` | First-time issues never seen in any prior iteration |
+| **resolved** | `prev − current` | Issues present in the last iteration but gone now |
+| **persisted** | `prev ∩ current` | Issues present in both the last iteration and now |
+| **reintroduced** | `(cumulative − prev) ∩ current` | Issues that existed before, disappeared, and have reappeared |
+
+These four categories drive **hard-stop decisions**: if `reintroduced ≠ ∅` after 3+ iterations the loop halts with `ESCALATED` (regression detected); if `resolved = ∅` and `new ≠ ∅` over a sliding window of 2 iterations, `STAGNATION` is declared (churn). The agent cannot override these stops — they are computed deterministically by the tool script.
+
+**Used in:** `plan-iterative-revision`
+
+---
+
+### SHA-1 issue fingerprinting
+
+Every issue found during audit receives a stable 8-character fingerprint: `SHA-1(category + normalized_required_fix)[:8]`. The same conceptual issue always produces the same fingerprint regardless of iteration number, phrasing variations, or surrounding context. This enables precise cross-iteration tracking: the system distinguishes “new bug” from “same bug resurfaced” without relying on textual similarity heuristics. Fingerprints are validated by the tool and form the atoms of the flow-analysis algebra.
+
+**Used in:** `plan-iterative-revision`
+
+---
+
+### Two-phase separation (audit ≠ implement)
+
+`plan-iterative-revision` enforces strict separation of duties within each iteration:
+
+- **Phase A (Audit)** — reads the plan and code, writes exactly one new review file. The plan is never modified.
+- **Phase B (Implement)** — reads the review file, applies surgical edits to the plan. Review files are never modified.
+
+This mirrors the Fagan Inspection pattern (IBM, 1976): the inspector and the fixer are never the same actor in the same step. Applied to an LLM agent, it prevents the common failure mode where an agent “finds and fixes” in one pass, silently masking issues it introduced.
+
+**Used in:** `plan-iterative-revision`
+
+---
+
+### 10-class error taxonomy with multi-lens sweep
+
+Audit passes are structured around 10 orthogonal error classes: `logic`, `code`, `math`, `ops`, `db`, `contract`, `tests`, `security`, `perf`, `code-plan-mismatch`. The agent performs **one complete lens pass per class** — re-reading the plan with a specific focus each time — rather than scanning for everything at once. This prevents attention scattering and ensures coverage across all concern domains. Depth is configurable: `quick` (L1 only), `standard` (L1+L2), `deep` (L1–L4 with red-team attack pass).
+
+**Used in:** `plan-iterative-revision`
+
+---
+
+### Immutable append-only review trail
+
+Each iteration produces a numbered review file (`-review-1.md`, `-review-2.md`, …) that is never overwritten or modified after creation. Review files carry mandatory machine-validated headers (plan SHA-256, timestamp, severity counts, flow profile) and serve as:
+- Legal audit trail of what errors were found and when
+- Input for contract verification (each “Required fix” becomes a contractual obligation checked in the next iteration)
+- Source data for the flow-analysis algebra
+
+The tool validates review structure deterministically (`validate-review --strict-fingerprint`) before the agent proceeds.
 
 **Used in:** `plan-iterative-revision`
 

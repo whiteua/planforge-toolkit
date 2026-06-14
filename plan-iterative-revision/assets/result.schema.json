@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "plan-iterative-revision autonomous result",
+  "type": "object",
+  "required": ["result", "iterations", "remaining_issues"],
+  "additionalProperties": false,
+  "properties": {
+    "result": {
+      "type": "string",
+      "enum": ["clean", "converged", "stagnation", "limit", "escalated"]
+    },
+    "iterations": { "type": "integer", "minimum": 0 },
+    "remaining_issues": { "type": "integer", "minimum": 0 },
+    "escalated": { "type": "array", "items": { "type": "string" } },
+    "lenses_used": { "type": "integer", "minimum": 1, "maximum": 4 },
+    "cache_hits": { "type": "integer", "minimum": 0 },
+    "stop_reason": {
+      "type": ["string", "null"],
+      "enum": ["regression", "churn", "drain", "stuck", null]
+    },
+    "flows": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "new": { "type": "integer", "minimum": 0 },
+        "resolved": { "type": "integer", "minimum": 0 },
+        "persisted": { "type": "integer", "minimum": 0 },
+        "reintroduced": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "error": { "type": "string" }
+  }
+}

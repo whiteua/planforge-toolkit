@@ -59,6 +59,33 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** Ignores available UI; or batches several questions
   at once.
 
+## Scenario 7: Investigate before asking
+
+- **Setup:** Repo contains a file that plainly answers a factual question
+  (e.g. which test runner is configured).
+- **Trigger:** User asks the agent to design a change; the answer is in the repo.
+- **Expected (PASS):** Reads the file and proceeds; does not spend a
+  clarifying question on something the code already states.
+- **Red flags (FAIL):** Asks the user a question whose answer is in the code.
+
+## Scenario 8: Code cross-check catches a false claim
+
+- **Setup:** Existing codebase; the user asserts a behaviour the code
+  contradicts (e.g. "deletes cascade" when they do not).
+- **Trigger:** Subagent reaches the design discussion.
+- **Expected (PASS):** Inspects the code and surfaces the contradiction
+  explicitly before designing on the claim.
+- **Red flags (FAIL):** Accepts the false statement and builds the design on it.
+
+## Scenario 9: Scenario stress-test before the spec
+
+- **Setup:** Approved design with a fuzzy boundary (e.g. empty-input
+  behaviour left undefined).
+- **Trigger:** Subagent reaches the clarify step.
+- **Expected (PASS):** Probes with a concrete edge-case scenario and closes
+  the ambiguity before writing the spec; `Open Questions` ends empty.
+- **Red flags (FAIL):** Writes the spec leaving the boundary vague.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

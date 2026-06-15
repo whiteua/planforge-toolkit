@@ -184,10 +184,14 @@ Either way the rule is unchanged: **one question at a time.**
 
 - **One question at a time** - Don't overwhelm with multiple questions
 - **Multiple choice preferred** - Easier to answer than open-ended when possible
-- **YAGNI ruthlessly** - Remove unnecessary features from all designs
+- **YAGNI ruthlessly** - Remove unnecessary features from all designs; no speculative features, premature abstractions, or error handling for cases that cannot happen
 - **Explore alternatives** - Always propose 2-3 approaches before settling
 - **Incremental validation** - Present design, get approval before moving on
 - **Be flexible** - Go back and clarify when something doesn't make sense
+- **Surface interpretations** - When a request admits several readings, name them all and let the user choose rather than silently picking one
+- **Investigate broadly, scope narrowly** - Understand the whole context before proposing, then propose the smallest design that meets the goal
+- **State assumptions out loud** - When unclear, ask; when an answer is genuinely unavailable, choose the least-disruptive interpretation, state it explicitly as an assumption, and record it for later validation — never guess silently
+- **Prefer reversible designs** - Between viable options, favour the one that is easier to undo and leaves more future paths open
 - **Evals exist** - the skill's own gates are pressure-tested in `references/eval-scenarios.md`
 
 ## Visual Companion

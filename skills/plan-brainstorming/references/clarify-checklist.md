@@ -28,6 +28,21 @@ determined, ask:
 5. **Non-functional** - performance, security, data volume, concurrency —
    only where they are actually load-bearing for this design.
 
+## Scenario Stress-Test
+
+The categories above are a passive checklist; this is the active move that
+exposes hidden ambiguity. For a concept whose boundaries feel fuzzy, invent
+a concrete edge-case scenario and ask which way it resolves — especially for
+scope edges, data model, and error semantics:
+
+- "What happens when the input is empty / at the maximum / arrives twice?"
+- "If X and Y both apply, which one wins?"
+
+A scenario the user cannot answer cleanly is an unresolved ambiguity: turn
+it into a single clarifying question (one at a time) before writing the
+spec. Scale by tier like the categories — Quick: 0-1 scenario only where a
+boundary is plausibly fuzzy; Deep: probe each fuzzy boundary explicitly.
+
 ## Per-Tier Scaling
 
 | Tier | How much to run |

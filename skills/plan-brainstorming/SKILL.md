@@ -99,6 +99,8 @@ digraph brainstorming {
 - Prefer multiple choice questions when possible, but open-ended is fine too
 - Only one question per message - if a topic needs more exploration, break it into multiple questions
 - Focus on understanding: purpose, constraints, success criteria
+- **Investigate before asking** - if a question is answerable by reading the code, docs, or recent commits, find the answer yourself instead of spending a question on it
+- **Order questions by dependency** - ask the questions others depend on first, then second-level details; let each answer reshape what to ask next
 
 **Exploring approaches:**
 

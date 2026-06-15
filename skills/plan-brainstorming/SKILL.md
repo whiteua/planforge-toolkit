@@ -128,6 +128,7 @@ digraph brainstorming {
 - Explore the current structure before proposing changes. Follow existing patterns.
 - Where existing code has problems that affect the work (e.g., a file that's grown too large, unclear boundaries, tangled responsibilities), include targeted improvements as part of the design - the way a good developer improves code they're working in.
 - Don't propose unrelated refactoring. Stay focused on what serves the current goal.
+- When the user describes how existing code behaves, verify it against the actual code. If the code disagrees, surface the contradiction explicitly instead of designing on a false assumption. (Existing codebases only — greenfield has no code to check.)
 
 ## After the Design
 

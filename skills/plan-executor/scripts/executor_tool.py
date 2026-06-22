@@ -16,7 +16,7 @@ ATTEMPTS_LIMIT = 3
 ROADMAP_COLUMNS = 5
 _ROADMAP_HEADER_RE = re.compile(r"\|\s*(stage|стадия)\s*\|", re.IGNORECASE)
 _TASK_RE = re.compile(
-    r"^#{2,4}\s*(?:Task|Задача)\s+(\S+?):\s*(.+?)\s*$",
+    r"^#{2,4}\s*(?:Task|Step|Phase|Stage|Задача|Шаг|Фаза|Этап)\s+(\S+?)\s*(?:[:\-]|—|\.\s)\s*(.+?)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _SECTION_RE = re.compile(r"^#{1,6}\s*(inputs|outputs|files|входные данные|выходные данные)\s*$", re.IGNORECASE)
@@ -512,12 +512,24 @@ def cmd_parse_tasks(args):
     return parse_tasks(args.plan_path)
 
 
+def _extract_h1(plan_path):
+    """Return the first H1 heading text, or the file stem as fallback."""
+    text = Path(plan_path).read_text(encoding="utf-8")
+    match = re.search(r"^#\s+(.+?)\s*$", text, re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return Path(plan_path).stem
+
+
 def cmd_ledger_init(args):
     detected = detect_input(args.plan_path, force_whole=args.whole)
     if detected["input_type"] == "staged":
         units = parse_roadmap(detected["roadmap"])
     else:
         units = parse_tasks(args.plan_path)
+        if not units.get("units") and args.whole:
+            title = _extract_h1(args.plan_path)
+            units = {"units": [{"id": "whole", "title": title, "weight": "yellow"}]}
     return ledger_init(args.exec_dir, args.plan_path, detected["input_type"], units)
 
 

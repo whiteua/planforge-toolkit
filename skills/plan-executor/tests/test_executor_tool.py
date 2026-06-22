@@ -247,6 +247,145 @@ class TestParseTasks(unittest.TestCase):
         self.assertEqual([u["id"] for u in result["units"]], ["task-1", "task-2.1"])
 
 
+class TestParseTasksExtended(unittest.TestCase):
+    """Tests for extended _TASK_RE keywords and separators (Task 1)."""
+
+    def setUp(self):
+        self.tool = load_tool()
+
+    def _write_plan(self, content):
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8")
+        tmp.write(content)
+        tmp.close()
+        return tmp.name
+
+    def test_step_keyword_colon(self):
+        path = self._write_plan("## Step 1: Alpha\n\n## Step 2: Beta\n")
+        result = self.tool.parse_tasks(path)
+        # IDs are always prefixed with 'task-'; keyword is stripped
+        self.assertEqual([u["id"] for u in result["units"]], ["task-1", "task-2"])
+
+    def test_phase_keyword_dash(self):
+        path = self._write_plan("## Phase 1 - Setup\n\n## Phase 2 - Teardown\n")
+        result = self.tool.parse_tasks(path)
+        self.assertEqual([u["id"] for u in result["units"]], ["task-1", "task-2"])
+
+    def test_stage_keyword_emdash(self):
+        path = self._write_plan("## Stage A — Init\n\n## Stage B — Deploy\n")
+        result = self.tool.parse_tasks(path)
+        self.assertEqual([u["id"] for u in result["units"]], ["task-A", "task-B"])
+
+    def test_dot_separator_with_space(self):
+        path = self._write_plan("## Task 1. First\n\n## Task 2. Second\n")
+        result = self.tool.parse_tasks(path)
+        self.assertEqual([u["id"] for u in result["units"]], ["task-1", "task-2"])
+
+    def test_russian_shag_keyword(self):
+        path = self._write_plan("## Шаг 1: Первый\n\n## Шаг 2: Второй\n")
+        result = self.tool.parse_tasks(path)
+        self.assertEqual([u["id"] for u in result["units"]], ["task-1", "task-2"])
+
+    def test_case_insensitive_keywords(self):
+        path = self._write_plan("## TASK 1: Upper\n\n## task 2: lower\n")
+        result = self.tool.parse_tasks(path)
+        self.assertEqual(len(result["units"]), 2)
+
+    def test_dot_id_not_split_by_separator(self):
+        """Dotted IDs like 2.1 must survive with colon separator."""
+        path = self._write_plan("### Task 2.1: Sub-task\n")
+        result = self.tool.parse_tasks(path)
+        self.assertEqual(result["units"][0]["id"], "task-2.1")
+
+
+class TestExtractH1(unittest.TestCase):
+    """Tests for _extract_h1 helper (Task 2)."""
+
+    def setUp(self):
+        self.tool = load_tool()
+
+    def _write_plan(self, content, stem="myplan"):
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                          encoding="utf-8",
+                                          prefix=stem + "_")
+        tmp.write(content)
+        tmp.close()
+        return tmp.name
+
+    def test_returns_h1_title(self):
+        path = self._write_plan("# My Great Plan\n\nSome text\n")
+        result = self.tool._extract_h1(path)
+        self.assertEqual(result, "My Great Plan")
+
+    def test_fallback_to_stem_when_no_h1(self):
+        import os
+        import tempfile as tf
+        tmp = tf.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                    encoding="utf-8")
+        tmp.write("## Task 1: Something\n")
+        tmp.close()
+        result = self.tool._extract_h1(tmp.name)
+        # Should return the file stem (no H1 present)
+        from pathlib import Path
+        self.assertEqual(result, Path(tmp.name).stem)
+
+    def test_ignores_h2_as_h1(self):
+        """H2 headers (##) are NOT H1; _extract_h1 must look only for single-# lines."""
+        path = self._write_plan("## Section Heading\n\nsome text\n")
+        from pathlib import Path
+        result = self.tool._extract_h1(path)
+        # No H1 present; should fall back to file stem
+        self.assertEqual(result, Path(path).stem)
+
+
+class TestWholeFallback(unittest.TestCase):
+    """Tests for single-unit fallback when --whole is set and no tasks found (Task 3)."""
+
+    def setUp(self):
+        self.tool = load_tool()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _plan(self, content, name="plan.md"):
+        p = Path(self.tmp.name) / name
+        p.write_text(content, encoding="utf-8")
+        return str(p)
+
+    def _exec_dir(self):
+        d = Path(self.tmp.name) / "exec"
+        return str(d)
+
+    def test_whole_fallback_uses_h1_as_title(self):
+        """--whole + no task headings → single 'whole' unit with H1 title."""
+        import types
+        plan = self._plan("# My Big Plan\n\nJust prose, no tasks.\n")
+        args = types.SimpleNamespace(plan_path=plan, exec_dir=self._exec_dir(), whole=True)
+
+        result = self.tool.cmd_ledger_init(args)
+        units = result["units"]
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0]["id"], "whole")
+        self.assertEqual(units[0]["title"], "My Big Plan")
+
+    def test_whole_fallback_uses_stem_when_no_h1(self):
+        """--whole + no H1 → title falls back to file stem."""
+        import types
+        plan = self._plan("Just prose.\n", name="my-plan.md")
+        args = types.SimpleNamespace(plan_path=plan, exec_dir=self._exec_dir(), whole=True)
+
+        result = self.tool.cmd_ledger_init(args)
+        self.assertEqual(result["units"][0]["title"], "my-plan")
+
+    def test_structured_plan_not_affected_by_whole_flag(self):
+        """Even with --whole, a plan WITH task headings still parses normally."""
+        import types
+        plan = self._plan("# Plan\n\n## Task 1: First\n\n## Task 2: Second\n")
+        args = types.SimpleNamespace(plan_path=plan, exec_dir=self._exec_dir(), whole=True)
+
+        result = self.tool.cmd_ledger_init(args)
+        self.assertEqual(len(result["units"]), 2)
+        self.assertEqual(result["units"][0]["id"], "task-1")
+
+
 class LedgerTestCase(unittest.TestCase):
     def setUp(self):
         self.tool = load_tool()

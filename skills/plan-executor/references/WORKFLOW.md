@@ -4,7 +4,7 @@
 
 1. Run `detect-input <plan_path>`.
 2. For staged input, run `parse-roadmap <roadmap_path>` and `recommend-parallel <exec_dir>` after ledger init.
-3. For whole input, run `parse-tasks <plan_path>`; if no units are found, stop and follow `INPUT-DETECTION.md`.
+3. For whole input, run `parse-tasks <plan_path>`; if no units are found and `--whole` was set, `ledger-init` automatically creates a single unit `whole` (title from H1 or filename) — continue normally. Without `--whole`, stop and follow `INPUT-DETECTION.md`.
 4. Run `ledger-init <exec_dir> <plan_path>`; the ledger is the only source of truth.
 5. Run `checkpoint-detect <workdir>` before auto execution. Without git, auto rollback is unavailable; use step mode.
 6. The `exec_dir` MUST be located outside the workdir (e.g., sibling to plan files). This guarantees `git add -A` and `git reset --hard` in workdir never touch `state.json`. Never place `.exec/` inside the repository being modified.

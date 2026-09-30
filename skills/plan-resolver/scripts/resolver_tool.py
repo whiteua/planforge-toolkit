@@ -43,6 +43,11 @@ ANCHOR_RE = re.compile(r"[^\s:#]+#L\d+(?:-L?\d+)?", re.IGNORECASE)
 CONFIDENCE_RE = re.compile(r"confidence\s*[:=]\s*(?P<level>high|medium|low)", re.IGNORECASE)
 AMBIGUOUS_RE = re.compile(r"\bambiguous\b", re.IGNORECASE)
 EVIDENCE_ANCHOR_RE = re.compile(r"evidence_anchor\s*[:=]\s*(?P<anchor>\S+)", re.IGNORECASE)
+# Evidence for tasks that leave no code (checkpoints, manual verifications): the command and its result.
+EVIDENCE_PROBE_RE = re.compile(r"evidence_probe\s*[:=]\s*\S", re.IGNORECASE)
+# A task closed on the executor's word (e.g. it needs an external system the audit may not touch).
+EXECUTOR_REPORTED_RE = re.compile(r"verification\s*[:=]\s*executor-reported", re.IGNORECASE)
+PLAN_CODE_FILE_RE = re.compile(r"^\s*[-*]\s*(?:Create|Modify|Delete|Move|Создать|Изменить)\s*:", re.IGNORECASE)
 
 
 def confidence_level(text_blob: str) -> str:
@@ -1000,7 +1005,9 @@ def check_anchor(anchor: str, root: str) -> Optional[str]:
     return None
 
 
-def validate_report(path: str, root: Optional[str] = None) -> Tuple[bool, Dict[str, object]]:
+def validate_report(
+    path: str, root: Optional[str] = None, plan: Optional[str] = None
+) -> Tuple[bool, Dict[str, object]]:
     if not os.path.isfile(path):
         return False, {"valid": False, "path": path, "errors": [f"file not found: {path}"], "warnings": []}
     text = read_text(path)
@@ -1059,15 +1066,39 @@ def validate_report(path: str, root: Optional[str] = None) -> Tuple[bool, Dict[s
     # (a phase line only aggregates when child tasks carry the anchors).
     phases_with_tasks = {task["phase"] for task in tasks}
     gate_tasks = tasks + [phase for phase in phases if phase["phase"] not in phases_with_tasks]
+    code_tasks = set(plan_code_task_ids(read_text(plan))) if plan else set()
+    probe_closed: List[str] = []
     for task in gate_tasks:
         if task["status"] != "✅":
             continue
-        if not ANCHOR_RE.search(str(task["raw_text"])):
-            message = f"task '{task['id']}' with ✅ is missing an evidence anchor (path#Lx-Ly)"
-            if is_final:
-                errors.append(message)
+        raw = str(task["raw_text"])
+        if ANCHOR_RE.search(raw):
+            continue
+        if EVIDENCE_PROBE_RE.search(raw):
+            # A command result proves a checkpoint or a manual verification, but not a task
+            # that was supposed to change code: that one must point at the code.
+            if str(task["id"]) in code_tasks:
+                errors.append(
+                    f"task '{task['id']}' changes code in the plan (Create/Modify): "
+                    "evidence_probe is not enough, add an evidence anchor (path#Lx-Ly)"
+                )
             else:
-                warnings.append(f"[WARNING] {message}")
+                probe_closed.append(str(task["id"]))
+            continue
+        message = f"task '{task['id']}' with ✅ is missing an evidence anchor (path#Lx-Ly) or evidence_probe"
+        if is_final:
+            errors.append(message)
+        else:
+            warnings.append(f"[WARNING] {message}")
+
+    executor_reported = [
+        str(task["id"]) for task in gate_tasks if EXECUTOR_REPORTED_RE.search(str(task["raw_text"]))
+    ]
+    if executor_reported:
+        warnings.append(
+            "[WARNING] closed on the executor's report, not re-verified by this audit: "
+            + ", ".join(executor_reported)
+        )
 
     if root:
         # Anchors are claims about the code: a closed item or an issue must point at real lines.
@@ -1122,6 +1153,8 @@ def validate_report(path: str, root: Optional[str] = None) -> Tuple[bool, Dict[s
             "stage_count": len(stages),
             "issue_count": len(issues),
             "is_final": is_final,
+            "probe_closed": probe_closed,
+            "executor_reported": executor_reported,
         },
     }
     return not errors, result
@@ -1147,7 +1180,10 @@ def cmd_validate_report(args: argparse.Namespace) -> int:
     if root and not os.path.isdir(root):
         print_json({"valid": False, "path": args.report, "errors": [f"root not found: {args.root}"], "warnings": []})
         return 2
-    valid, result = validate_report(args.report, root)
+    if args.plan and not os.path.isfile(args.plan):
+        print_json({"valid": False, "path": args.report, "errors": [f"plan not found: {args.plan}"], "warnings": []})
+        return 2
+    valid, result = validate_report(args.report, root, args.plan)
     print_json(result)
     return 0 if valid else 1
 
@@ -1185,6 +1221,26 @@ def _leading_id(match: "re.Match[str]") -> str:
 
 def normalize_plan_task_id(task_id: str) -> str:
     return task_id.lower()
+
+def plan_code_task_ids(text: str) -> List[str]:
+    """Ids of plan tasks whose Files block creates or modifies code (not test-only, not checkpoints)."""
+    current = ""
+    result: List[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if PLAN_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        task_id, kind = extract_plan_task_id_kind(line)
+        if task_id and kind in ("task-heading", "heading"):
+            current = task_id
+            continue
+        if current and PLAN_CODE_FILE_RE.match(line) and current not in result:
+            result.append(current)
+    return result
+
 
 def extract_plan_task_ids(text: str) -> List[str]:
     found: List[Tuple[str, str]] = []
@@ -1255,6 +1311,9 @@ def cmd_task_census(args: argparse.Namespace) -> int:
         "plan_ids": plan_ids,
         "covered": covered,
         "uncovered": uncovered,
+        # tasks whose Files block creates or modifies code: they need an evidence anchor,
+        # an evidence_probe alone does not close them
+        "code_tasks": plan_code_task_ids(read_text(args.plan)),
         "errors": [] if not uncovered else [f"task-census-uncovered: {', '.join(uncovered)}"],
     }
     print_json(result)
@@ -1550,6 +1609,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate_report_parser = subparsers.add_parser("validate-report")
     validate_report_parser.add_argument("report")
     validate_report_parser.add_argument("--root", help="workspace root; verifies that evidence anchors point at real lines")
+    validate_report_parser.add_argument("--plan", help="master plan; tasks with Create/Modify files cannot be closed by evidence_probe alone")
     validate_report_parser.set_defaults(func=cmd_validate_report)
 
     diff_parser = subparsers.add_parser("snapshot-diff")

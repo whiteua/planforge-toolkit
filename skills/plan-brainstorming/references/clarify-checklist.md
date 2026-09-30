@@ -10,7 +10,9 @@ found becomes one clarifying question at a time; answers fold into the spec.
 2. **Error semantics**: what counts as an error, how each is surfaced, what the caller sees,
    recover vs fail.
 3. **Scope edges**: explicitly in vs out; boundary and limit cases; empty, zero, maximum inputs.
-4. **Integrations**: external dependencies, contracts, formats, versioning, auth.
+4. **Integrations**: external dependencies, contracts, formats, versioning, auth; which
+   environments exist and which of them the user permits for checks (`spec-contract.md`,
+   "Unverified claims").
 5. **Non-functional**: performance, security, data volume, concurrency, only where load-bearing.
 
 ## Scenario stress-test

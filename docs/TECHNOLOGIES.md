@@ -100,6 +100,8 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Destructive operation confirmation | Terraform plan output with confirmation prompt (2014) | Irreversible actions require explicit approval |
 | Retry-first ordering with stagnation stop | Circuit breaker (Nygard, *Release It!*, 2007); bounded retry with backoff | A failed unit is retried before anything else runs; 3 attempts or the same error signature twice stops the run |
 | Drift detection on resume | Terraform state refresh / plan drift (HashiCorp); lockfile hashes (npm, Cargo) | The ledger stores the plan's SHA-256; a changed plan stops the run until the engineer decides |
+| Confirmation for external units | Change approval for production access (ITIL change enablement); least privilege | A unit marked `External` runs only after the engineer confirms it for the named environment |
+| Risk-scaled gate per unit | Risk-based testing (ISTQB) | Checkpoint, documentation-only and test-only tasks get a lighter gate than the plan tier |
 | Stop report on failure | CI/CD failure notifications (Jenkins, GitHub Actions, GitLab CI) | Structured report explains why execution halted |
 
 ---
@@ -115,6 +117,8 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Formal sign-off | FAT — Factory Acceptance Test; UAT — User Acceptance Testing (ISTQB); DO-178C certification (RTCA, 2012) | Final report serves as a verifiable completion artifact |
 | Error taxonomy | CWE (MITRE, ~2006); OWASP Top 10 (~2003); IEEE 1044 (1993) | Standardised classification of findings |
 | Report co-located with plan | Financial audit report attached to ledger (audit standard) | Report file lives next to the audited plan |
+| Probe evidence for verification tasks | Test evidence in acceptance records (FAT/UAT) | A checkpoint or manual verification is closed by its command and result (`evidence_probe`), never by an arbitrary code reference; code tasks still need an anchor |
+| Executor-reported marker | Reliance on the work of others (ISA 600, audit standard) | Tasks the audit cannot re-verify are closed on the executor's record and listed separately |
 | Verified evidence anchors | Citation checking; link validation | `validate-report --root` checks that every `path#Lx-Ly` on a closed task or in issue evidence points at existing lines |
 | Authoritative fix diff | Reproducible builds; before/after snapshots | The fix phase is bracketed by workspace fingerprints and `snapshot-diff` lists the changed files, which the Fix Log must account for |
 

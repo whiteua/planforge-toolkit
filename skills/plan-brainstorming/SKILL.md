@@ -63,7 +63,7 @@ item for the whole checklist is enough.
 5. **Propose approaches** — Standard/Deep: 2-3 with trade-offs, lead with your recommendation and why. Quick: one approach, unless a real fork exists.
 6. **Present the design** — in sections scaled to the tier; get approval after each section.
 7. **Close underspecified areas** — ambiguity sweep (`references/clarify-checklist.md`) until `Open Questions` can be `(none)`. If an answer changes the approved design, re-present the affected section and get approval again.
-8. **Write the spec** — see Writing the Spec. Run `spec-check` (and `findings-coverage` in findings mode) until both exit `0`.
+8. **Write the spec** — first tell the user in one line what happens next: "Design approved. Writing the spec and running the checks; project code is not changed. I will come back with the file for your approval." Then see Writing the Spec. Run `spec-check` (and `findings-coverage` in findings mode) until both exit `0`.
 9. **Self-review** — see below.
 10. **User review** — ask the user to review the spec file; on approval, invoke `plan-writing`.
 
@@ -74,6 +74,7 @@ The terminal state is invoking `plan-writing`. Do not invoke any other skill aft
 - Assess scope first. If the request covers several independent subsystems (e.g. "a platform with chat, file storage, billing, and analytics"), say so immediately and help decompose it: the pieces, how they relate, the build order. Then brainstorm the first sub-project. Each sub-project gets its own spec → plan → implementation cycle.
 - **Investigate before asking.** If the code, docs, or commits answer a question, find the answer yourself.
 - **Verify claims about existing code.** When the user describes how code behaves, check it. If the code disagrees, surface the contradiction before designing on it. What you verified goes into the spec as `path:line` citations in Architecture and Components, so `plan-writing` does not rediscover it.
+- **External systems need permission.** Investigation means reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action. Without permission the claim stays unverified: design on the cautious reading and record how it will be verified (`references/spec-contract.md`, "Unverified claims").
 - Follow existing patterns. Include targeted improvements where existing code blocks the work (a file doing too much, tangled boundaries), but no unrelated refactoring.
 
 ## Asking Questions
@@ -113,7 +114,7 @@ The terminal state is invoking `plan-writing`. Do not invoke any other skill aft
 3. **Scope** — one implementation plan's worth, or does it need decomposition?
 4. **Ambiguity** — a requirement with two readings gets one, made explicit.
 
-Fix issues inline. On the Deep tier, if the host supports subagents, also dispatch a reviewer with `spec-document-reviewer-prompt.md` and fix what it reports.
+Fix issues inline. On the Deep tier, if the host supports subagents, also dispatch a reviewer with `spec-document-reviewer-prompt.md`. Tell the user what it found. A finding that changes the approved design is shown to the user before the spec is edited (the step-7 rule); other findings are fixed inline. A finding that can only be settled by an external system follows the permission rule above.
 
 ## User Review Gate
 

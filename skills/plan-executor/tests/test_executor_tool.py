@@ -627,6 +627,34 @@ class CheckpointTestCase(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("git"), "git required")
+class TestRunDiff(CheckpointTestCase):
+    def test_diff_between_baseline_and_last_unit_snapshot(self):
+        import types
+        self.init_repo()
+        (self.workdir / "plan.md").write_text("## Task 1: A\n\n## Task 2: B\n", encoding="utf-8")
+        (self.workdir / "app.py").write_text("x = 1\n", encoding="utf-8")
+        self.run_git("add", ".")
+        self.run_git("commit", "-m", "init")
+        (self.workdir / "dirty.txt").write_text("pre-existing uncommitted work\n", encoding="utf-8")
+        exec_dir = str(Path(self.tmp.name) / "exec")
+        args = types.SimpleNamespace(plan_path=str(self.workdir / "plan.md"), exec_dir=exec_dir, whole=False,
+                                     workdir=str(self.workdir), allow_dirty=True, accept_drift=False, allow_temp=False)
+        self.tool.cmd_ledger_init(args)
+        with self.assertRaises(ValueError) as ctx:
+            self.tool.run_diff(exec_dir)
+        self.assertIn("run-diff-unavailable", str(ctx.exception))
+        self.tool.unit_begin(exec_dir)
+        (self.workdir / "app.py").write_text("x = 2\n", encoding="utf-8")
+        (self.workdir / "new.py").write_text("y = 1\n", encoding="utf-8")
+        self.tool.unit_finish(exec_dir, "task-1", "pass")
+        diff = self.tool.run_diff(exec_dir)
+        # Only what the run changed: the pre-existing dirty file is in the baseline already.
+        self.assertEqual(sorted(f["path"] for f in diff["files"]), ["app.py", "new.py"])
+        self.assertIn("git diff ", diff["command"])
+        self.assertIn("2 files changed", diff["stat"])
+
+
+@unittest.skipUnless(shutil.which("git"), "git required")
 class TestCheckpointDetect(CheckpointTestCase):
     def test_detects_git_repo_and_plain_dir(self):
         self.assertEqual(self.tool.checkpoint_detect(str(self.workdir)), {"vcs": "none", "dirty": None})
@@ -913,6 +941,65 @@ class TestInputErrors(PlanTestCase):
         self.assertEqual(self.tool.detect_lang("")["lang"], "en")
         self.assertEqual(self.tool.detect_lang("Plan text only")["lang"], "en")
         self.assertEqual(self.tool.detect_lang("План на русском языке with some code")["lang"], "ru")
+
+
+class TestFix02(PlanTestCase):
+    PLAN = (
+        "# P\n\n**Tier:** Deep\n\n"
+        "### Task 1: Code\n\n**Files:**\n- Modify: `src/a.py`\n- Test: `tests/test_a.py`\n\n- [ ] **Step 1:** x\n\n"
+        "### Task 2: Tests only\n\n**Files:**\n- Test: `tests/test_b.py`\n\n- [ ] **Step 1:** x\n\n"
+        "### Task 3: Docs\n\n**Files:**\n- Modify: `CLAUDE.md:12`\n- Modify: `docs/guide/intro.md`\n\n- [ ] **Step 1:** x\n\n"
+        "### Task 4: Checkpoint — smoke\n\n**External:** `dev_db` — smoke test (allowed by the user 2026-09-30)\n\n"
+        "- [ ] **Step 1:** run\n\n**Done when:** ok\n"
+    )
+
+    def test_weights_lowered_for_checkpoint_docs_and_tests(self):
+        units = self.tool.parse_tasks(self.plan(self.PLAN))["units"]
+        self.assertEqual([u["weight"] for u in units], ["red", "yellow", "green", "green"])
+
+    def test_unit_begin_reports_external_lines(self):
+        self.init(self.plan(self.PLAN))
+        for unit_id in ("task-1", "task-2", "task-3"):
+            begun = self.tool.unit_begin(self.exec_dir)
+            self.assertEqual(begun["external"], [])
+            self.tool.unit_finish(self.exec_dir, unit_id, "pass")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(len(begun["external"]), 1)
+        self.assertIn("dev_db", begun["external"][0])
+
+    def test_note_is_stored_and_rendered(self):
+        self.init(self.plan(self.PLAN))
+        self.tool.unit_begin(self.exec_dir)
+        done = self.tool.unit_finish(self.exec_dir, "task-1", "pass", note="also fixed  the offset alias\nbypass")
+        self.assertEqual(done["unit"]["notes"], ["also fixed the offset alias bypass"])
+        progress = Path(done["progress"]).read_text(encoding="utf-8")
+        self.assertIn("- task-1: also fixed the offset alias bypass", progress)
+        self.assertEqual(self.tool.validate_ledger(self.tool._load(self.exec_dir)), [])
+
+    def test_auto_exec_dir_and_reported_path(self):
+        import types
+        repo = self.root / "repo"
+        repo.mkdir()
+        plan = repo / "plan01-impl.md"
+        plan.write_text("## Task 1: A\n", encoding="utf-8")
+        args = types.SimpleNamespace(plan_path=str(plan), exec_dir="auto", whole=False, workdir=None,
+                                     allow_dirty=False, accept_drift=False, allow_temp=False)
+        with self.assertRaises(ValueError) as ctx:
+            self.tool.cmd_ledger_init(args)
+        self.assertIn("exec-dir-auto-needs-workdir", str(ctx.exception))
+        self.assertEqual(Path(self.tool.default_exec_dir(str(repo), str(plan))),
+                         (self.root / ".exec" / "repo-plan01-impl").resolve())
+        led = self.init(self.plan("## Task 1: A\n"))
+        self.assertEqual(Path(led["exec_dir"]), Path(self.exec_dir).resolve())
+
+    def test_temp_exec_dir_rejected_for_a_real_workdir(self):
+        real_workdir = str(Path(__file__).resolve().parents[1])
+        with self.assertRaises(ValueError) as ctx:
+            self.tool._check_exec_dir(self.exec_dir, real_workdir)
+        self.assertIn("exec-dir-ephemeral", str(ctx.exception))
+        self.tool._check_exec_dir(self.exec_dir, real_workdir, allow_temp=True)
+        with tempfile.TemporaryDirectory() as other:  # temp workdir (tests, throwaway clones): allowed
+            self.tool._check_exec_dir(self.exec_dir, other)
 
 
 class TestStagedDrift(PlanTestCase):

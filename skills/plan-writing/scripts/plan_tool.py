@@ -49,6 +49,15 @@ PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 CHECKPOINT_TITLE_RE = re.compile(r"^Checkpoint\b", re.IGNORECASE)
+# External systems a plan may touch. Header block:
+#   **Environments:**
+#   - `dev_db` (test) — "user's permission, quoted verbatim" (2026-09-30)
+# Task line:  **External:** `dev_db` — what the task does there
+ENVIRONMENTS_RE = re.compile(r"^\*\*Environments:\*\*\s*$")
+ENV_ENTRY_RE = re.compile(r"^\s*[-*]\s+`(?P<name>[^`]+)`(?P<rest>.*)$")
+ENV_QUOTE_RE = re.compile(r"\"[^\"]+\"|«[^»]+»|“[^”]+”")
+EXTERNAL_RE = re.compile(r"^\*\*External:\*\*\s*(?P<rest>.*)$")
+BACKTICKED_RE = re.compile(r"`([^`]+)`")
 MAX_CODE_LINES = 100
 
 
@@ -116,6 +125,31 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
         match = None if fenced else HEADER_FIELD_RE.match(line)
         if match:
             header.setdefault(match.group("name"), match.group("value"))
+    # Environments block of the header: every entry names an environment and quotes the
+    # user's permission. An environment without a quote is not permitted.
+    environments: List[str] = []
+    in_env_block = False
+    for number, line, fenced in lines:
+        if first_task_line is not None and number >= first_task_line:
+            break
+        if fenced:
+            continue
+        if ENVIRONMENTS_RE.match(line):
+            in_env_block = True
+            continue
+        if not in_env_block:
+            continue
+        entry = ENV_ENTRY_RE.match(line)
+        if entry:
+            environments.append(entry.group("name"))
+            if not ENV_QUOTE_RE.search(entry.group("rest")):
+                errors.append(
+                    f"line {number}: environment `{entry.group('name')}` has no quoted user permission "
+                    "(quote the user's words verbatim)"
+                )
+        elif line.strip() and not line.startswith(" "):
+            in_env_block = False
+
     if not any(not fenced and line.startswith("# ") for _, line, fenced in lines):
         errors.append("missing plan title ('# <Feature> Implementation Plan')")
     spec = header.get("Spec") or None
@@ -206,6 +240,27 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
             if not has_post:
                 errors.append(f"{label}: missing '**Postconditions:**' ({tier} tier)")
 
+        # External systems: a task that names a permitted environment anywhere in its body
+        # (commands included) must declare it, and may declare only permitted environments.
+        declared: List[str] = []
+        for n, line, fenced in body:
+            external = None if fenced else EXTERNAL_RE.match(line)
+            if external:
+                names = BACKTICKED_RE.findall(external.group("rest"))
+                if not names:
+                    errors.append(f"line {n}: '**External:**' must name the environment in backticks")
+                for name in names[:1]:
+                    declared.append(name)
+                    if name not in environments:
+                        errors.append(
+                            f"line {n}: environment `{name}` is not listed under '**Environments:**' in the plan header"
+                        )
+        task["external"] = declared
+        body_text = "\n".join(line for _, line, _ in body)
+        for name in environments:
+            if name not in declared and re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", body_text):
+                errors.append(f"{label}: uses environment `{name}` without a '**External:** `{name}` — …' line")
+
         for n, line, fenced in body:
             if fenced:
                 continue
@@ -263,7 +318,8 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
         "ok": not errors,
         "spec": spec,
         "tier": tier,
-        "tasks": [{k: task[k] for k in ("id", "title", "checkpoint")} for task in tasks],
+        "environments": environments,
+        "tasks": [{k: task.get(k, []) for k in ("id", "title", "checkpoint", "external")} for task in tasks],
         "errors": errors,
         "warnings": warnings,
     }

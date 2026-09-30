@@ -125,6 +125,13 @@
                 ]
               }
             }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Deviations from the unit's text agreed with the engineer (unit-finish --note)"
           }
         }
       },

@@ -197,6 +197,9 @@ With `verify`, the skill runs `plan-iterative-revision` once over the roadmap (e
 - Nothing is committed to your branch: snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`; the final commit is yours.
 - Destructive operations (restore) require explicit engineer confirmation.
 - A gate cannot pass silently when checks are absent.
+- A task marked `**External:** <environment>` runs only after you confirm it.
+
+The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent tells you the path at the start. At the end it shows what the run changed (`run-diff`, separate from work that was uncommitted before) and writes defects it noticed but did not fix to `<plan>-followups.json`, which `plan-brainstorming` accepts as input.
 
 **Prerequisites:** Python ≥ 3.8 in PATH.
 
@@ -506,6 +509,10 @@ done
   → plan01-impl-a-review-1.md, plan01-impl-a-completion.md, plan01-impl-b-review-1.md, …
   → one summary: worst part result wins
 ```
+
+### External systems
+
+No skill reaches a database, API or remote service without your explicit permission for a named environment. The permission is not widened to other environments, and an existing project script aimed at production is not permission. A plan lists the permitted environments in its header with your words quoted, marks the tasks that use them with `**External:**`, and the executor asks before each of them. The audits flag a step that ran somewhere it was not permitted, and mark tasks they could not re-verify as closed on the executor's report.
 
 ### Version control
 

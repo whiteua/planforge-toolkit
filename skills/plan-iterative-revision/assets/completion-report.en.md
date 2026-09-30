@@ -1,7 +1,8 @@
 # Revision Cycle Completion Report
 
 **Plan**: {{basename}}.md
-**Iterations completed**: {{iterations}}
+**Audits**: {{audits}}
+**Reviews written**: {{iterations}}
 **Final Plan SHA-256**: {{final_plan_sha256}}
 **Finished at**: {{finished_at_utc}}
 

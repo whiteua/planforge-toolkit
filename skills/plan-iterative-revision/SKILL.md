@@ -96,6 +96,7 @@ loop:
         (e.g. the OS temp dir), or piped on stdin with --issues -
     R = TOOL record PLAN --run-start B.run_start --max MAX --stop-policy S --mode MODE
                     --interaction I --lang B.lang --issues <json-file>
+    if R.warnings: fix the issues JSON next time (unescaped code quotes); mention them in the summary
     if R.action == "ask_limit":  ask "MAX review passes done, N issues still open. Continue?"
                                  options +3 / +5 / stop.
                                  +n → MAX += n and re-run the same record command;

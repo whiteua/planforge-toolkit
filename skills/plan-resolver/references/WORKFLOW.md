@@ -23,7 +23,8 @@ the invariants below hold for every AUDIT pass.
 5. One AUDIT pass = one report. Code fixes belong to FIX, never to AUDIT.
 6. The report schema is [REPORT-FORMAT.md](REPORT-FORMAT.md); the language is `bootstrap.language`.
 7. `task-census` must pass before hand-off: an uncovered task (exit 1) blocks the report.
-8. `validate-report --root` must pass: every evidence anchor points at existing lines.
+8. `validate-report --root --plan` must pass: every evidence anchor points at existing lines, and
+   only tasks without code files are closed by a command result (`evidence_probe`).
 
 ## Command sequence
 
@@ -34,7 +35,7 @@ fingerprint-workspace <workspace-root> <start-json>
 # audit pass (AUDIT.md): first | subsequent
 # write NEXT_REPORT
 task-census <plan> <NEXT_REPORT>
-validate-report <NEXT_REPORT> --root <workspace-root>
+validate-report <NEXT_REPORT> --root <workspace-root> --plan <plan>
 fingerprint-workspace <workspace-root> <current-json> --base <start-json>
 assert-readonly <start-json> <current-json> <NEXT_REPORT>
 ```
@@ -99,7 +100,7 @@ fingerprint-workspace <root> <out-json> [--base <prev-json>]
 snapshot-diff <before-json> <after-json>
 assert-readonly <start-json> <current-json> <allowed-path>
 parse-report <report.md>
-validate-report <report.md> [--root <workspace-root>]
+validate-report <report.md> [--root <workspace-root>] [--plan <plan>]
 task-census <plan> <report>
 discover <workspace-root> [plan]
 open-issues <report>

@@ -335,6 +335,59 @@ class AnchorVerificationTests(unittest.TestCase):
             self.assertTrue(any("task '1' with ✅ is missing an evidence anchor" in e for e in data["errors"]), data)
 
 
+PLAN_WITH_CHECKPOINT = (
+    "### Task 1: Code\n\n**Files:**\n- Modify: `src/app.py:1-3`\n- Test: `tests/test_app.py`\n\n"
+    "### Task 2: Checkpoint — offline suites\n\n- [ ] **Step 1:** Run: `npm test`\n\n**Done when:** green\n\n"
+    "### Task 3: Tests only\n\n**Files:**\n- Test: `tests/test_more.py`\n"
+)
+
+
+class EvidenceProbeTests(unittest.TestCase):
+    def _report(self, tmp: str, stages: str) -> Path:
+        root = Path(tmp)
+        write(root / "main-plan.md", PLAN_WITH_CHECKPOINT)
+        report = root / "main-plan-report-1-final.md"
+        write(report, valid_report(final=True).replace("- ✅ 1. Подготовка evidence_anchor: src/app.py#L1-L3", stages))
+        return report
+
+    def test_census_reports_code_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self._report(tmp, "- ✅ 1. a\n- ✅ 2. b\n- ✅ 3. c")
+            data = read_json(run_tool("task-census", str(Path(tmp) / "main-plan.md"), str(report)))
+            self.assertEqual(data["code_tasks"], ["1"])
+
+    def test_probe_closes_a_checkpoint_but_not_a_code_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = str(Path(tmp) / "main-plan.md")
+            good = self._report(
+                tmp,
+                "- ✅ 1. Code evidence_anchor: src/app.py#L1-L3\n"
+                "- ✅ 2. Checkpoint\n  - evidence_probe: npm test → exit 0\n"
+                "- ✅ 3. Tests only evidence_probe: node dist/test-more.js → exit 0",
+            )
+            data = read_json(run_tool("validate-report", str(good), "--plan", plan))
+            self.assertTrue(data["valid"], data)
+            self.assertEqual(data["summary"]["probe_closed"], ["2", "3"])
+
+            bad = self._report(tmp, "- ✅ 1. Code evidence_probe: npm test → exit 0\n- ✅ 2. x evidence_probe: a → 0\n- ✅ 3. y evidence_probe: a → 0")
+            data = read_json(run_tool("validate-report", str(bad), "--plan", plan))
+            self.assertFalse(data["valid"])
+            self.assertTrue(any("task '1' changes code in the plan" in e for e in data["errors"]), data)
+
+    def test_executor_reported_is_listed_as_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self._report(
+                tmp,
+                "- ✅ 1. Code evidence_anchor: src/app.py#L1-L3\n"
+                "- ✅ 2. Smoke on the database evidence_probe: npm run smoke → exit 0 verification: executor-reported\n"
+                "- ✅ 3. c evidence_probe: a → 0",
+            )
+            data = read_json(run_tool("validate-report", str(report)))
+            self.assertTrue(data["valid"], data)
+            self.assertEqual(data["summary"]["executor_reported"], ["2"])
+            self.assertTrue(any("not re-verified by this audit: 2" in w for w in data["warnings"]), data)
+
+
 class ValidateQualityGateTests(unittest.TestCase):
     def _ambiguous_report(self, n: int, anchor: str, prev_name: str, prev_sha: str) -> str:
         text = valid_report(final=False).replace(

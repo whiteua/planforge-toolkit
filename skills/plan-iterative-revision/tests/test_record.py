@@ -90,7 +90,15 @@ class RecordGates(RecordBase):
         self.assertEqual(out["final"]["remaining_issues"], 0)
         completion = Path(out["completion_path"]).read_text(encoding="utf-8")
         self.assertIn("- demo-review-1.md", completion)
+        self.assertIn("**Audits**: 2", completion)
+        self.assertIn("**Reviews written**: 1", completion)
         self.assertNotIn("{{", completion)
+
+    def test_unescaped_newline_in_code_quote_warns(self):
+        good = self.ok([issue('Add `process.exit(0)` after console.log("\\nDone\\n");')])
+        self.assertEqual(good["warnings"], [])
+        bad = self.ok([issue('Add exit after console.log("\nDone\n"); in the test')], run_start=2)
+        self.assertTrue(any("unbalanced quote" in w for w in bad["warnings"]), bad["warnings"])
 
     def test_run_start_ignores_previous_runs(self):
         self.ok([issue("Fix A")])

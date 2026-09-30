@@ -41,6 +41,10 @@ _HEAVY_KEYWORDS_RE = re.compile(
     re.IGNORECASE,
 )
 _STATUS_EMOJI = {"pending": "⏳", "running": "🔄", "done": "✅", "failed": "❌"}
+_WEIGHT_ORDER = ["green", "yellow", "red"]
+_CHECKPOINT_TITLE_RE = re.compile(r"^checkpoint\b", re.IGNORECASE)
+_DOC_PATH_RE = re.compile(r"(^|/)docs?/|\.(md|mdx|rst|txt|adoc)$", re.IGNORECASE)
+_EXTERNAL_RE = re.compile(r"^\*\*External:\*\*\s*(.+?)\s*$", re.MULTILINE)
 _REF_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 _SNAPSHOT_ENV = {
     "GIT_AUTHOR_NAME": "plan-executor",
@@ -262,6 +266,23 @@ def _plan_weight(text):
     return _TIER_WEIGHTS.get(match.group(1).lower(), "yellow") if match else "yellow"
 
 
+def _task_weight(plan_weight, title, section_text):
+    """Plan tier weight, lowered for units that do not need the expensive gate.
+
+    Checkpoint tasks and documentation-only tasks are green (their gate is the command or a
+    read-through); tasks that touch only test files go one step down."""
+    if _CHECKPOINT_TITLE_RE.match(title or ""):
+        return "green"
+    files = [entry for entry in extract_files(section_text) if entry["action"] in ("create", "modify", "test", "delete", "move")]
+    if not files:
+        return plan_weight
+    if all(_DOC_PATH_RE.search(entry["path"]) for entry in files):
+        return "green"
+    if all(entry["action"] == "test" for entry in files):
+        return _WEIGHT_ORDER[max(0, _WEIGHT_ORDER.index(plan_weight) - 1)]
+    return plan_weight
+
+
 def parse_tasks(plan_path):
     """Extract execution units from a whole plan.
 
@@ -298,7 +319,7 @@ def parse_tasks(plan_path):
             {
                 "id": unit_id,
                 "title": title,
-                "weight": weight,
+                "weight": _task_weight(weight, title, "\n".join(lines[index:end])) if has_tasks else weight,
                 "depends": [units[-1]["id"]] if units else [],
                 "parallel_group": group if has_tasks else None,
                 "source": {"path": str(Path(plan_path).resolve()), "line_start": index + 1, "line_end": end},
@@ -327,6 +348,7 @@ def _full_unit(unit):
         "previous_error": None,
         "checkpoint_id": None,
         "source": unit.get("source"),
+        "notes": [],
     }
 
 
@@ -722,6 +744,10 @@ def render_progress(exec_dir):
         status_text = f"{_STATUS_EMOJI.get(status, '')} {status}".strip()
         last_error = " ".join(str(unit.get("last_error") or "").split()).replace("|", "\\|")
         lines.append(f"| {unit['id']} | {status_text} | {unit['attempts']} | {unit['weight']} | {last_error} |")
+    noted = [(unit["id"], note) for unit in led["units"] for note in unit.get("notes") or []]
+    if noted:
+        lines += ["", "## Notes (deviations agreed with the engineer)", ""]
+        lines += [f"- {unit_id}: {' '.join(str(note).split())}" for unit_id, note in noted]
     path = Path(exec_dir).resolve() / "progress.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"path": str(path)}
@@ -751,7 +777,23 @@ def _inside(path, root):
         return False
 
 
-def _check_exec_dir(exec_dir, workdir):
+def _is_temp(path):
+    return _inside(os.path.realpath(path), os.path.realpath(tempfile.gettempdir()))
+
+
+def default_exec_dir(workdir, plan_path):
+    """<repo parent>/.exec/<repo>-<plan base>: outside the repository, stable across sessions."""
+    repo = Path(workdir).resolve()
+    return str(repo.parent / ".exec" / f"{repo.name}-{Path(plan_path).stem}")
+
+
+def _check_exec_dir(exec_dir, workdir, allow_temp=False):
+    # A ledger in the OS temp dir disappears with the session: the run cannot be resumed or
+    # audited. A temp workdir (tests, throwaway clones) may keep its ledger in temp.
+    if _is_temp(exec_dir) and not _is_temp(workdir) and not allow_temp:
+        raise ToolError(
+            f"exec-dir-ephemeral: {exec_dir} is inside the OS temp dir; use 'auto' "
+            f"({default_exec_dir(workdir, 'plan')[:-5]}-<plan>) or pass --allow-temp", 2)
     if not _inside(exec_dir, workdir):
         return
     probe = os.path.join(os.path.abspath(exec_dir), "state.json")
@@ -777,6 +819,9 @@ def unit_begin(exec_dir):
         "strategy": strategy,
         "text": text or None,
         "files": extract_files(text),
+        # `**External:** <environment> — ...` lines: the unit touches an external system and
+        # needs the engineer's confirmation before it runs (GATE.md).
+        "external": _EXTERNAL_RE.findall(text),
     }
 
 
@@ -790,7 +835,44 @@ def _restore_target(led, unit_id):
     return target
 
 
-def unit_finish(exec_dir, unit_id, outcome, error=None):
+def _add_note(exec_dir, unit_id, note):
+    led = _load(exec_dir)
+    unit = _find_unit(led, unit_id)
+    unit.setdefault("notes", []).append(" ".join(str(note).split()))
+    _save(exec_dir, led)
+    return unit
+
+
+def run_diff(exec_dir):
+    """What this run changed: baseline snapshot vs the last done unit's snapshot."""
+    led = _load(exec_dir)
+    workdir = led.get("workdir")
+    baseline = led.get("baseline_checkpoint")
+    last = None
+    for unit in led["units"]:
+        if unit["status"] == "done" and unit.get("checkpoint_id"):
+            last = unit["checkpoint_id"]
+    if not workdir or not baseline or not last:
+        raise ToolError("run-diff-unavailable: the run has no baseline or no finished unit snapshot", 1)
+
+    def git(*args):
+        result = subprocess.run(["git", "-c", "core.quotepath=off", *args], cwd=workdir, capture_output=True,
+                                text=True, encoding="utf-8", errors="replace", check=False)
+        if result.returncode != 0:
+            raise ToolError(f"run-diff-failed: {result.stderr.strip()}", 2)
+        return result.stdout
+
+    files = [line.split("\t", 1) for line in git("diff", "--name-status", baseline, last).splitlines() if "\t" in line]
+    return {
+        "baseline": baseline,
+        "last": last,
+        "files": [{"status": status, "path": path} for status, path in files],
+        "stat": git("diff", "--stat", baseline, last).strip(),
+        "command": f"git diff {baseline} {last}",
+    }
+
+
+def unit_finish(exec_dir, unit_id, outcome, error=None, note=None):
     led = _load(exec_dir)
     workdir = led.get("workdir")
     if outcome == "pass":
@@ -802,6 +884,8 @@ def unit_finish(exec_dir, unit_id, outcome, error=None):
                 outcome, error = "fail", f"checkpoint-failed: {exc}"
         if outcome == "pass":
             unit = ledger_mark(exec_dir, unit_id, "done", checkpoint=checkpoint)
+            if note:
+                unit = _add_note(exec_dir, unit_id, note)
             progress = render_progress(exec_dir)
             return {"status": "done", "unit": unit, "checkpoint_id": checkpoint, "progress": progress["path"]}
     unit = ledger_mark(exec_dir, unit_id, "failed", error=error or "gate failed")
@@ -878,9 +962,13 @@ def cmd_ledger_init(args):
             units = {"units": [{"id": "whole", "title": title, "weight": "yellow",
                                 "source": {"path": str(Path(args.plan_path).resolve()), "line_start": None, "line_end": None}}]}
     workdir = getattr(args, "workdir", None)
+    if args.exec_dir == "auto":
+        if not workdir:
+            raise ToolError("exec-dir-auto-needs-workdir: pass --workdir <repo> with exec_dir 'auto'", 2)
+        args.exec_dir = default_exec_dir(workdir, args.plan_path)
     fresh = not ledger_path(args.exec_dir).exists()
     if workdir and fresh:
-        _check_exec_dir(args.exec_dir, workdir)
+        _check_exec_dir(args.exec_dir, workdir, allow_temp=getattr(args, "allow_temp", False))
         detected_vcs = checkpoint_detect(workdir)
         if detected_vcs["dirty"] and not getattr(args, "allow_dirty", False):
             raise ToolError("dirty-worktree: uncommitted changes in workdir; ask the engineer (commit/stash or --allow-dirty)", 1)
@@ -890,7 +978,8 @@ def cmd_ledger_init(args):
         led["workdir"] = os.path.abspath(workdir)
         led["baseline_checkpoint"] = checkpoint_create(workdir, "baseline", led["run_id"])["checkpoint_id"]
         _save(args.exec_dir, led)
-    return led
+    # exec_dir is reported, not stored: tell the engineer where the ledger lives.
+    return dict(led, exec_dir=str(Path(args.exec_dir).resolve()))
 
 
 def cmd_ledger_next(args):
@@ -910,7 +999,11 @@ def cmd_unit_begin(args):
 
 
 def cmd_unit_finish(args):
-    return unit_finish(args.exec_dir, args.unit_id, args.outcome, error=args.error)
+    return unit_finish(args.exec_dir, args.unit_id, args.outcome, error=args.error, note=args.note)
+
+
+def cmd_run_diff(args):
+    return run_diff(args.exec_dir)
 
 
 def cmd_checkpoint_detect(args):
@@ -970,6 +1063,8 @@ def _configure_ledger_init(parser):
     parser.add_argument("--workdir", help="project working tree; enables baseline and per-unit snapshots")
     parser.add_argument("--allow-dirty", action="store_true", default=False)
     parser.add_argument("--accept-drift", action="store_true", default=False)
+    parser.add_argument("--allow-temp", action="store_true", default=False,
+                        help="accept an exec_dir inside the OS temp dir (the ledger will not survive the session)")
 
 
 def _configure_ledger_next(parser):
@@ -997,6 +1092,7 @@ def _configure_unit_finish(parser):
     parser.add_argument("unit_id")
     parser.add_argument("outcome", choices=["pass", "fail"])
     parser.add_argument("--error")
+    parser.add_argument("--note", help="deviation from the unit's text agreed with the engineer (pass only)")
 
 
 def _configure_checkpoint_detect(parser):
@@ -1051,6 +1147,7 @@ _register("parse-tasks", cmd_parse_tasks, _configure_parse_tasks)
 _register("recommend-gate", cmd_recommend_gate, _configure_recommend_gate)
 _register("recommend-strategy", cmd_recommend_strategy, _configure_recommend_strategy)
 _register("render-progress", cmd_render_progress, _configure_render_progress)
+_register("run-diff", cmd_run_diff, lambda parser: parser.add_argument("exec_dir"))
 _register("scope-context", cmd_scope_context, _configure_scope_context)
 _register("unit-begin", cmd_unit_begin, _configure_unit_begin)
 _register("unit-finish", cmd_unit_finish, _configure_unit_finish)

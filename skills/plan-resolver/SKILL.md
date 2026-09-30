@@ -71,8 +71,8 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
    `not-applicable`; otherwise the open name.
 6. Write exactly one new report (never overwrite an existing one).
 7. `TOOL task-census <plan> <report>`: exit `1` → add the uncovered tasks to the same report.
-8. `TOOL validate-report <report> --root <workspace-root>`: one rewrite of the same report is
-   allowed to fix it; copy every `[WARNING]` line into the report's validator-warnings section.
+8. `TOOL validate-report <report> --root <workspace-root> --plan <plan>`: one rewrite of the same
+   report is allowed to fix it; copy every `[WARNING]` line into the report's validator-warnings section.
 9. `TOOL fingerprint-workspace <workspace-root> <current-json> --base <start-json>` and
    `TOOL assert-readonly <start-json> <current-json> <report>`. Drift → rewrite the same report
    with the single blocker issue `probe-mutated-workspace`, run only the validator again, stop OPEN.

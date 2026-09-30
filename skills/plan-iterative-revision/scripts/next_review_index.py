@@ -1113,7 +1113,22 @@ def find_issue_by_fingerprint(directory: str, basename: str, fingerprint: str) -
     return None
 
 
-def normalize_input_issues(directory: str, basename: str, raw: object) -> List[Dict[str, str]]:
+def unbalanced_quote_lines(text: str) -> int:
+    """Lines with an odd number of double quotes or backticks: the usual trace of a code quote
+    whose `\\n` was written as `\n` in the JSON and became a real line break."""
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            continue
+        if line.count('"') % 2 == 1 or line.count("`") % 2 == 1:
+            count += 1
+    return count
+
+
+def normalize_input_issues(
+    directory: str, basename: str, raw: object, warnings: Optional[List[str]] = None
+) -> List[Dict[str, str]]:
     if not isinstance(raw, list):
         raise RecordError("'issues' must be a list")
     issues: List[Dict[str, str]] = []
@@ -1149,6 +1164,13 @@ def normalize_input_issues(directory: str, basename: str, raw: object) -> List[D
             errors.append(
                 f"issue #{index}: code_cross_check must start with one of: {', '.join(CODE_CROSS_CHECK_STATUSES)}"
             )
+        if warnings is not None:
+            for key in ("required_fix", "acceptance"):
+                if unbalanced_quote_lines(issue.get(key, "")):
+                    warnings.append(
+                        f"issue #{index}: {key} has a line with an unbalanced quote or backtick; "
+                        "a code quote with an unescaped \\n? In JSON write \\\\n for a literal backslash-n"
+                    )
         issue["severity"] = severity
         issue["category"] = category
         issue["_order"] = str(index)
@@ -1325,8 +1347,8 @@ def render_review(
 
 
 COMPLETION_VERDICT = {
-    "en": "Cycle converged in {k} iterations. All review contracts have been applied to the plan.",
-    "ru": "Цикл сошёлся за {k} итераций. Все контракты ревизий применены к плану.",
+    "en": "Cycle converged: the last audit found no issues. All review contracts have been applied to the plan.",
+    "ru": "Цикл сошёлся: последний аудит не нашёл проблем. Все контракты ревизий применены к плану.",
 }
 
 
@@ -1338,9 +1360,11 @@ def render_completion(lang: str, basename: str, plan: str, reviews: List[str]) -
     values = {
         "basename": basename,
         "iterations": str(len(reviews)),
+        # one audit per review written, plus the final clean audit
+        "audits": str(len(reviews) + 1),
         "final_plan_sha256": sha,
         "finished_at_utc": utc_now(),
-        "verdict": COMPLETION_VERDICT.get(lang, COMPLETION_VERDICT["en"]).format(k=len(reviews)),
+        "verdict": COMPLETION_VERDICT.get(lang, COMPLETION_VERDICT["en"]),
         "list_of_review_files": "\n".join(f"- {name}" for name in reviews),
     }
     for key, value in values.items():
@@ -1425,7 +1449,8 @@ def cmd_record(args: List[str]) -> int:
             payload = {"issues": payload}
         if not isinstance(payload, dict):
             raise RecordError("issues JSON must be an object or a list")
-        issues = normalize_input_issues(directory, basename, payload.get("issues", []))
+        input_warnings: List[str] = []
+        issues = normalize_input_issues(directory, basename, payload.get("issues", []), input_warnings)
     except (OSError, ValueError, RecordError) as exc:
         print_json({"error": str(exc)})
         return 2
@@ -1453,6 +1478,7 @@ def cmd_record(args: List[str]) -> int:
         "review_path": None,
         "completion_path": None,
         "issues": [],
+        "warnings": input_warnings,
     }
 
     if decision.get("write_review"):

@@ -40,9 +40,10 @@ In VS Code Copilot chat, type:
 ## What Happens
 
 ```
-BOOTSTRAP:  ledger-init  → units, ledger, baseline snapshot
-LOOP:       unit-begin   → execute the unit → gate → unit-finish (pass: snapshot + done / fail: retry or stop)
-FINALIZE:   propose plan-resolver, offer to prune snapshots
+BOOTSTRAP:  ledger-init  → units, ledger, baseline snapshot; you are told where the ledger lives
+LOOP:       unit-begin   → (external unit: asks you first) → execute the unit → gate → unit-finish
+                           (pass: snapshot + done / fail: retry or stop)
+FINALIZE:   run-diff (what this run changed), follow-ups file, propose plan-resolver, offer to prune snapshots
 ```
 
 Per unit the agent calls the tool twice and reads only that unit's section and files, not the whole plan.
@@ -52,6 +53,9 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 - A failed unit is retried before anything else runs; later tasks never run on top of a broken one
 - 3 attempts per unit (1 primary + 2 retries); the same error signature twice → immediate STOP
 - A gate cannot pass silently if tests are missing → escalation, not fake success
+- Gate depth follows the plan tier, lowered for checkpoint tasks, documentation-only tasks (light) and test-only tasks (one step down)
+- A task marked `**External:** <environment>` runs only after you confirm it; the executor never runs a step on an environment the plan does not list
+- Work beyond a task's text (a defect the gate found) is done only with your consent and recorded as a note in the ledger
 - Snapshots are stored in hidden git refs `refs/plan-executor/<run>/<unit>`: no commits on your branch; the final commit is yours
 - Rollback (`checkpoint-restore`) restores files to the last good snapshot and removes files created after it — always after your confirmation
 
@@ -70,7 +74,9 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 - `<exec_dir>/state.json` — ledger (source of truth for progress)
 - `<exec_dir>/progress.md` — human-readable progress
 
-`exec_dir` must be **outside the project repository** (for example a sibling directory of the repo) or git-ignored; the tool refuses otherwise.
+- `<plan base>-followups.json` next to the plan — defects noticed but out of scope, in the findings format `plan-brainstorming` accepts (only when there are any)
+
+`exec_dir` defaults to `<repo parent>/.exec/<repo>-<plan>/`: outside the project repository and stable across sessions. A directory inside the repository (unless git-ignored) or inside the OS temp dir is refused.
 
 ## Prerequisites
 
@@ -95,6 +101,7 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 | `dirty-worktree` | Uncommitted changes at start | Commit/stash, or allow them into the baseline |
 | `plan-drift` | Plan edited between sessions | New `exec_dir`, or accept the change |
 | `exec-dir-inside-workdir` | Ledger directory inside the repo | Move `exec_dir` outside or git-ignore it |
+| `exec-dir-ephemeral` | Ledger directory inside the OS temp dir | Use the default (`auto`), or `--allow-temp` for a throwaway run |
 | `exhausted` / `stagnated` | Unit failed 3 times / same error twice | Read the stop-report, fix manually, resume |
 
 ## Pipeline Position

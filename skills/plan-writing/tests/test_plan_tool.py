@@ -153,6 +153,28 @@ class PlanCheckTest(unittest.TestCase):
             warnings = self.check(text, root)["warnings"]
             self.assertFalse(any("docs/new.md" in w for w in warnings), warnings)
 
+    def test_environments_and_external(self):
+        env_block = (
+            '**Environments:**\n'
+            '- `dev_db` (test) — "this database is made for tests" (user, 2026-09-30)\n\n'
+        )
+        with_env = VALID.replace("**Tier:** Standard\n", "**Tier:** Standard\n\n" + env_block, 1)
+        self.assertEqual(self.check(with_env)["errors"], [])
+        self.assertEqual(self.check(with_env)["environments"], ["dev_db"])
+
+        # a task that runs something on the environment must declare it
+        uses = with_env.replace("Expected: PASS\n", "Expected: PASS\n\nRun: `npx env-cmd -e dev_db -- node dist/smoke.js`\n", 1)
+        self.assertError(uses, "uses environment `dev_db` without a '**External:**")
+        declared = uses.replace("**Preconditions:**", "**External:** `dev_db` — smoke test\n\n**Preconditions:**", 1)
+        result = self.check(declared)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["tasks"][0]["external"], ["dev_db"])
+
+        # an environment nobody permitted, and an entry without the user's words
+        self.assertError(declared.replace("**External:** `dev_db`", "**External:** `prod_db`"), "`prod_db` is not listed")
+        self.assertError(with_env.replace(' — "this database is made for tests"', " — test database"),
+                         "has no quoted user permission")
+
     def test_code_size_warning(self):
         big = "\n".join(f"x{i} = {i}" for i in range(120))
         text = VALID.replace('p.add_argument("--verbose", action="store_true")', big)

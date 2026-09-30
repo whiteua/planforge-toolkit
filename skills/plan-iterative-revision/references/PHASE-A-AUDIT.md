@@ -58,7 +58,9 @@ Run `lenses` passes; each one has a focus:
 
 ## Step 3: Code cross-check (mandatory)
 
-A plan that is not checked against the code is fiction. Depth depends on `rigor`:
+A plan that is not checked against the code is fiction. The cross-check means reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action.
+
+Depth depends on `rigor`:
 
 - `grep`: `Grep`/`Glob` for the symbols and paths the plan mentions.
 - `read` (standard): additionally `Read` the definitions you found.
@@ -74,11 +76,18 @@ A plan that is not checked against the code is fiction. Depth depends on `rigor`
 | Env variable or config key | `.env*`, `appsettings*.json`, `config/` |
 | Package or dependency | `package.json`, `*.csproj`, `requirements.txt`, `Cargo.toml` |
 | Migration | the migration file itself |
+| Command in a step (`npm run x`, `make y`) | the project script it runs: which environment it really targets |
 
 Explore prompt for a large module:
 
 > Quick exploration: how is X implemented today? What public API does it expose? Return: public
 > methods with signatures, related DB tables, current behavior in 3-5 bullets. Do not edit anything.
+
+Environments: a step that runs on an environment not listed under `**Environments:**` in the plan
+header, or on production when only a test environment is permitted, is a `blocker` of category
+`ops`, even when the command itself is harmless. A "user decision" stated in the plan without the
+user's quoted words is `major`. Differences from the spec listed under `**Deviations from spec:**`
+are agreed; unlisted ones are issues.
 
 Every checked claim gets one status: `verified`, `not found`, `ambiguous`, `not applicable`.
 `not found` and `ambiguous` usually become issues when the plan depends on the object.
@@ -139,5 +148,10 @@ directory (never inside the repository) or on stdin.
 - The fingerprint is `category` + the first 200 characters of `required_fix` (whitespace
   normalized). `record` computes it; you never do.
 - An empty `issues` list means the plan is clean.
+- Code quoted inside a JSON string needs its backslashes doubled: a literal `\n` in code is
+  `\\n` in JSON, otherwise it becomes a line break and the contract text is corrupted. Safest:
+  build the JSON with a script (`json.dump`) instead of typing it. `record` returns `warnings`
+  when a contract line has an unbalanced quote; fix the input and record again only if the
+  review file was not written (exit code 2), otherwise note it for the next audit.
 
 `record` rejects invalid input with exit code 2 and writes nothing; fix the JSON and call it again.

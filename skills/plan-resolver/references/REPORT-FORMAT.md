@@ -67,6 +67,12 @@ Rules:
   fine). Missing anchor: warning in an open report, error in `-final`. With `--root`, every anchor
   on `✅`/`⚠️` items and in issue `evidence` must point at an existing file and line range;
   otherwise the report is invalid. `evidence: not found` has no anchor and is not checked.
+- A task that leaves no code (a checkpoint, a manual verification) is closed with
+  `evidence_probe: <command> → <exit code or observed result>` instead of an anchor. With `--plan`,
+  a task whose plan `Files` block has `Create:`/`Modify:` cannot be closed by a probe alone.
+- A task the audit could not re-verify (it needs an external system) carries
+  `verification: executor-reported` next to its evidence. The validator lists such tasks in a
+  `[WARNING]` and in `summary.executor_reported`; the human gate names them.
 - `⚠️ ambiguous` always needs an anchor; the same task with the same anchor as in the previous
   report is a `[WARNING] … stuck in ambiguous`.
 - Optional `confidence: high|medium|low`. `low` on a `✅` task or a `fixed` issue: warning in an

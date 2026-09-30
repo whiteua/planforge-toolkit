@@ -41,6 +41,9 @@ Migrations, downtime, access rights, rollback, monitoring, secrets.
 - Where are secrets stored? Can they leak into logs or the plan?
 - Is monitoring and alerting planned for the new functionality?
 - Are feature flags or gradual rollout described?
+- Which steps reach an external system, and on which environment? Is each environment listed in
+  the plan header with the user's quoted permission? Does any step run on production when only
+  a test environment is permitted (check the project script behind the command)?
 
 ## 5. db
 

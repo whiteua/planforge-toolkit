@@ -81,7 +81,7 @@ Code changes stay uncommitted in the working tree for your review.
 
 | Marker | Meaning |
 |---|---|
-| `✅` | implemented as specified (needs an evidence anchor `path#Lx-Ly`) |
+| `✅` | implemented as specified; needs an evidence anchor `path#Lx-Ly`, or for a checkpoint / manual verification an `evidence_probe: <command> → <result>` |
 | `⚠️` | partial, defective, or ambiguous |
 | `⭕️` | missing |
 | `‼️` | deviates from the plan |
@@ -108,6 +108,7 @@ never delegates fixes to other skills.
 | `anchor file not found` / `beyond end of file` | A report cites code that is not there | The audit must cite real lines; fix the report |
 | `task-census-no-units` | The plan has no recognisable tasks | Use a plan with task headings |
 | `probe-mutated-workspace` | Something changed files during the audit | Review the changes; re-run |
+| Warning: closed on the executor's report | A task needs an external system the audit may not touch | Re-verify it yourself on a permitted environment, or accept the executor's recorded result |
 | `auto` stopped: ask-user | Remaining issues need a decision | Answer, update the plan if needed, re-run |
 | `auto` stopped: stop-stalled | A cycle closed nothing | Check the Fix Log; fix manually |
 | `auto` stopped: stop-limit | Issues remain after the limit | Review, then `/plan-resolver next` |

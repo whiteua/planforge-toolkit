@@ -41,6 +41,19 @@ recognised). It is metadata, not a heading. `plan-brainstorming` writes the conf
 `plan-writing` reads it and defaults to Standard when it is missing or unknown
 (`../../plan-writing/references/task-tiers.md`).
 
+## Unverified claims
+
+A claim about the behaviour of an external system (database, API, service) is either verified
+or designed around:
+
+- **Verified**: the user allowed the check and named the environment; the spec records where and
+  when ("checked 2026-09-30 on SQL Server 16.0, test database `X`").
+- **Not verified**: the design uses the cautious reading, and `## Testing Strategy` carries a
+  line "Verified during implementation: <claim> — <which test, on which permitted environment>".
+
+Either way `## Open Questions` stays empty: this is a decision with a planned check, not an
+open question. Environments the user permitted are named in the spec with the user's words.
+
 ## Artifacts and naming
 
 | Artifact | Path | Owner |

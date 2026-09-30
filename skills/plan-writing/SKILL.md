@@ -52,7 +52,7 @@ If the spec covers several independent subsystems, STOP and propose one plan per
 
 Before defining tasks, list the files to create or modify and each file's single responsibility. Follow existing patterns. Split a file you touch only when it has grown unwieldy. Files that change together live together.
 
-**Read before you modify.** For every `Modify:` target, open the file first and record one line in the task's `Files` block: *current state / what changes / what must be preserved*. This makes `path:123-145` line ranges real instead of guessed.
+**Read before you modify.** For every `Modify:` target, open the file first and record one line in the task's `Files` block: *current state / what changes / what must be preserved*. This makes `path:123-145` line ranges real instead of guessed. Line numbers describe the repository as it is when the plan is written; earlier tasks shift them, so every step also quotes the code it replaces, and the quote wins when the numbers disagree.
 
 **Ground every claim in the code.** A plan that names files, functions or commands that do not exist is fiction:
 
@@ -60,6 +60,15 @@ Before defining tasks, list the files to create or modify and each file's single
 - `Create:` targets must not exist yet; a file that exists is `Modify:`.
 - The test command in a step must exist in the project (runner, script, config). Run the project's test suite once before writing tasks and record the command and result in the plan header (`**Baseline:** pytest -q → 128 passed`); a red baseline is reported to the user before planning continues.
 - `plan-check --root` reports `Create:` targets that exist, `Test:`/`Modify:` targets and referenced paths that do not, and line ranges beyond the file; every warning is resolved or explained in the plan.
+
+**External systems.** Investigation means reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action. This applies to writing the plan (the baseline run uses offline tests only) and to the plan's own steps:
+
+- The header lists every permitted environment under `**Environments:**`, one per line: `` - `name` (test|prod) — "the user's permission, quoted verbatim" (date) ``. An environment without a quote is not permitted.
+- A task whose steps run anything on an environment carries `` **External:** `name` — what it does there `` after its `Files` block. `plan-executor` asks the engineer before running such a task.
+- A project script that targets another environment is redirected to a permitted one in the step's command (or the user is asked); it is never run as it is.
+- `plan-check` rejects an environment without a quote, an `External` line that names an unlisted environment, and a task that mentions a listed environment without an `External` line.
+
+**Deviations from the spec.** The plan follows the spec. A deviation is allowed only by the user's explicit decision and is recorded in the header under `**Deviations from spec:**` (what the spec says → what the plan does → whose decision, when). A deviation that changes the spec's Goal, Components or Out of Scope is not a deviation: stop and send the user back to `plan-brainstorming`.
 
 ## 4. Tasks
 
@@ -87,6 +96,12 @@ Before defining tasks, list the files to create or modify and each file's single
 **Tech Stack:** [key technologies]
 
 **Baseline:** [test command → result before this plan]
+
+**Environments:** (only when steps touch external systems)
+- `[name]` ([test|prod]) — "[the user's permission, verbatim]" ([date])
+
+**Deviations from spec:** (only when the user decided to deviate)
+- [spec says] → [plan does] — [who decided, when]
 
 ---
 ```
@@ -166,7 +181,7 @@ Every step contains what the engineer needs. Plan failures:
 
 ## 6. Check and Self-Review
 
-1. Run `plan-check <plan> --root <project>` until it exits `0`. It enforces the header fields, task headings and unique ids, the task core per tier, backticked file paths, no commit steps, and no placeholders. Review its `warnings`: a missing `Modify:` target is fine only if an earlier task creates it, and a code-size warning means the task needs splitting.
+1. Run `plan-check <plan> --root <project>` until it exits `0`. It enforces the header fields, task headings and unique ids, the task core per tier, backticked file paths, no commit steps, no placeholders, and the `Environments`/`External` rules. Review its `warnings`: a missing `Modify:` target is fine only if an earlier task creates it, and a code-size warning means the task needs splitting.
 2. Then check what the tool cannot:
    - **Spec coverage:** every spec requirement maps to a task. Add a task for each gap.
    - **Grounding:** every `path:line` citation was actually read; `Create:` targets are new; the test command exists.

@@ -8,6 +8,14 @@
 
 A checkpoint task (`### Task N: Checkpoint — …`) is gated by running its command and comparing the output with its `Expected:` line.
 
+## External Units
+
+`unit-begin` returns `external`: the unit's `**External:** …` lines. When it is not empty, show the engineer the environment and the commands that will run there, and wait for confirmation before executing the unit. Without a confirmation channel (autonomous run), STOP with a stop-report. Run the step only on the environment it names; if a project script targets another environment, do not run it: stop and ask.
+
+## Deviations
+
+When the gate (or its reviewer) finds a defect outside the unit's text, do not fix it silently. Ask the engineer; with consent, fix it within the unit and record it: `unit-finish <unit> pass --note "<what was done beyond the plan and why>"`. Without consent, leave it and list it in the FINALIZE follow-ups.
+
 ## No Tests → Escalate
 
 If no executable check exists, do not claim success by inspection alone: use grader or human review and record the evidence.

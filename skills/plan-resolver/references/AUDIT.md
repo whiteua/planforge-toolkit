@@ -23,6 +23,19 @@ from `bootstrap.pass_type`.
 If the caller (for example `plan-executor`'s hand-off) names units that were not completed, each of
 them is either shown open (`⭕️`/`⚠️`) or closed with an anchor that proves the code is there.
 
+What the hand-off adds is read from the executor's ledger (`exec_dir`), not from memory of the session:
+
+- **Agreed deviations** (unit notes): check them against the code and describe them in
+  `## Additional Context`; they are not `‼️ deviates`.
+- **Checkpoint and verification tasks** leave no code: re-run the task's command when it is a
+  permitted read-only probe and close the task with `evidence_probe: <command> → <result>`.
+- **Tasks that need an external system**: the audit does not go there without permission (Probes).
+  Close them on the executor's recorded result with `evidence_probe: …` and
+  `verification: executor-reported`, and list them in the human gate as not re-verified.
+- **Environments**: a step that ran on an environment the plan does not list with the user's
+  quoted permission, or on production when only a test environment is permitted, is an issue
+  (`ops`, `high`), even when its result was correct.
+
 ## Subsequent pass (`subsequent`)
 
 A. Re-audit the known issues of `LAST_REPORT` (`parse-report`):
@@ -66,18 +79,23 @@ cross-reference the covering test).
 
 ## Probes
 
-Probes are extra checks, allowed only when read-only for the project.
+Probes are extra checks, allowed only when read-only for the project. A probe is reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action.
 
 - Allowed: `python -m unittest`, `pytest`, `npm test -- --runInBand`, `go test`, `cargo test`,
   `dotnet test` when they write no tracked or generated files; static checks (`py_compile`,
   `tsc --noEmit`, `eslint` without `--fix`). Tool caches are excluded from the fingerprint
   ([WORKFLOW.md](WORKFLOW.md)), so `pytest` and friends do not trip the guard.
+- Build: allowed when its output lands only in directories excluded from the fingerprint (`dist`,
+  `build`, `out`, `target`, `bin`, `obj`, or paths in the root `.gitignore`), so tests run on a
+  fresh build; `assert-readonly` catches a build that writes anywhere else. When a build is not
+  possible, say in the report that previously built code was tested and close those tasks with
+  `confidence: medium`.
 - Forbidden: formatters and autofix (`black`, `ruff --fix`, `eslint --fix`, `prettier --write`,
   `go fmt`), installs and updates, generators and migrations, `git` mutations, anything interactive.
 - Gate: an existing read-only probe for the touched area must be run and its exit code recorded in
   the evidence. Unrecognised commands (`npm run validate`, `cargo clippy`) are not run; the task gets
   `probe-needed`. The agent never writes a new probe. Verbs: run `test`, `check`, `lint`, `type`;
-  never `migrate`, `seed`, `build`, `deploy`, `install`, `generate`, `git`.
+  never `migrate`, `seed`, `deploy`, `install`, `generate`, `git` (`build` only as described above).
 - Recording: a failing probe becomes an issue only when tied to a plan task; write the command, exit
   code and a short stderr/stdout excerpt, not the full log.
 

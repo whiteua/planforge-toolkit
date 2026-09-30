@@ -14,9 +14,10 @@ Errors print `{"ok": false, "errors": ["..."]}`; `plan-drift` also carries `adde
 
 | Command | Purpose |
 |---|---|
-| `ledger-init <exec_dir> <plan> [--workdir R] [--whole] [--allow-dirty] [--accept-drift]` | Create or resume the ledger; baseline snapshot of `R` |
-| `unit-begin <exec_dir>` | Next unit + `strategy` + its `text` and `files`; marks it `running` |
-| `unit-finish <exec_dir> <unit> pass\|fail [--error S]` | Snapshot + done, or failed + `decision`/`restore_to` |
+| `ledger-init <exec_dir\|auto> <plan> [--workdir R] [--whole] [--allow-dirty] [--accept-drift] [--allow-temp]` | Create or resume the ledger; baseline snapshot of `R`; the result carries the absolute `exec_dir` |
+| `unit-begin <exec_dir>` | Next unit + `strategy` + its `text`, `files` and `external` lines; marks it `running` |
+| `unit-finish <exec_dir> <unit> pass\|fail [--error S] [--note N]` | Snapshot + done (with an agreed-deviation note), or failed + `decision`/`restore_to` |
+| `run-diff <exec_dir>` | Files and `--stat` of what the run changed: baseline snapshot vs last unit snapshot |
 | `checkpoint-restore <repo> <sha>` | Restore the working tree to a snapshot (confirmation required) |
 | `checkpoint-prune <exec_dir> [--workdir R]` | Delete this run's `refs/plan-executor/<run>/*` |
 
@@ -26,4 +27,4 @@ Errors print `{"ok": false, "errors": ["..."]}`; `plan-drift` also carries `adde
 
 ## Ledger
 
-Schema: `assets/ledger.schema.json` (version 2: `source_sha256`, `run_id`, `workdir`, `baseline_checkpoint`, per-unit `source`). Version 1 ledgers are migrated on load.
+Schema: `assets/ledger.schema.json` (version 2: `source_sha256`, `run_id`, `workdir`, `baseline_checkpoint`, per-unit `source` and `notes`). Version 1 ledgers are migrated on load.

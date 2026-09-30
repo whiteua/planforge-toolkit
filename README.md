@@ -39,7 +39,7 @@ Each skill is an independent, installable module. Together they form a coherent 
 | [`plan-brainstorming`](skills/plan-brainstorming/) | Turn ideas into validated design specs through collaborative dialogue | — | Depth-tiered elaboration, spec contract validation |
 | [`plan-writing`](skills/plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` | Spec preflight, plan format contract (`plan-check`), codebase grounding with `path:line` citations and a recorded test baseline |
 | [`plan-splitter`](skills/plan-splitter/) | Decompose a large plan into self-contained parts (`<base>-a.md`, `-b.md`, …) with a dependency roadmap | `plan-iterative-revision` (optional, deep verification) | Gate-decision (5-factor), topological ordering + parallel groups, 3-level VERIFY, self-sufficiency invariant, SHA-256 origin hash, one batch verification run with a machine gate |
-| [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | — | Persistent progress ledger with resume and plan-drift detection, strictly ordered units with retry-first policy, gated SDLC workflow, rollback snapshots in hidden git refs (no branch commits) |
+| [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | — | Persistent progress ledger with resume and plan-drift detection, strictly ordered units with retry-first policy, risk-scaled gates, confirmation for units on external systems, rollback snapshots in hidden git refs (no branch commits), run diff and follow-ups file |
 | [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan (or every part of a split plan) until it is error-free | — | Set-algebraic flow analysis (new/resolved/persisted/reintroduced), SHA-1 issue fingerprinting, two-phase separation (audit ≠ implement), single gate authority (regression/churn/unchanged/stuck/limit), 10-class error taxonomy, immutable append-only review trail, batch mode over split parts |
 | [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report; optionally fix the code and re-audit (`fix` / `auto`) | — | task-census completeness gate, evidence anchors (`path#Lx-Ly`) verified against the workspace, confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only audit invariant, separated fix → re-audit loop with protected plan, snapshot diff and bounded cycles |
 | [`writing-skills`](skills/writing-skills/) | Create, test, and deploy new agent skills using TDD methodology | — | Red-green-refactor for skills, subagent-based behavioural testing |
@@ -324,6 +324,8 @@ The skill will guide you through the full brainstorming → spec → plan cycle.
 
 ### Version control
 
+No skill touches an external system without you. A database, API or remote service is reached only after you allow it for a named environment; the permission is never widened to another one, and an existing project script aimed at production is not permission. Plans list the permitted environments with your own words, tasks that use them are marked `External`, and `plan-executor` asks before running each of them.
+
 No skill commits on your branch. `plan-brainstorming` and `plan-writing` write files and leave them uncommitted; `plan-iterative-revision` and `plan-splitter` only add review, roadmap and part files; `plan-resolver`'s fix phase leaves code changes in the working tree for review; `plan-executor` keeps per-unit rollback snapshots in hidden refs (`refs/plan-executor/<run>/<unit>`, removable with `checkpoint-prune`) and never touches your branch. Commit when a block of work is verified, with the message you choose.
 
 For detailed usage of each skill, see the [`USAGE.md`](skills/plan-brainstorming/USAGE.md) file inside each skill directory, or the full [User Guide](docs/USERGUIDE.md).
@@ -443,7 +445,7 @@ All three levels must pass before the split is announced. Up to three retry iter
 
 ### Persistent progress ledger
 
-`plan-executor` writes a structured ledger (`state.json`) into an `exec_dir` outside the repository (or git-ignored), never next to the plan. Each unit has an explicit state (`pending`, `running`, `done`, `failed`) and an attempt count; a rendered `progress.md` sits beside it. The ledger survives session restarts: re-running `ledger-init` resumes it, and a changed plan or part file is reported as `plan-drift` until the engineer accepts it.
+`plan-executor` writes a structured ledger (`state.json`) into an `exec_dir` outside the repository, by default `<repo parent>/.exec/<repo>-<plan>/`; a directory inside the repository or the OS temp dir is refused. Each unit has an explicit state (`pending`, `running`, `done`, `failed`) and an attempt count; a rendered `progress.md` sits beside it. The ledger survives session restarts: re-running `ledger-init` resumes it, and a changed plan or part file is reported as `plan-drift` until the engineer accepts it.
 
 **Used in:** `plan-executor`
 

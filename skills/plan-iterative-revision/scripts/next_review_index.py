@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-next_review_index.py — utility for the plan-iterative-revision skill.
+next_review_index.py - utility for the plan-iterative-revision skill.
 
 Run orchestration (used by SKILL.md):
   bootstrap <plan> [--preset P] [--lenses L] [--rigor R] [--max M] [--stop-policy S]
@@ -861,9 +861,12 @@ def cmd_parts(roadmap: str) -> int:
 
 
 def cmd_batch_summary(results_arg: str) -> int:
-    raw = sys.stdin.read() if results_arg == "-" else read_text(results_arg)
     try:
+        raw = sys.stdin.read() if results_arg == "-" else read_text(results_arg)
         payload = json.loads(raw)
+    except OSError as exc:
+        print_json({"error": f"cannot read results file (pass a path or '-' for stdin): {exc}"})
+        return 2
     except json.JSONDecodeError as exc:
         print_json({"error": f"invalid results JSON: {exc.msg}"})
         return 2
@@ -872,18 +875,23 @@ def cmd_batch_summary(results_arg: str) -> int:
         print_json({"error": "results JSON must be an object with a non-empty 'parts' object"})
         return 2
     counts = {name: 0 for name in RESULT_SEVERITY}
+    counts["error"] = 0
     invalid: List[str] = []
     for part_id, final in parts.items():
         result = final.get("result") if isinstance(final, dict) else None
-        if result in counts:
+        if result in RESULT_SEVERITY:
             counts[result] += 1
+        elif isinstance(final, dict) and final.get("error"):
+            # A part that could not be verified (bootstrap failure, guard violation, missing file).
+            counts["error"] += 1
         else:
             invalid.append(str(part_id))
     if invalid:
-        print_json({"error": "parts without a valid result: " + ", ".join(sorted(invalid))})
+        print_json({"error": "parts without a valid result or error: " + ", ".join(sorted(invalid))})
         return 2
-    worst = next(name for name in RESULT_SEVERITY if counts[name])
-    remaining = sum(int(final.get("remaining_issues") or 0) for final in parts.values())
+    # An unverified part needs a human decision, like an escalated one.
+    worst = "escalated" if counts["error"] else next(name for name in RESULT_SEVERITY if counts[name])
+    remaining = sum(int(final.get("remaining_issues") or 0) for final in parts.values() if isinstance(final, dict))
     print_json({"result": worst, "remaining_issues": remaining, "counts": counts, "parts": parts})
     return 0
 

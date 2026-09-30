@@ -56,20 +56,28 @@ stdlib only. If `python` is unavailable, stop and tell the user.
 
 ## Batch mode (a plan-splitter roadmap)
 
-If `PLAN` ends with `-roadmap.md`, verify its parts one after another:
+If `PLAN` ends with `-roadmap.md`, verify its parts one after another. Only the parts are
+audited; the roadmap and the source plan are not.
 
 ```
-P = TOOL parts PLAN                      # parts in table order; exit 1 if a part file is missing
-parts = P.parts filtered by the `parts=` argument if given (ids like a,c), else all
+P = TOOL parts PLAN                      # parts in table order; exit 1 if a part file is missing → report and stop
+parts = P.parts, or only the ids in `parts=` (roadmap order; an unknown id → report and stop)
 finals = {}
 for part in parts:
-    run the Loop below with PLAN = part.path (its own reviews, completion file and guard labels)
-    finals[part.id] = R.final
-S = TOOL batch-summary --results <json {"parts": finals}>   # worst result wins
+    run the whole Loop below with PLAN = part.path: bootstrap (same preset/stop_policy
+    arguments), audits, Phase B, gates. Each part has its own review numbering, completion
+    file and guard labels (`<B.basename>-phase-a`).
+    finals[part.id] = R.final                                  # on action "stop"
+    a part that cannot be verified (bootstrap not valid, guard violation) does not stop the
+    batch: finals[part.id] = {"result": null, "error": "<what happened>"}; continue
+write finals to a temp file as {"parts": finals}
+S = TOOL batch-summary --results <that file | ->                # worst result wins; an error part = escalated
 ```
 
-Print `S` as the final output (autonomous), or a per-part table plus `S` (interactive). Never
-verify parts in parallel: the diff guard and the review numbering are per plan, not per run.
+Print `S` as the final output (autonomous; it replaces `R.final`), or a per-part table plus `S`
+(interactive). Never verify parts in parallel: the diff guard and the review numbering are per
+plan, not per run. `guard-begin`'s `changed_count` grows across parts because earlier parts' new
+files are uncommitted; that is expected.
 
 ## Loop
 
@@ -84,8 +92,8 @@ MAX = B.config.max; S = B.config.stop_policy; k = 1
 loop:
     TOOL guard-begin B.git_root <B.basename>-phase-a
     if k > 1: D = TOOL digest B.dir B.basename --since B.run_start
-    Phase A (references/PHASE-A-AUDIT.md) → issues JSON, saved to a file in the OS temp dir
-        (never inside the repository), or piped on stdin with --issues -
+    Phase A (references/PHASE-A-AUDIT.md) → issues JSON, saved to a file outside the repository
+        (e.g. the OS temp dir), or piped on stdin with --issues -
     R = TOOL record PLAN --run-start B.run_start --max MAX --stop-policy S --mode MODE
                     --interaction I --lang B.lang --issues <json-file>
     if R.action == "ask_limit":  ask "MAX review passes done, N issues still open. Continue?"
@@ -131,7 +139,8 @@ The pragmatic `drain` never hides real problems: it fires only when every open i
 
 - `autonomous`: no progress messages; the final message is exactly one JSON object, `R.final`
   (schema `assets/result.schema.json`: `result`, `iterations` = review files written in this run,
-  `remaining_issues`, plus `escalated`, `stop_reason`, `flows`, `lenses_used`).
+  `remaining_issues`, plus `escalated`, `stop_reason`, `flows`, `lenses_used`); in batch mode the
+  `batch-summary` object instead (`result`, `remaining_issues`, `counts`, `parts`).
 - `interactive`: a short report in the plan's language: result and reason, review files created
   in this run, remaining or escalated issues (id + title), the completion file if written. Add the
   `R.final` JSON at the end.

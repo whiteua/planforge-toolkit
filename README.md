@@ -37,11 +37,11 @@ Each skill is an independent, installable module. Together they form a coherent 
 | Skill | Description | Depends on | Techniques |
 |---|---|---|---|
 | [`plan-brainstorming`](skills/plan-brainstorming/) | Turn ideas into validated design specs through collaborative dialogue | — | Depth-tiered elaboration, spec contract validation |
-| [`plan-writing`](skills/plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` | Contract-driven generation, plan lifecycle model |
-| [`plan-splitter`](skills/plan-splitter/) | Decompose a large plan into self-contained stages for parallel execution | — | Gate-decision (5-factor), topological ordering + parallel groups, 3-level VERIFY, self-sufficiency invariant, SHA-256 origin fingerprint |
+| [`plan-writing`](skills/plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` | Spec preflight, plan format contract (`plan-check`), codebase grounding with `path:line` citations and a recorded test baseline |
+| [`plan-splitter`](skills/plan-splitter/) | Decompose a large plan into self-contained parts (`<base>-a.md`, `-b.md`, …) with a dependency roadmap | `plan-iterative-revision` (optional, deep verification) | Gate-decision (5-factor), topological ordering + parallel groups, 3-level VERIFY, self-sufficiency invariant, SHA-256 origin hash, one batch verification run with a machine gate |
 | [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | — | Persistent progress ledger with resume and plan-drift detection, strictly ordered units with retry-first policy, gated SDLC workflow, rollback snapshots in hidden git refs (no branch commits) |
-| [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan until it is error-free | — | Set-algebraic flow analysis (new/resolved/persisted/reintroduced), SHA-1 issue fingerprinting, two-phase separation (audit ≠ implement), regression/churn/stagnation hard-stops, 10-class error taxonomy, immutable append-only review trail |
-| [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report; optionally fix the code and re-audit (`fix` / `auto`) | — | task-census completeness gate, evidence anchors (`path#Lx-Ly`), confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only audit invariant, separated fix → re-audit loop with protected plan and bounded cycles |
+| [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan (or every part of a split plan) until it is error-free | — | Set-algebraic flow analysis (new/resolved/persisted/reintroduced), SHA-1 issue fingerprinting, two-phase separation (audit ≠ implement), single gate authority (regression/churn/unchanged/stuck/limit), 10-class error taxonomy, immutable append-only review trail, batch mode over split parts |
+| [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report; optionally fix the code and re-audit (`fix` / `auto`) | — | task-census completeness gate, evidence anchors (`path#Lx-Ly`) verified against the workspace, confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only audit invariant, separated fix → re-audit loop with protected plan, snapshot diff and bounded cycles |
 | [`writing-skills`](skills/writing-skills/) | Create, test, and deploy new agent skills using TDD methodology | — | Red-green-refactor for skills, subagent-based behavioural testing |
 
 ---
@@ -52,11 +52,11 @@ Each skill is an independent, installable module. Together they form a coherent 
   ┌─────────────────────┐
   │  plan-brainstorming │  ← Start here: idea → design spec
   └──────────┬──────────┘
-             │ spec.md
+             │ *-spec.md
   ┌──────────▼──────────┐
   │    plan-writing     │  ← spec → implementation plan
   └──────────┬──────────┘
-             │ plan.md
+             │ *-impl.md
              │
       ┌──────▼──────┐        ┌───────────────────────────┐
       │large plan?  │──yes──►│    plan-splitter          │
@@ -73,7 +73,7 @@ Each skill is an independent, installable module. Together they form a coherent 
   │             plan-resolver                 │  ← audit implementation
   └───────────────────────────────────────────┘
 
-  plan-iterative-revision  ← use at any stage to clean up a plan
+  plan-iterative-revision  ← use at any stage to clean up a plan; on a roadmap it verifies every part
 ```
 
 ---
@@ -214,7 +214,7 @@ done
 
 ### Skill dependencies
 
-> `plan-writing` reads contract files from `plan-brainstorming`. Both must be installed in the **same parent directory**.
+> `plan-writing` reads contract files from `plan-brainstorming`, and `plan-splitter`'s deep verification (step 8) runs `plan-iterative-revision`. Each pair must be installed in the **same parent directory**.
 
 ---
 
@@ -298,10 +298,12 @@ The skill will guide you through the full brainstorming → spec → plan cycle.
 /plan-executor docs/plans/plan01-auth-impl.md
 ```
 
-### Splitting a large plan into stages
+### Splitting a large plan into parts
 
 ```
-/plan-splitter docs/plans/plan01-auth-impl.md
+/plan-splitter docs/plans/plan01-auth-impl.md                      # gate decision, then <base>-roadmap.md + <base>-a.md, -b.md, …
+/plan-splitter docs/plans/plan01-auth-impl.md verify=all           # …and verify every part with plan-iterative-revision
+/plan-executor docs/plans/plan01-auth-impl-roadmap.md              # execute the parts in dependency order
 ```
 
 ### Auditing implementation progress
@@ -315,8 +317,14 @@ The skill will guide you through the full brainstorming → spec → plan cycle.
 ### Iteratively fixing a plan
 
 ```
-/plan-iterative-revision docs/plans/plan01-auth-impl.md
+/plan-iterative-revision docs/plans/plan01-auth-impl.md                    # one plan
+/plan-iterative-revision docs/plans/plan01-auth-impl-roadmap.md            # every part of a split plan, one review trail each
+/plan-iterative-revision docs/plans/plan01-auth-impl.md preset=deep audit-only
 ```
+
+### Version control
+
+No skill commits on your branch. `plan-brainstorming` and `plan-writing` write files and leave them uncommitted; `plan-iterative-revision` and `plan-splitter` only add review, roadmap and part files; `plan-resolver`'s fix phase leaves code changes in the working tree for review; `plan-executor` keeps per-unit rollback snapshots in hidden refs (`refs/plan-executor/<run>/<unit>`, removable with `checkpoint-prune`) and never touches your branch. Commit when a block of work is verified, with the message you choose.
 
 For detailed usage of each skill, see the [`USAGE.md`](skills/plan-brainstorming/USAGE.md) file inside each skill directory, or the full [User Guide](docs/USERGUIDE.md).
 
@@ -360,7 +368,7 @@ Cheap, exact operations (file parsing, counting, hashing, shell probes) run as C
 
 A hash of all relevant workspace files is taken at the start of a pass and asserted again at the end. Any file mutation during a nominally read-only operation fails the `assert-readonly` check immediately. This catches accidental writes by the agent itself, not just intentional mutations.
 
-**Used in:** `plan-resolver`, `plan-splitter`
+**Used in:** `plan-resolver` (`plan-splitter` hashes only the source plan and the part files to detect drift)
 
 ---
 
@@ -374,7 +382,7 @@ Before a resolver report is accepted, a tool parses the plan and extracts every 
 
 ### Evidence anchors (`path#Lx-Ly`)
 
-Every `✅ done` verdict in a resolver report must be backed by a concrete code reference in `path#Lx-Ly` format. On subsequent passes, the agent re-reads the referenced lines before reusing an anchor; if the lines have shifted or the content changed, the anchor is treated as stale and the verdict is re-derived from fresh evidence.
+Every `✅` verdict in a resolver report must be backed by a concrete code reference in `path#Lx-Ly` format, and `validate-report --root` checks that the file exists and the line range is inside it, for closed tasks and for issue evidence alike: a report that cites code that is not there is invalid. On subsequent passes, the agent re-reads the referenced lines before reusing an anchor; if the lines have shifted or the content changed, the anchor is treated as stale and the verdict is re-derived from fresh evidence.
 
 **Used in:** `plan-resolver`
 
@@ -382,7 +390,7 @@ Every `✅ done` verdict in a resolver report must be backed by a concrete code 
 
 ### Confidence calibration
 
-Each task coverage entry carries a `confidence: high | medium | low` field. The final report is blocked from closing if any entry is `low`. Intermediate reports may carry `low` entries with a warning. If a task stays in `⚠️ ambiguous` state across two consecutive passes without a change in evidence, the confidence is forced to `low` and human escalation is required.
+A task or issue may carry `confidence: high | medium | low`. A final report cannot close a task or an issue with `low`; open reports carry it as a warning. A task that stays `⚠️ ambiguous` with the same evidence anchor as in the previous pass is flagged as stuck, and the agent must strengthen or replace the evidence before the next pass.
 
 **Used in:** `plan-resolver`
 
@@ -390,15 +398,15 @@ Each task coverage entry carries a `confidence: high | medium | low` field. The 
 
 ### Probe-gate (read-only shell whitelist)
 
-For tasks marked as critical, the agent may run a shell probe to gather live evidence. Only commands from an explicit whitelist are permitted: `test`, `check`, `lint`, `type-check`. Commands that produce side effects (`migrate`, `seed`, `build`, `deploy`, `install`, `generate`, `git`) are blocked at the tool level, not by convention. Tasks where no suitable probe exists are marked `probe-needed` — a signal to the team to invest in test coverage, not a blocker.
+For tasks marked as critical, the agent may run a shell probe to gather live evidence. Only commands from an explicit whitelist are permitted: `test`, `check`, `lint`, `type-check`. Commands that produce side effects (`migrate`, `seed`, `build`, `deploy`, `install`, `generate`, `git`) are blocked at the tool level, not by convention. Tasks where no suitable probe exists are marked `probe-needed` — a signal to the team to invest in test coverage, not a blocker. Tool caches that probes create (`.pytest_cache`, `.mypy_cache`, …) are excluded from the workspace fingerprint.
 
-**Used in:** `plan-resolver`, `plan-splitter`
+**Used in:** `plan-resolver`
 
 ---
 
 ### Gate-decision heuristic (5-factor)
 
-Before decomposing a plan, `plan-splitter` evaluates five factors: estimated plan size, task complexity distribution, potential for parallel execution, context-window overflow risk, and team topology. If the plan scores below a threshold, splitting is skipped and the agent recommends executing the original plan directly. This prevents unnecessary fragmentation of small, coherent plans.
+Before decomposing a plan, `plan-splitter` evaluates five factors: task count, domain spread across modules, blocking dependencies between task groups, whether the plan fits one agent pass, and parallelism. It splits when two factors say so or one factor alone blocks a single pass; otherwise it prints a gate-pass notice and the plan goes straight to `plan-executor`. This prevents unnecessary fragmentation of small, coherent plans.
 
 **Used in:** `plan-splitter`
 
@@ -406,7 +414,7 @@ Before decomposing a plan, `plan-splitter` evaluates five factors: estimated pla
 
 ### Self-sufficiency invariant
 
-No generated stage file may contain back-references to another stage or to the original plan's context. Every stage carries all the information an agent needs to execute it in a single pass, in isolation. This prevents context bleed — the gradual degradation that occurs when later stages rely on implicit state accumulated by earlier ones.
+No generated part file (`<base>-a.md`, `<base>-b.md`, …) may contain back-references to another part or to the original plan's context. Every part carries all the information an agent needs to execute it in a single pass, in isolation. This prevents context bleed — the gradual degradation that occurs when later parts rely on implicit state accumulated by earlier ones.
 
 **Used in:** `plan-splitter`
 
@@ -422,12 +430,12 @@ The dependency graph of plan tasks is resolved into a partial order. Independent
 
 ### 3-level VERIFY
 
-After stage generation, three verification passes run in order:
-- **Level A — structural:** DAG validity, required sections present, dependency declarations well-formed.
-- **Level B — coverage:** SHA-256 of the original plan matches, total task count across all stages is ≥ original task count.
-- **Level C — semantic:** each stage is self-sufficient, handoff conditions between stages are explicit, no contradictory instructions across stages.
+After part generation, three verification passes run in order:
+- **Level A — structural:** DAG validity, required sections present, part ids and dependencies well-formed.
+- **Level B — coverage:** SHA-256 of the original plan matches, total task count across all parts is ≥ original task count.
+- **Level C — semantic:** each part is self-sufficient, handoff conditions between parts are explicit, no contradictory instructions across parts.
 
-All three levels must pass before output files are finalised. Up to three retry iterations are permitted; persistent failure produces an annotated diagnostic rather than partial output.
+All three levels must pass before the split is announced. Up to three retry iterations are permitted; persistent failure produces an annotated diagnostic rather than partial output. An optional fourth step runs `plan-iterative-revision` once over the roadmap (every part in turn, one review trail each) and accepts the result only through the machine gate `verify-status`, which checks the claimed results against the review files and part hashes.
 
 **Used in:** `plan-splitter`
 
@@ -435,7 +443,7 @@ All three levels must pass before output files are finalised. Up to three retry 
 
 ### Persistent progress ledger
 
-`plan-executor` writes a structured ledger file alongside the plan. Each task has an explicit state (`not-started`, `in-progress`, `done`, `blocked`). The ledger survives session restarts: a new agent session picks up the ledger and resumes from the last known state without re-reading the entire plan history.
+`plan-executor` writes a structured ledger (`state.json`) into an `exec_dir` outside the repository (or git-ignored), never next to the plan. Each unit has an explicit state (`pending`, `running`, `done`, `failed`) and an attempt count; a rendered `progress.md` sits beside it. The ledger survives session restarts: re-running `ledger-init` resumes it, and a changed plan or part file is reported as `plan-drift` until the engineer accepts it.
 
 **Used in:** `plan-executor`
 
@@ -502,7 +510,7 @@ The agent hands its findings to the tool as JSON; the tool renders the review fi
 
 ### Contract-driven plan generation
 
-`plan-writing` reads a spec contract produced by `plan-brainstorming` and validates that the generated plan satisfies every contract clause before writing the output file. This creates a verifiable link from the original design intent to the implementation plan, preventing scope drift during the writing step.
+`plan-writing` starts by running `plan-brainstorming`'s `spec-check` on the spec (8 mandatory sections, empty `Open Questions`) and stops when it fails; the plan it writes is then checked by `plan-check --root`, which enforces the header, `### Task N:` headings, the task core per tier, no placeholders, no commit steps, and that `Create:` targets are new while `Modify:`/`Test:` targets and cited paths exist in the repository. Every existing symbol a task relies on is cited as `path:line`, and the plan header records the test baseline taken before planning. This keeps the plan traceable to the design and grounded in the code rather than in guesses.
 
 **Used in:** `plan-writing`, `plan-brainstorming`
 

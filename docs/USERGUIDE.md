@@ -42,10 +42,10 @@ Each skill is an independent module with a well-defined input, output, and invar
 |---|---|
 | **Spec** | Design document — *what* to build and *why*. Produced by `plan-brainstorming`. |
 | **Plan** | Implementation document — *how* to build it, step by step. Produced by `plan-writing`. |
-| **Stage** | Self-contained slice of a large plan. Produced by `plan-splitter`. |
+| **Part** | Self-contained slice of a large plan (`<base>-a.md`, `<base>-b.md`, …). Produced by `plan-splitter`. |
 | **Task** | Plan unit that fits ~10 minutes or ~100 lines of new code. |
 | **Step** | Single action inside a task (2–5 minutes). |
-| **Ledger** | Progress tracking file (`state.json`) maintained by `plan-executor`. |
+| **Ledger** | Progress tracking file (`state.json`) maintained by `plan-executor`, stored outside the repository. |
 | **Review** | Audit file produced by `plan-iterative-revision` listing errors in the plan. |
 | **Report** | Audit file produced by `plan-resolver` listing implementation vs. plan findings. |
 
@@ -100,15 +100,15 @@ plan-iterative-revision  — use at any stage to clean up a plan before executio
 With a findings JSON (`file`, `line`, `summary`, `failure_scenario` per item), the skill validates the list, checks each finding against the code, and writes a fix spec. The spec traces every finding id to a fix or to Out of Scope.
 
 **Process:**
-1. Explores project context (files, docs, commits)
-2. Offers Visual Companion if visual questions are expected
-3. Proposes a depth tier: `Quick` / `Standard` / `Deep`
+1. Explores project context (files, docs, commits) and restates your request in one sentence
+2. Proposes a depth tier: `Quick` / `Standard` / `Deep`
+3. Offers the Visual Companion when the questions ahead are visual
 4. Asks clarifying questions one at a time
-5. Proposes 2–3 approaches with trade-offs
-6. Presents design section by section, asks for approval
-7. Runs ambiguity sweep — closes all open questions (re-presents a design section if an answer changes it)
-8. Writes the spec file, checks the contract with `brainstorm_tool.py spec-check`, runs self-review
-9. Hands off to `plan-writing` after you approve the spec (the spec is not committed automatically)
+5. Proposes approaches with trade-offs (2–3 on Standard/Deep, one on Quick)
+6. Presents the design section by section, asks for approval
+7. Runs the ambiguity sweep — closes all open questions (re-presents a design section if an answer changes it)
+8. Writes the spec file, checks the contract with `brainstorm_tool.py spec-check`, runs the self-review including a fidelity check against your original request
+9. Hands off to `plan-writing` after you approve the spec (the spec is not committed)
 
 The dialogue and the spec body follow the language of your input; section headings stay in English.
 
@@ -137,7 +137,7 @@ The dialogue and the spec body follow the language of your input; section headin
 
 **Prerequisites:** The spec must pass `plan-brainstorming`'s `brainstorm_tool.py spec-check` before the skill proceeds: all 8 required headings in order, no empty section, `## Open Questions` empty (or `(none)`).
 
-**Output:** `<X>-impl.md` next to `<X>-spec.md`. The header carries `**Spec:**` and `**Tier:**`; tasks use `### Task N: <title>` headings, the format `plan-executor` and `plan-resolver` parse. `scripts/plan_tool.py plan-check` verifies that contract before handoff.
+**Output:** `<X>-impl.md` next to `<X>-spec.md`. The header carries `**Spec:**`, `**Tier:**` and `**Baseline:**` (the test command and result before planning); tasks use `### Task N: <title>` headings, the format `plan-executor` and `plan-resolver` parse. `scripts/plan_tool.py plan-check --root <project>` verifies that contract and that the files and paths the plan relies on exist (`Create:` targets must be new).
 
 Each task in the plan specifies:
 - Files to touch
@@ -150,12 +150,14 @@ Plans contain no `git commit` steps; committing the result is up to you. An opti
 
 ### plan-splitter
 
-**Purpose:** Decompose a large implementation plan into self-contained stages, each executable in a single agent pass.
+**Purpose:** Decompose a large implementation plan into self-contained parts, each executable in a single agent pass.
 
 **Invoke:**
 ```
-/plan-splitter <plan-path> [verify=ask|all|none] [verify_depth=quick|standard|deep]
+/plan-splitter <plan-path> [verify=ask|all|none|a,c] [verify_depth=quick|standard|deep] [verify_mode=full-cycle|audit-only]
 ```
+
+With `verify`, the skill runs `plan-iterative-revision` once over the roadmap (every selected part in turn, one review trail each) and accepts the result only through the machine gate `verify-status`. Requires `plan-iterative-revision` installed next to it.
 
 **Gate decision:** The skill evaluates 5 factors and may decide the plan does NOT need splitting. This is a valid outcome — you'll get a `gate-pass` notice and can proceed directly to `plan-executor`.
 
@@ -185,12 +187,12 @@ Plans contain no `git commit` steps; committing the result is up to you. An opti
 | Whole plan (with `### Task N:` headings) | Task headings outside code blocks | Executes tasks strictly in order; a failed task is retried before anything else |
 
 **Phases:**
-1. **BOOTSTRAP** — `ledger-init`: parse units, create or resume the ledger (stops on a dirty repo or a changed plan), baseline snapshot
+1. **BOOTSTRAP** — `ledger-init <exec_dir> <plan> --workdir <repo>`: parse units, create or resume the ledger in `exec_dir` (outside the repository or git-ignored; stops on a dirty repo or a changed plan/part), baseline snapshot
 2. **LOOP** — `unit-begin` (unit text + files) → execute → gate → `unit-finish` (snapshot + done, or retry/stop)
 3. **FINALIZE** — propose `plan-resolver` (audit, or `auto` to audit and fix)
 
 **Invariants:**
-- Never edits source plan or stage files.
+- Never edits source plan or part files.
 - Progress lives only in `state.json`.
 - Nothing is committed to your branch: snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`; the final commit is yours.
 - Destructive operations (restore) require explicit engineer confirmation.
@@ -206,7 +208,8 @@ Plans contain no `git commit` steps; committing the result is up to you. An opti
 
 **Invoke:**
 ```
-/plan-iterative-revision <plan-path> [preset=quick|standard|deep] [stop_policy=pragmatic|strict]
+/plan-iterative-revision <plan-path> [preset=quick|standard|deep] [stop_policy=pragmatic|strict] [interaction=auto|interactive|autonomous] [audit-only]
+/plan-iterative-revision <base>-roadmap.md [parts=a,c] …     # batch: every part of a split plan, one review trail each
 ```
 
 **Presets:**
@@ -222,7 +225,7 @@ Plans contain no `git commit` steps; committing the result is up to you. An opti
 - `audit-only` — audit → write review file → stop
 
 **Stop conditions:**
-- No issues found → "Plan is clean"
+- No issues on the first audit → `clean`, no files; no issues on a later audit → `converged` + completion file
 - Max iterations reached → asks: +3 / +5 / stop (autonomous runs stop with `limit`)
 - Same issue set as the previous audit, or nothing resolved for 2 audits → stagnation
 - A previously resolved issue comes back, or one issue survives 3 audits → escalation
@@ -261,12 +264,13 @@ In audit mode, always provide the full list of previous reports for delta analys
 
 | Status | Meaning |
 |---|---|
-| ✅ | Correctly implemented |
-| ⚠️ | Partially implemented or minor issues |
-| ❌ | Not implemented or critically wrong |
-| N/A | Not applicable |
+| ✅ | Implemented as specified; needs an evidence anchor `path#Lx-Ly` that the validator checks against the code |
+| ⚠️ | Partial, defective, or ambiguous |
+| ⭕️ | Missing |
+| ‼️ | Deviates from the plan |
+| `not-applicable` | Explanatory item, nothing to implement |
 
-**Invariants:** The resolver never edits the plan. An audit pass never edits code or previous reports and creates exactly one report. The fix phase edits code only; previous reports change only through the Fix Log (`mark-fix`).
+**Invariants:** The resolver never edits the plan. An audit pass never edits code or previous reports and creates exactly one report, validated with `validate-report --root` (structure, statuses, anchors pointing at real lines) and `task-census` (every plan task covered). The fix phase edits code only; previous reports change only through the Fix Log (`mark-fix`).
 
 **Prerequisites:** Python ≥ 3.8 in PATH.
 
@@ -460,14 +464,16 @@ done
 
 ```
 /plan-brainstorming I want to add WebSocket notifications to the API
-  → saves: docs/plans/plan01-notifications-spec.md
+  → asks where to save the spec (inline idea, no goal file); e.g. docs/plans/plan01-spec.md
 
-/plan-writing docs/plans/plan01-notifications-spec.md
-  → saves: docs/plans/plan01-notifications-impl.md
+/plan-writing docs/plans/plan01-spec.md
+  → saves: docs/plans/plan01-impl.md
 
-/plan-executor docs/plans/plan01-notifications-impl.md
+/plan-iterative-revision docs/plans/plan01-impl.md      # optional audit of the plan against the code
 
-/plan-resolver docs/plans/plan01-notifications-impl.md
+/plan-executor docs/plans/plan01-impl.md
+
+/plan-resolver docs/plans/plan01-impl.md
 ```
 
 ### Large refactor
@@ -475,8 +481,9 @@ done
 ```
 /plan-brainstorming  ...
 /plan-writing        ...  → plan01-impl.md
-/plan-splitter docs/plans/plan01-impl.md
+/plan-splitter docs/plans/plan01-impl.md verify=all
   → saves: plan01-impl-roadmap.md, plan01-impl-a.md … plan01-impl-e.md
+  → verifies every part with plan-iterative-revision (plan01-impl-a-review-1.md, …)
 
 /plan-executor docs/plans/plan01-impl-roadmap.md
 /plan-resolver docs/plans/plan01-impl.md
@@ -486,11 +493,23 @@ done
 
 ```
 /plan-iterative-revision docs/plans/plan01-impl.md preset=deep
-  → saves: plan01-review-1.md (with issues)
+  → saves: plan01-impl-review-1.md (with issues)
   → fixes the plan
-  → saves: plan01-review-2.md
-  → "Plan is clean" → saves: plan01-completion.md
+  → saves: plan01-impl-review-2.md
+  → no issues left → converged → saves: plan01-impl-completion.md
 ```
+
+### Verifying every part of a split plan
+
+```
+/plan-iterative-revision docs/plans/plan01-impl-roadmap.md
+  → plan01-impl-a-review-1.md, plan01-impl-a-completion.md, plan01-impl-b-review-1.md, …
+  → one summary: worst part result wins
+```
+
+### Version control
+
+No skill commits on your branch: specs, plans, reviews, roadmaps and parts are written to disk uncommitted, `plan-resolver`'s fixes stay in the working tree, and `plan-executor` keeps rollback snapshots in hidden refs (`refs/plan-executor/…`). Commit when a block of work is verified.
 
 ---
 
@@ -515,7 +534,9 @@ done
 |---|---|---|
 | `plan-writing` fails spec contract check | Spec is incomplete | Re-run `plan-brainstorming` to close open sections |
 | `plan-splitter` says "don't split" | Plan is small enough | Proceed directly to `plan-executor` |
-| `plan-executor` gate fails silently | No tests exist | Write at least a smoke test; executor will escalate |
+| `plan-executor` stops at a gate with no checks | No tests exist for the unit | Add at least a smoke test; the gate never passes silently |
 | `plan-iterative-revision` cannot create review file | Plan directory not writable, or no shell/Python for the helper script | Check directory permissions; enable shell commands and Python in your agent |
-| `plan-resolver` reports stagnation | Same issues repeat | Review the stagnated issues manually; update the plan |
+| `plan-iterative-revision` stops with stagnation/escalated | The same issues survive plan edits, or a fixed issue came back | Resolve the listed issues by hand, then re-run |
+| `plan-resolver`: `anchor file not found` / `beyond end of file` | The report cites code that is not there | The audit must cite real lines; fix the report |
+| `plan-resolver` `auto` stops with ask-user / stop-stalled | Issues need a decision, or a cycle closed nothing | Answer the questions or fix by hand, then `/plan-resolver next` |
 | `plan-writing` cannot find contract files | `plan-brainstorming` not installed in same directory | Install both skills side-by-side |

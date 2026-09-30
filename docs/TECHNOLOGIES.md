@@ -16,6 +16,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | 8 mandatory spec sections | IEEE 830 SRS standard (1993) | Ensures structural completeness; checked deterministically by `brainstorm_tool.py spec-check` |
 | Visual companion | Miro/FigJam facilitation; EventStorming (Alberto Brandolini, 2013) | Real-time visual feedback during exploration |
 | Findings triage and traceability | Defect triage (IEEE 1044 anomaly classification); requirements traceability matrix | JSON review findings are validated by a CLI, verified against code, and each id is traced to a fix or to Out of Scope by a coverage gate |
+| Fidelity check | Requirements traceability; goal-question-metric (Basili, 1994) | The request is restated in one sentence at the start and compared with the spec's Goal and Out of Scope before hand-off; drift is named and asked about |
 
 ---
 
@@ -23,7 +24,8 @@ This document maps the engineering techniques, methodologies, and prior art that
 
 | Technique | Origin | How it's applied |
 |---|---|---|
-| TDD cycle per task | Test-Driven Development (Kent Beck, 2002); Extreme Programming (1999) | Every plan step includes red → green → refactor |
+| TDD cycle per task | Test-Driven Development (Kent Beck, 2002); Extreme Programming (1999) | Every task writes the failing test, runs it, implements, runs it again |
+| Codebase grounding | Fact-checking / citation requirements; reproducible baselines in CI | Existing symbols are cited as `path:line`, `Create:` targets must be new, and the plan header records the test baseline; `plan-check --root` verifies paths against the repository |
 | Strict size limit (10 min / 100 lines) | PSP (Watts Humphrey, 1995); INVEST criteria — "Small" (Bill Wake, 2003); Pomodoro Technique | Recursive splitting when a step exceeds the limit |
 | Full code, no placeholders | Literate Programming (Donald Knuth, 1984); Jupyter Notebooks (Fernando Pérez, 2001) | Plan steps contain complete, executable code |
 | Spec Contract Preflight | Design by Contract (Bertrand Meyer, 1988); Type-system interface contracts | `brainstorm_tool.py spec-check` validates the spec before any plan is written |
@@ -76,13 +78,13 @@ This document maps the engineering techniques, methodologies, and prior art that
 
 | Technique | Origin | How it's applied |
 |---|---|---|
-| Hierarchical decomposition | WBS — Work Breakdown Structure (PMBOK/PMI, 1987); SAFe decomposition (Dean Leffingwell, ~2011) | Plan is split into self-contained stages |
+| Hierarchical decomposition | WBS — Work Breakdown Structure (PMBOK/PMI, 1987); SAFe decomposition (Dean Leffingwell, ~2011) | Plan is split into self-contained parts |
 | DAG dependencies | Make (Stuart Feldman, 1976); Bazel (Google, 2015); Apache Airflow DAGs (2015) | Stages declare explicit dependency edges |
-| Self-contained bounded units | Bounded Context (Eric Evans, DDD, 2003); Independent Deployability (Sam Newman, 2015) | Each stage is executable without back-references |
+| Self-contained bounded units | Bounded Context (Eric Evans, DDD, 2003); Independent Deployability (Sam Newman, 2015) | Each part is executable without back-references |
 | "Do not split" gate | Stage-Gate kill decision (Cooper, 1986) | Splitting is refused when the plan is already atomic |
-| Roadmap as stage 0 | Project Charter (PMBOK) | A summary file precedes all stage files |
-| Three-level verification | Three Lines of Defense (Basel Committee, ~2000s); Multi-tier code review (Google, Microsoft) | Automated → peer → deep-agent verification |
-| Deep verification via subagent | Red Team / Blue Team (military, cybersecurity, ~1990s); Independent QA team | A separate agent audits each stage |
+| Roadmap file | Project Charter (PMBOK) | `<base>-roadmap.md` holds the dependency table and parallel groups; parts are `<base>-a.md`, `-b.md`, … |
+| Three-level verification | Three Lines of Defense (Basel Committee, ~2000s); Multi-tier code review (Google, Microsoft) | A: formal checks (`validate-all`), B: cross-validation (task coverage, origin hash), C: the agent re-reads every part for self-sufficiency and handoff |
+| Deep verification with a machine gate | Red Team / Blue Team (military, cybersecurity, ~1990s); Independent QA team; Quality Gates (SonarQube) | One `plan-iterative-revision` run audits every part in turn; `verify-status` accepts a claimed result only when the review files and part hashes prove it |
 
 ---
 
@@ -113,6 +115,8 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Formal sign-off | FAT — Factory Acceptance Test; UAT — User Acceptance Testing (ISTQB); DO-178C certification (RTCA, 2012) | Final report serves as a verifiable completion artifact |
 | Error taxonomy | CWE (MITRE, ~2006); OWASP Top 10 (~2003); IEEE 1044 (1993) | Standardised classification of findings |
 | Report co-located with plan | Financial audit report attached to ledger (audit standard) | Report file lives next to the audited plan |
+| Verified evidence anchors | Citation checking; link validation | `validate-report --root` checks that every `path#Lx-Ly` on a closed task or in issue evidence points at existing lines |
+| Authoritative fix diff | Reproducible builds; before/after snapshots | The fix phase is bracketed by workspace fingerprints and `snapshot-diff` lists the changed files, which the Fix Log must account for |
 
 ---
 

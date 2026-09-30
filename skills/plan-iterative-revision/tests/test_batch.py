@@ -71,6 +71,18 @@ class BatchSummary(unittest.TestCase):
         self.assertEqual(out["counts"]["clean"], 1)
         self.assertEqual(set(out["parts"]), {"a", "b", "c"})
 
+    def test_error_part_escalates_and_inline_json_is_clean_error(self):
+        results = {"parts": {"a": {"result": "clean", "iterations": 0, "remaining_issues": 0},
+                             "b": {"result": None, "error": "bootstrap: directory not writable"}}}
+        p = run("batch-summary", "--results", "-", stdin=json.dumps(results))
+        out = json.loads(p.stdout)
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertEqual(out["result"], "escalated")
+        self.assertEqual(out["counts"]["error"], 1)
+        p = run("batch-summary", "--results", '{"parts": {}}')
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("error", json.loads(p.stdout))
+
     def test_invalid_input(self):
         p = run("batch-summary", "--results", "-", stdin=json.dumps({"parts": {"a": {"result": "meh"}}}))
         self.assertEqual(p.returncode, 2)

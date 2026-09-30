@@ -106,6 +106,14 @@ class PlanCheckTest(unittest.TestCase):
         ).replace("**Postconditions:**\n- README shows one `--verbose` example.\n", "**Done when:** README shows the example.\n")
         self.assertEqual(self.check(quick)["errors"], [])
 
+    def test_commit_mentioned_in_prose_is_fine(self):
+        text = VALID.replace("Expected: PASS\n", "Expected: PASS\n\n**Constraints:**\n- Do not run git commit; the engineer commits.\n", 1)
+        self.assertEqual(self.check(text)["errors"], [])
+
+    def test_commit_in_step_line_rejected(self):
+        text = VALID.replace("Expected: PASS\n", "Expected: PASS\n- [ ] **Step 9:** git commit -m done\n", 1)
+        self.assertError(text, "commit step")
+
     def test_commit_step_rejected(self):
         text = VALID.replace("Expected: PASS\n", "Expected: PASS\n\n```bash\ngit commit -m \"feat: x\"\n```\n", 1)
         self.assertError(text, "commit step")

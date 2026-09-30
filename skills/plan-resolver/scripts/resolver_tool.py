@@ -64,6 +64,10 @@ FIXED_EXCLUDED_DIRS = {
     "venv",
 }
 FIXED_EXCLUDED_PREFIXES = {".git/objects"}
+# Tool caches that read-only probes (pytest, mypy, ruff, tsc, eslint) create as a side effect.
+FIXED_EXCLUDED_CACHE_DIRS = {".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis", ".tox", ".nox", ".cache"}
+FIXED_EXCLUDED_FILES = {".eslintcache"}
+FIXED_EXCLUDED_SUFFIXES = (".tsbuildinfo",)
 MAX_FINGERPRINT_FILES = 200_000
 VALID_TASK_MARKERS = {"✅", "⭕️", "⭕", "⚠️", "⚠", "‼️", "‼", "not-applicable"}
 CLOSED_TASK_MARKERS = {"✅", "not-applicable"}
@@ -434,7 +438,9 @@ def matches_gitignore(rel_path: str, is_dir: bool, patterns: Sequence[str]) -> b
 def is_fixed_excluded(rel_path: str, is_dir: bool) -> bool:
     rel_path = rel_path.replace("\\", "/")
     parts = rel_path.split("/")
-    if any(part in FIXED_EXCLUDED_DIRS for part in parts):
+    if any(part in FIXED_EXCLUDED_DIRS or part in FIXED_EXCLUDED_CACHE_DIRS for part in parts):
+        return True
+    if not is_dir and (parts[-1] in FIXED_EXCLUDED_FILES or parts[-1].endswith(FIXED_EXCLUDED_SUFFIXES)):
         return True
     return any(rel_path == prefix or rel_path.startswith(prefix + "/") for prefix in FIXED_EXCLUDED_PREFIXES)
 
@@ -624,7 +630,8 @@ def has_title(text: str) -> bool:
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("# "):
-            return any(stripped.startswith(alias) for alias in SECTION_ALIASES["title"])
+            normalized = stripped.replace("ё", "е").replace("Ё", "Е")
+            return any(normalized.startswith(alias) for alias in SECTION_ALIASES["title"])
     return False
 
 
@@ -798,6 +805,12 @@ def parse_stage_items(text: str) -> Tuple[List[Dict[str, object]], List[Dict[str
         item_id = extract_stage_id(stripped)
         title = clean_stage_title(stripped, status)
         indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent > 0 and not status and not item_id and (tasks or phases):
+            # Detail sub-bullet (e.g. "- evidence_anchor: path#L1-L9") belongs to the item above.
+            owner = tasks[-1] if tasks and tasks[-1]["line_end"] > phases[-1]["line_end"] else phases[-1]
+            owner["raw_text"] = f"{owner['raw_text']} {stripped.lstrip('-*+ ').strip()}"
+            owner["line_end"] = line_number
+            continue
         is_explicit_task = "." in item_id if item_id else indent > 0
 
         if item_id:
@@ -1050,6 +1063,9 @@ def cmd_parse_report(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_report(args: argparse.Namespace) -> int:
+    if not os.path.isfile(args.report):
+        print_json({"valid": False, "path": args.report, "errors": [f"file not found: {args.report}"], "warnings": []})
+        return 2
     valid, result = validate_report(args.report)
     print_json(result)
     return 0 if valid else 1
@@ -1087,22 +1103,29 @@ def cmd_iteration_check(args: argparse.Namespace) -> int:
 
 
 def extract_plan_task_id(line: str) -> str:
+    return extract_plan_task_id_kind(line)[0]
+
+
+def extract_plan_task_id_kind(line: str) -> Tuple[str, str]:
+    """Return (id, kind); kind is 'heading', 'table' or 'list' (bullets and numbered lines)."""
     heading = PLAN_HEADING_RE.match(line)
     if heading:
         rest = heading.group("rest")
-        inner = PLAN_LEADING_ID_RE.match(rest) or PLAN_KEYWORD_ID_RE.match(rest)
-        return normalize_plan_task_id(_leading_id(inner)) if inner else ""
+        keyword = PLAN_KEYWORD_ID_RE.match(rest)
+        inner = PLAN_LEADING_ID_RE.match(rest) or keyword
+        kind = "task-heading" if keyword else "heading"
+        return (normalize_plan_task_id(_leading_id(inner)) if inner else ""), kind
     bullet = PLAN_BULLET_RE.match(line)
     if bullet:
         inner = PLAN_LEADING_ID_RE.match(bullet.group("rest"))
-        return normalize_plan_task_id(_leading_id(inner)) if inner else ""
+        return (normalize_plan_task_id(_leading_id(inner)) if inner else ""), "list"
     table_stage = PLAN_TABLE_STAGE_ID_RE.match(line)
     if table_stage:
-        return normalize_plan_task_id(table_stage.group("id"))
+        return normalize_plan_task_id(table_stage.group("id")), "table"
     numbered = PLAN_NUMBERED_RE.match(line)
     if numbered:
-        return numbered.group("id")
-    return ""
+        return numbered.group("id"), "list"
+    return "", ""
 
 
 def _leading_id(match: "re.Match[str]") -> str:
@@ -1114,8 +1137,7 @@ def normalize_plan_task_id(task_id: str) -> str:
     return task_id.lower()
 
 def extract_plan_task_ids(text: str) -> List[str]:
-    ids: List[str] = []
-    seen = set()
+    found: List[Tuple[str, str]] = []
     in_fence = False
     for line in text.splitlines():
         # Code blocks hold file contents or commands, never plan task units.
@@ -1124,8 +1146,19 @@ def extract_plan_task_ids(text: str) -> List[str]:
             continue
         if in_fence:
             continue
-        task_id = extract_plan_task_id(line)
-        if task_id and task_id not in seen:
+        task_id, kind = extract_plan_task_id_kind(line)
+        if task_id:
+            found.append((task_id, kind))
+    # A plan with Task/Задача headings or a roadmap table is structured: numbered prose lists
+    # inside it are steps, not units (same rule as plan-executor `parse_tasks`). Plans with
+    # plain numeric headings ("## 1. Phase" + "- 1.1 ...") keep their list items.
+    structured = any(kind in ("task-heading", "table") for _id, kind in found)
+    ids: List[str] = []
+    seen = set()
+    for task_id, kind in found:
+        if structured and kind == "list":
+            continue
+        if task_id not in seen:
             seen.add(task_id)
             ids.append(task_id)
     return ids
@@ -1334,7 +1367,10 @@ def cmd_mark_fix(args: argparse.Namespace) -> int:
     if os.path.basename(args.report).lower().endswith("-final.md"):
         print_json({"valid": False, "errors": ["mark-fix-final-report: final reports are closed"]})
         return 1
-    text = read_text(args.report)
+    with open(args.report, "rb") as handle:
+        raw_bytes = handle.read()
+    crlf = b"\r\n" in raw_bytes
+    text = raw_bytes.decode("utf-8").replace("\r\n", "\n")
     issue = next((item for item in parse_issues(text) if item["id"] == args.issue_id), None)
     if issue is None:
         print_json({"valid": False, "errors": [f"mark-fix-unknown-issue: {args.issue_id}"]})
@@ -1366,7 +1402,8 @@ def cmd_mark_fix(args: argparse.Namespace) -> int:
         tail = text[end:]
         body = "\n" + "\n".join(replaced) + ("\n\n" if tail else "\n")
         updated = text[:start] + body + tail
-    with open(args.report, "w", encoding="utf-8", newline="\n") as handle:
+    # Only the Fix Log changes: keep the file's own line endings.
+    with open(args.report, "w", encoding="utf-8", newline="\r\n" if crlf else "\n") as handle:
         handle.write(updated)
     print_json({"valid": True, "report": args.report, "issue_id": args.issue_id, "state": args.state, "action": action, "errors": []})
     return 0

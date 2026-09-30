@@ -42,7 +42,8 @@ SPEC_HEADINGS = (
     "## Open Questions",
 )
 TIERS = ("Quick", "Standard", "Deep")
-TIER_RE = re.compile(r"^>\s*Tier:\s*(?P<tier>\S+)\s*$")
+# "> Tier: Quick", "> **Tier:** Quick" and "> **Tier**: Quick" are all accepted.
+TIER_RE = re.compile(r"^>\s*(?:\*\*)?Tier:?(?:\*\*)?:?\s*(?P<tier>[A-Za-z]+)\s*$")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 PLACEHOLDER_RE = re.compile(r"\b(TBD|TODO|FIXME)\b")
 NONE_TEXT = "(none)"
@@ -229,7 +230,8 @@ def check_spec(text: str) -> Dict[str, Any]:
 
     for heading, body in bodies.items():
         if heading == "## Open Questions":
-            if body not in ("", NONE_TEXT):
+            # Empty, "(none)", or "(none)" plus a one-line rationale.
+            if body and not (body.startswith(NONE_TEXT) and len(body.splitlines()) == 1):
                 errors.append("## Open Questions must be empty or '(none)' before handoff")
         elif not body:
             errors.append(f"empty section: {heading} (use '(none)' with a one-line rationale)")
@@ -286,13 +288,15 @@ def cmd_coverage(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     mentioned = {f"F{m.group(1)}" for m in ID_RE.finditer(spec_text)}
     missing = [fid for fid in expected if fid not in mentioned]
     unknown = sorted(mentioned - set(expected), key=lambda fid: int(fid[1:]))
-    ok = not missing and not unknown
+    # Unknown F-ids are a warning: "F401" in a spec may be a lint code, not a finding.
+    ok = not missing
     return (0 if ok else 1), {
         "ok": ok,
         "expected": len(expected),
         "covered": [fid for fid in expected if fid in mentioned],
         "missing": missing,
         "unknown": unknown,
+        "warnings": [f"unknown finding ids mentioned: {', '.join(unknown)}"] if unknown else [],
     }
 
 

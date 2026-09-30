@@ -755,7 +755,10 @@ def _check_exec_dir(exec_dir, workdir):
     if not _inside(exec_dir, workdir):
         return
     probe = os.path.join(os.path.abspath(exec_dir), "state.json")
-    result = subprocess.run(["git", "check-ignore", "-q", probe], cwd=workdir, capture_output=True, check=False)
+    try:
+        result = subprocess.run(["git", "check-ignore", "-q", probe], cwd=workdir, capture_output=True, check=False)
+    except OSError as exc:
+        raise ToolError(f"git-unavailable: cannot run git to check the exec dir ({exc})", 2)
     if result.returncode != 0:
         raise ToolError(f"exec-dir-inside-workdir: {exec_dir} is inside {workdir} and not git-ignored", 2)
 

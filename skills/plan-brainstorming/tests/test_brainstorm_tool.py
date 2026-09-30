@@ -199,6 +199,18 @@ class SpecCheckTest(unittest.TestCase):
         result = self.check(VALID_SPEC.replace("- Connection retry logic.", "(none)"))
         self.assertIn("## Out of Scope must list excluded work explicitly", result["errors"])
 
+    def test_bold_tier_line_is_recognized(self):
+        for variant in ("> **Tier:** Quick", "> **Tier**: Quick", ">  Tier:   Quick  "):
+            result = self.check(VALID_SPEC.replace("> Tier: Quick", variant))
+            self.assertEqual(result["tier"], "Quick", variant)
+            self.assertEqual(result["warnings"], [], variant)
+
+    def test_open_questions_none_with_rationale(self):
+        result = self.check(VALID_SPEC.replace("## Open Questions\n(none)", "## Open Questions\n(none) — all resolved in review"))
+        self.assertEqual(result["errors"], [])
+        result = self.check(VALID_SPEC.replace("## Open Questions\n(none)", "## Open Questions\n(none)\n- but this one?"))
+        self.assertTrue(any("Open Questions" in e for e in result["errors"]))
+
     def test_tier_missing_or_unknown_is_warning(self):
         self.assertTrue(self.check(VALID_SPEC.replace("> Tier: Quick\n\n", ""))["ok"])
         result = self.check(VALID_SPEC.replace("Tier: Quick", "Tier: Huge"))
@@ -284,6 +296,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out["missing"], ["F2"])
         self.assertEqual(out["unknown"], ["F7"])
+
+    def test_coverage_unknown_only_is_warning(self):
+        spec = self._spec("| F1 | fix |\n| F2 | fix |\nlint code F401 is unrelated\n")
+        code, out = _run("findings-coverage", self.findings_path, spec)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["unknown"], ["F401"])
+        self.assertTrue(out["warnings"])
 
     def test_no_command_exit_2(self):
         proc = subprocess.run([sys.executable, TOOL], capture_output=True)

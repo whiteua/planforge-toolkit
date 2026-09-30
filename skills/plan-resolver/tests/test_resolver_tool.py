@@ -201,6 +201,11 @@ class PreflightAndFingerprintTests(unittest.TestCase):
             process = run_tool("fingerprint-workspace", str(root), str(start_json))
             self.assertEqual(process.returncode, 0, read_json(process))
             write(root / "main-plan-report-1.md", "report")
+            # Probe side effects (tool caches) must not count as workspace mutations.
+            write(root / ".pytest_cache" / "v" / "nodeids", "[]")
+            write(root / ".mypy_cache" / "3.12" / "x.json", "{}")
+            write(root / ".eslintcache", "{}")
+            write(root / "tsconfig.tsbuildinfo", "{}")
             process = run_tool("fingerprint-workspace", str(root), str(current_json))
             self.assertEqual(process.returncode, 0, read_json(process))
             process = run_tool("assert-readonly", str(start_json), str(current_json), "main-plan-report-1.md")
@@ -338,6 +343,26 @@ class ValidateQualityGateTests(unittest.TestCase):
             process = run_tool("validate-report", str(report))
             data = read_json(process)
             self.assertEqual(process.returncode, 0, data)
+
+    def test_final_with_sub_bullet_anchor_passes(self) -> None:
+        # The documented format: the anchor on an indented detail line under the task.
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-2-final.md"
+            write(report, report_with_closed_task(True, "- ✅ 1.1 Done\n    - evidence_anchor: src/x.py#L10-L20"))
+            process = run_tool("validate-report", str(report))
+            data = read_json(process)
+            self.assertEqual(process.returncode, 0, data)
+
+    def test_title_with_yo_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-1.md"
+            write(report, valid_report().replace("# Отчет о выполнении плана 1", "# Отчёт о выполнении плана 1"))
+            process = run_tool("validate-report", str(report))
+            self.assertEqual(process.returncode, 0, read_json(process))
+
+    def test_validate_missing_file_exit_2(self) -> None:
+        process = run_tool("validate-report", "no/such/report.md")
+        self.assertEqual(process.returncode, 2)
 
     def test_final_low_confidence_close_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -607,6 +632,16 @@ class TaskCensusTests(unittest.TestCase):
             self.assertEqual(data["covered"], ["a", "b"])
             self.assertEqual(data["uncovered"], [])
 
+    def test_numbered_prose_is_not_a_unit_in_structured_plans(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root / "main-plan.md", "### Task 1: A\n\nSteps:\n1. do x\n2. do y\n\n### Task 2: B\n\n- 3. not a task\n")
+            report = valid_report().replace("- ✅ 1. Подготовка", "- ✅ 1 A done\n- ✅ 2 B done")
+            write(root / "main-plan-report-1.md", report)
+            data = read_json(run_tool("task-census", str(root / "main-plan.md"), str(root / "main-plan-report-1.md")))
+            self.assertEqual(data["plan_ids"], ["1", "2"])
+            self.assertEqual(data["uncovered"], [])
+
     def test_task_heading_separators_match_executor(self) -> None:
         # "Task 1.2 —" used to be truncated to id "1" by regex backtracking.
         import importlib.util
@@ -691,6 +726,26 @@ def issues_report(issues: list, n: int = 1, extra: str = "") -> str:
     return valid_report().replace(valid_report().split("## Список ошибок\n\n", 1)[1].split("\n\n## Задача", 1)[0], body).replace(
         "# Отчет о выполнении плана 1", f"# Отчет о выполнении плана {n}"
     ) + extra
+
+
+class MarkFixLineEndings(unittest.TestCase):
+    def test_crlf_report_keeps_crlf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-1.md"
+            text = issues_report([("⭕️ not-fixed", "high", "Bug A")]).replace("\n", "\r\n")
+            report.write_bytes(text.encode("utf-8"))
+            process = run_tool("mark-fix", str(report), "1", "applied", "--note", "done")
+            self.assertEqual(process.returncode, 0, read_json(process))
+            raw = report.read_bytes()
+            self.assertEqual(raw.count(b"\r\n"), raw.count(b"\n"))
+            self.assertIn("Ошибка 1: applied".encode("utf-8"), raw)
+
+    def test_lf_report_keeps_lf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-1.md"
+            report.write_bytes(issues_report([("⭕️ not-fixed", "high", "Bug A")]).encode("utf-8"))
+            self.assertEqual(run_tool("mark-fix", str(report), "1", "applied").returncode, 0)
+            self.assertNotIn(b"\r\n", report.read_bytes())
 
 
 class FixLoopToolTests(unittest.TestCase):

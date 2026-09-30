@@ -159,12 +159,13 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
     if tier == "Quick" and any(task["checkpoint"] for task in tasks):
         errors.append("checkpoint tasks are not used on the Quick tier")
 
-    # Placeholders anywhere outside code fences, commit commands anywhere.
+    # Placeholders anywhere outside code fences; commit commands in code fences or step lines
+    # (prose such as "do not run git commit" is fine).
     for number, line, fenced in lines:
         if not fenced and PLACEHOLDER_RE.search(line):
             errors.append(f"line {number}: placeholder: {line.strip()}")
-        if COMMIT_RE.search(line):
-            errors.append(f"line {number}: commit step; plan-executor owns commits, the plan must not commit")
+        if COMMIT_RE.search(line) and (fenced or STEP_RE.match(line)):
+            errors.append(f"line {number}: commit step; no skill commits, the plan must not commit")
 
     # Per-task body checks.
     line_counts: Dict[str, Optional[int]] = {}

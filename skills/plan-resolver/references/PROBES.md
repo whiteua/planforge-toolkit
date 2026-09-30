@@ -9,6 +9,9 @@ Probes — дополнительные проверки, которые мож�
 - `npm test -- --runInBand` или аналогичный read-only test command, если он уже есть в проекте.
 - `go test`, `cargo test`, `dotnet test` только если команда не меняет tracked/source files.
 - Static commands: `python -m py_compile`, `tsc --noEmit`, `eslint` без `--fix`.
+- Кэши инструментов (`.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.hypothesis`, `.tox`, `.nox`,
+  `.cache`, `.eslintcache`, `*.tsbuildinfo`) исключены из workspace fingerprint: их появление
+  после probe не считается мутацией.
 
 ## Forbidden
 

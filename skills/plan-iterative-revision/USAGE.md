@@ -1,13 +1,12 @@
 # plan-iterative-revision — Quick Reference
 
-Audit an implementation plan against the codebase, find errors, and fix them in automated cycles until the plan is clean.
+Audit an implementation plan against the codebase, record the errors in a review file, fix them in
+the plan, and repeat until the plan is clean or a stop gate fires.
 
 ## How to Invoke
 
-In VS Code Copilot chat, type:
-
 ```
-/plan-iterative-revision <plan-path> [preset=...] [stop_policy=...] [interaction=...]
+/plan-iterative-revision <plan-path> [preset=...] [stop_policy=...] [interaction=...] [audit-only]
 ```
 
 ### Usage Examples
@@ -22,11 +21,21 @@ In VS Code Copilot chat, type:
 # Deep red-team audit, strict zero-issues policy
 /plan-iterative-revision docs/plans/plan01-feature.md preset=deep stop_policy=strict
 
-# Audit-only (no fixes, just produce review file)
-/plan-iterative-revision docs/plans/plan01-feature.md preset=standard interaction=autonomous
+# Audit only: one review file, the plan is not changed
+/plan-iterative-revision docs/plans/plan01-feature.md audit-only
 
-# All arguments at once
-/plan-iterative-revision .docs/.plans/refactor/plan.md preset=deep stop_policy=strict interaction=interactive
+# Non-interactive run (as used by plan-splitter); prints one JSON result
+/plan-iterative-revision docs/plans/plan01-feature.md interaction=autonomous
+```
+
+### Batch mode (after plan-splitter)
+
+```bash
+# Verify every part of a split plan in one run, one review trail per part
+/plan-iterative-revision docs/plans/plan01-impl-roadmap.md interaction=autonomous
+
+# Only parts a and c
+/plan-iterative-revision docs/plans/plan01-impl-roadmap.md parts=a,c
 ```
 
 ## Arguments
@@ -34,69 +43,63 @@ In VS Code Copilot chat, type:
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | Plan file path | **Yes** | — | Path to the master plan `.md` file |
-| `preset` | No | `standard` | `quick` / `standard` / `deep` — controls lenses, rigor, max iterations |
+| `preset` | No | `standard` | `quick` / `standard` / `deep`: lenses, code rigor, max iterations |
+| `lenses` / `rigor` / `max` | No | from preset | Override one preset dial |
 | `stop_policy` | No | `pragmatic` | `pragmatic` (stop when only nits remain) / `strict` (zero issues) |
 | `interaction` | No | `auto` | `auto` / `interactive` / `autonomous` |
+| `audit-only` | No | off | Audit once, write the review, do not change the plan |
+| `parts` | No | all | Batch mode: which parts of a roadmap to verify (`a,c`) |
 
-## Presets Explained
+## Presets
 
-| Preset | Lenses | Code Rigor | Max Iterations |
+| Preset | Lenses | Code rigor | Max iterations |
 |---|---|---|---|
-| `quick` | 1 aspect lens | grep-level | 3 |
-| `standard` | 2 aspect lenses | read-level | 5 |
-| `deep` | 3 lenses + red-team L4 | explore (subagent) | 7 |
+| `quick` | 1 | grep | 3 |
+| `standard` | 2 | grep + read | 5 |
+| `deep` | 4 (incl. red-team) | grep + read + Explore subagent | 7 |
 
-## Modes
-
-| Mode | Behavior |
-|---|---|
-| `full-cycle` (default) | Audit → create review → implement fixes → repeat until clean |
-| `audit-only` | Audit → create review file → stop (no fixes applied) |
-
-## What Happens (Full Cycle)
+## What Happens
 
 ```
-Phase A (Audit):  Read plan → verify against code → find issues → write review-N.md
-    ↓
-Phase B (Implement):  Apply fixes from review to the plan (blocker→major→minor→nit)
-    ↓
-Repeat until: issues empty / max reached / stagnation detected
+bootstrap (numbering, language, config, write check)
+  → Phase A: audit plan + code → issues JSON
+  → record: gates + write review-N.md
+  → Phase B: apply review-N to the plan
+  → repeat
 ```
 
 ## Stop Conditions
 
 | Condition | Result |
 |---|---|
-| No issues found (first pass) | "Plan is clean" — no files created |
-| No issues found (pass N>1) | `<plan>-completion.md` written, converged |
-| Max iterations reached | Asks: +3 / +5 / stop |
-| Stagnation (same issues repeat) | Auto-stop with verdict |
-| Regression (old issues reappear) | Hard stop, escalation |
-| Only nits remain (`pragmatic`) | Stop, final review with nits |
+| No issues on the first audit | `clean`, no files created |
+| No issues on a later audit | `converged`, `<plan>-completion.md` written |
+| Only nits remain (`pragmatic`) | `converged`, final review with nits |
+| Same issues as the previous audit | `stagnation` (unchanged) |
+| New issues but nothing resolved for 2 audits | `stagnation` (churn) |
+| A resolved issue comes back | `escalated` (regression) |
+| One issue in 3 consecutive audits | `escalated` (stuck) |
+| Max iterations reached | asks +3 / +5 / stop; autonomous: `limit` |
+
+Only reviews created in the current run count for these gates.
 
 ## Output Files
 
-- `<plan-basename>-review-N.md` — one per audit iteration (historical, immutable)
-- `<plan-basename>-completion.md` — written when cycle converges
+- `<plan-basename>-review-N.md` — one per audit with issues (immutable history)
+- `<plan-basename>-completion.md` — when the cycle converges
 
 ## Prerequisites
 
-- Python ≥ 3.8 in PATH
-- File write tools available (cannot substitute with memory/chat)
-
-## Checklist Before Invoking
-
-- [ ] Plan file exists and is a valid implementation plan
-- [ ] Workspace/codebase is accessible for verification
-- [ ] File creation is possible in the plan's directory
+- Python ≥ 3.8 in PATH, shell access for the helper script
+- The plan's directory is writable
 
 ## Common Errors
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| "Cannot create review file" | Write tools unavailable or directory not writable | Enable file write mode / check permissions |
+| "Cannot create review file" | Plan directory not writable | Check permissions |
 | "Plan is clean" but you see issues | Preset too shallow | Re-run with `preset=deep` |
-| Stagnation after 2 iterations | Issues cannot be resolved by plan edits alone | Review the stagnated issues manually |
+| Stagnation after 2 audits | The same issues survive plan edits | Resolve them manually, then re-run |
 
 ## Pipeline Position
 
@@ -104,5 +107,4 @@ Repeat until: issues empty / max reached / stagnation detected
 plan-brainstorming → plan-writing → [YOU ARE HERE] → plan-splitter → plan-executor → plan-resolver
 ```
 
-**Previous:** `plan-writing` (produces the plan)  
-**Next:** `plan-splitter` (breaks large plans into stages) or `plan-executor` (if plan is small enough)
+Usable at any stage to clean up a plan. `plan-splitter` also runs it on individual stages.

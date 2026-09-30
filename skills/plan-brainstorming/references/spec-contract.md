@@ -18,7 +18,8 @@ A spec document MUST contain these top-level sections, in this order:
 7. `## Out of Scope`
 8. `## Open Questions`
 
-All eight headings are mandatory. A heading with body text "(none)" is
+All eight headings are mandatory and are written in English verbatim, even
+when the spec body is in another language (they are matched literally). A heading with body text "(none)" is
 acceptable for sections that genuinely do not apply (e.g. `Data Flow` for
 a pure CLI tool); a missing heading is a contract violation.
 
@@ -57,7 +58,9 @@ Above `# Goal`, a spec SHOULD carry a one-line tier marker as a blockquote:
 
 ## Preflight Checklist
 
-Used by `plan-writing` before producing a plan.
+Used by `plan-writing` before producing a plan. The structural part is
+automated by `python "<SKILL_DIR>/scripts/brainstorm_tool.py" spec-check <spec>`
+(exit `0` = all four boxes checked; the `Tier` line is reported as a warning).
 
 - [ ] All 8 required headings present, in the listed order.
 - [ ] No section is empty (use `(none)` with one-line rationale instead).

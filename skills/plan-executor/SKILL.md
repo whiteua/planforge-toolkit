@@ -1,71 +1,57 @@
 ---
 name: plan-executor
-description: Use when executing a ready implementation plan, staged roadmap, or whole-plan task list that must advance one unit at a time with ledger-backed progress, gates, retries, checkpoints, and a final resolver proposal.
+description: Use when executing a ready implementation plan, staged roadmap, or whole-plan task list that must advance one unit at a time with ledger-backed progress, gates, retries, rollback snapshots, and a final resolver proposal.
 ---
 
 # plan-executor
 
 ## When to use
 
-Use this skill when the plan already exists and the job is execution, not planning: staged plans from `plan-splitter`, whole plans with explicit Task headings, or implementation roadmaps that need deterministic progress tracking.
+Use this skill when the plan already exists and the job is execution, not planning: staged plans from `plan-splitter`, plans from `plan-writing` (`### Task N:` headings), or other plans with explicit task headings.
 
 Do not use it to invent a plan. Use `plan-writing` or `plan-splitter` first when the input is still unstructured.
 
 ## Hard Invariants
 
 1. Never edit source `*.md` plan or stage files while executing them.
-2. Progress lives only in `state.json`; human progress is generated as `.exec/.../progress.md`.
-3. `state.json` is modified only through `scripts/executor_tool.py` commands.
-4. Destructive operations require explicit engineer confirmation.
-5. A gate cannot pass silently when checks are absent; no tests means escalation, not fake success.
+2. Progress lives only in `state.json`, changed only through `scripts/executor_tool.py`; `progress.md` is generated.
+3. Exactly one unit runs at a time. A failed unit is retried or stops the run before anything else runs.
+4. Nothing is committed to the user's branch: snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`. The final commit is the engineer's.
+5. Destructive operations (`checkpoint-restore`) require explicit engineer confirmation.
+6. A gate cannot pass silently when checks are absent; no tests means escalation, not fake success.
 
-## Phases
+## Tool
 
-- BOOTSTRAP: detect input, parse units, initialize ledger, detect checkpoints, and recommend parallel sessions.
-- EXECUTE LOOP: claim the unit with `ledger-mark running`, execute exactly one ready unit, gate it, checkpoint it, then mark ledger done and render progress.
-- FINALIZE: when all units are done, propose `plan-resolver` options without launching it automatically.
-
-## Prerequisites
-
-- Python ≥ 3.8 in PATH (stdlib only).
-- `<SKILL_DIR>` is the directory containing this `SKILL.md`. Always invoke the
-  script by absolute path: `python "<SKILL_DIR>/scripts/executor_tool.py" ...`.
-
-## Core Tool
-
-Run commands through:
+`<SKILL_DIR>` is the directory containing this `SKILL.md`. Python ≥ 3.8, stdlib only. Every command prints JSON; errors print `{"ok": false, "errors": [...]}` with exit `2` (input/filesystem) or `1` (contract violation).
 
 ```bash
-python "<SKILL_DIR>/scripts/executor_tool.py" <command> [args...]
+T="python <SKILL_DIR>/scripts/executor_tool.py"
+$T ledger-init <exec_dir> <plan_path> --workdir <repo> [--whole] [--allow-dirty] [--accept-drift]
+$T unit-begin  <exec_dir>
+$T unit-finish <exec_dir> <unit_id> pass|fail [--error "<signature>"]
+$T checkpoint-restore <repo> <sha>        # only after engineer confirmation
+$T checkpoint-prune <exec_dir>            # after the run, with confirmation
 ```
 
-Core commands:
+Other commands (`ledger-next`, `ledger-mark`, `ledger-status`, `parse-tasks`, …) are listed in [TOOLING.md](references/TOOLING.md); the loop does not need them.
 
-- `detect-input` (supports `--whole` to force whole-plan mode)
-- `parse-roadmap`
-- `parse-tasks`
-- `ledger-init`
-- `ledger-next`
-- `ledger-mark`
-- `ledger-status`
-- `checkpoint-detect`
-- `checkpoint-create`
-- `checkpoint-restore`
-- `recommend-gate`
-- `recommend-strategy`
-- `scope-context`
-- `recommend-parallel`
-- `render-progress`
+## Workflow
 
-## References
+1. **BOOTSTRAP** — `ledger-init`. `exec_dir` must be outside `<repo>` (or git-ignored). Stop and ask the engineer on these errors: `no-units`, `dirty-worktree`, `plan-drift`, `exec-dir-inside-workdir`. Details: [INPUT-DETECTION.md](references/INPUT-DETECTION.md).
+2. **LOOP** — `unit-begin` → act on `reason`:
 
-- [WORKFLOW.md](references/WORKFLOW.md)
-- [INPUT-DETECTION.md](references/INPUT-DETECTION.md)
-- [EXECUTION-STRATEGY.md](references/EXECUTION-STRATEGY.md)
-- [GATE.md](references/GATE.md)
-- [MULTI-SESSION.md](references/MULTI-SESSION.md)
-- [RESOLVER-PROPOSAL.md](references/RESOLVER-PROPOSAL.md)
+   | `reason` | Action |
+   |---|---|
+   | `ready`, `retry-available` | Execute exactly this unit using `text` and `files` from the result (do not re-read the whole plan), then gate it ([GATE.md](references/GATE.md)) with `strategy` ([EXECUTION-STRATEGY.md](references/EXECUTION-STRATEGY.md)) and call `unit-finish`. |
+   | `in-progress` | A previous attempt was not finished: gate the current state and call `unit-finish`. |
+   | `exhausted`, `stagnated`, `blocked` | STOP with a stop-report. |
+   | `all-done` | Go to FINALIZE. |
+
+   `unit-finish … pass` snapshots and marks done (a failed snapshot turns into `fail`). `unit-finish … fail` returns `decision` (`retry`/`stop`) and `restore_to`; ask the engineer before `checkpoint-restore <repo> <restore_to>`, then loop.
+3. **FINALIZE** — propose `plan-resolver` per [RESOLVER-PROPOSAL.md](references/RESOLVER-PROPOSAL.md); offer `checkpoint-prune`.
+
+Units of one `parallel_group` may run in any order, but always one at a time in one session.
 
 ## Stop Reports
 
-Use [stop-report.en.md](assets/stop-report.en.md) or [stop-report.ru.md](assets/stop-report.ru.md) when execution stops because retries are exhausted, stagnation is detected, rollback needs a decision, or the engineer must choose the next step.
+Use [stop-report.en.md](assets/stop-report.en.md) or [stop-report.ru.md](assets/stop-report.ru.md) according to `executor_tool.py detect-lang <plan>` (`ru` when more than 5% of the plan's letters are Cyrillic, otherwise `en`). Put `git diff --stat` and at most ~80 lines of diff into the report, not the full diff.

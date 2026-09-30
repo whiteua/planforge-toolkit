@@ -1,6 +1,6 @@
 # plan-writing — Quick Reference
 
-Transform a validated spec into a detailed, bite-sized implementation plan.
+Transform an approved spec into a detailed, bite-sized implementation plan.
 
 ## How to Invoke
 
@@ -13,11 +13,11 @@ In VS Code Copilot chat, type:
 ### Usage Examples
 
 ```bash
-# Standard invocation with a spec file
-/plan-writing .docs/.plans/my-feature/spec.md
-
-# Spec in a different location
+# Standard invocation with a spec from plan-brainstorming
 /plan-writing .docs/.plans/my-feature/plan01-spec.md
+
+# Any spec name works; the plan goes next to it
+/plan-writing .docs/.plans/my-feature/auth-spec.md
 ```
 
 Usually invoked **automatically** by `plan-brainstorming` after spec approval — manual invocation needed only if you skipped brainstorming or want to re-run.
@@ -26,17 +26,17 @@ Usually invoked **automatically** by `plan-brainstorming` after spec approval �
 
 | Argument | Required | Description |
 |---|---|---|
-| Spec file path | **Yes** | Path to a spec `.md` file that passes the preflight checks |
+| Spec file path | **Yes** | Path to a spec `.md` file that passes `spec-check` |
 
 ## What Happens
 
-1. **Spec Preflight** — verifies all 8 required sections, no empty sections, `Open Questions` is `(none)`
-2. **Tier Read** — inherits tier from spec's `> Tier:` line (defaults to Standard if missing)
-3. **Scope Check** — flags multi-subsystem specs for decomposition
+1. **Spec Preflight** — `plan-brainstorming/scripts/brainstorm_tool.py spec-check`: all 8 sections in order, none empty, `Open Questions` is `(none)`
+2. **Tier Read** — inherits the tier from the spec's `> Tier:` line (Standard if missing)
+3. **Scope Check** — a spec with several independent subsystems stops for your choice of how to split it
 4. **File Structure** — maps out which files will be created/modified
-5. **Task Generation** — writes tasks with TDD steps, exact code, file paths
-6. **Self-Review** — checks spec coverage, placeholders, type consistency, task size
-7. **Execution Handoff** — offers next pipeline step (audit via `plan-iterative-revision`, split via `plan-splitter`, or execute via `plan-executor`); waits for the user's explicit choice
+5. **Task Generation** — tasks with TDD steps, exact code, file paths; no commit steps
+6. **Check and Self-Review** — `scripts/plan_tool.py plan-check` for the format contract, then spec coverage, consistency and task size (Deep: plus a reviewer subagent)
+7. **Execution Handoff** — offers the next step (audit via `plan-iterative-revision`, split via `plan-splitter`, or execute via `plan-executor`); waits for your explicit choice
 
 ## Spec Preflight Requirements
 
@@ -55,15 +55,19 @@ The input spec **must** have:
 
 ## Tier Effect on Tasks
 
-| Tier | Preconditions/Postconditions | Constraints | If stuck | Phase Checkpoints |
+| Tier | Done-state | Constraints | If stuck | Checkpoint tasks |
 |---|---|---|---|---|
-| Quick | Collapsed to `Done when:` line | Only when critical | Omit if no likely failures | Never |
-| Standard | Full blocks | When multiple approaches exist | 2–3 failure modes | Optional |
-| Deep | Full + detailed | Always present | Comprehensive | Recommended |
+| Quick | One `Done when:` line | Omit | Omit | Not used |
+| Standard | Full Preconditions + Postconditions | Only for a real fork | Only for likely traps | Allowed |
+| Deep | Full Preconditions + Postconditions | Only for a real fork | Recommended | Allowed |
 
 ## Output
 
-Plan file saved to `<dir>/<plan-root>-impl.md` (e.g. `plan01-impl.md`, next to the spec; or user-specified path).
+Plan file next to the spec: `<X>-spec.md` → `<X>-impl.md` (e.g. `plan01-spec.md` → `plan01-impl.md`), or a user-specified path.
+
+The plan header carries `**Spec:**` and `**Tier:**`; tasks use `### Task N: <title>` headings. This is the format `plan-executor` and `plan-resolver` parse. Plans contain no `git commit` steps; committing the result is up to you.
+
+Language: the plan body follows the spec's language; the parsed markers (`### Task N:`, `**Files:**`, `**Step N:**`, ...) stay in English.
 
 ## Checklist Before Invoking
 
@@ -76,7 +80,8 @@ Plan file saved to `<dir>/<plan-root>-impl.md` (e.g. `plan01-impl.md`, next to t
 | Symptom | Cause | Fix |
 |---|---|---|
 | "Spec preflight failed" | Missing section or non-empty Open Questions | Return to `plan-brainstorming` to fix the spec |
-| Tasks too large | Complex feature crammed into one task | Agent should auto-split; if not, ask to split |
+| "plan-brainstorming not installed" | `../plan-brainstorming/scripts/brainstorm_tool.py` missing | Install both skills side by side |
+| Tasks too large | Complex feature crammed into one task | The agent splits it; `plan-check` warns above 100 lines of code in a task |
 | "No tier line" message | Legacy spec without `> Tier:` | Not an error — defaults to Standard |
 
 ## Pipeline Position

@@ -1,100 +1,85 @@
 # plan-splitter — Quick Reference
 
-Decompose a large plan into self-contained stages, each executable in a single agent pass.
+Decompose a large plan into self-contained parts (`<base>-a.md`, `<base>-b.md`, …) with a
+dependency roadmap, each part executable in a single agent pass.
 
 ## How to Invoke
 
-In VS Code Copilot chat, type:
-
 ```
-/plan-splitter <plan-path> [revision-model] [verify=...] [verify_depth=...] [verify_mode=...]
+/plan-splitter <plan-path> [verify=ask|all|none|a,c] [verify_depth=quick|standard|deep] [verify_mode=full-cycle|audit-only]
 ```
 
 ### Usage Examples
 
 ```bash
-# Minimal — let the skill decide whether to split
-/plan-splitter docs/plans/plan01-modernization.md
+# Minimal — the skill decides whether to split at all
+/plan-splitter docs/plans/plan01-impl.md
 
-# With a specific model for subagent verification
-/plan-splitter docs/plans/plan01-modernization.md "Claude Opus 4 (copilot)"
+# Split and deep-verify every part
+/plan-splitter docs/plans/plan01-impl.md verify=all verify_depth=deep
 
-# Verify all stages deeply after splitting
-/plan-splitter docs/plans/plan01-modernization.md verify=all verify_depth=deep
+# Verify only parts a and c, reviews only (parts are not edited)
+/plan-splitter docs/plans/plan01-impl.md verify=a,c verify_mode=audit-only
 
-# Audit-only verification (no fixes to stages)
-/plan-splitter .docs/.plans/refactor/plan.md verify=all verify_depth=standard verify_mode=audit-only
-
-# Skip deep verification entirely
-/plan-splitter docs/plans/plan01-modernization.md verify=none
+# Skip deep verification
+/plan-splitter docs/plans/plan01-impl.md verify=none
 ```
 
 ## Arguments
 
 | Argument | Required | Default | Description |
 |---|---|---|---|
-| Plan file path | **Yes** | — | Path to the master plan `.md` file |
-| Revision model | No | Current active model | Model name for subagent verification |
-| `verify` | No | `ask` | `ask` / `all` / `none` — deep verification scope |
-| `verify_depth` | No | `standard` | `quick` / `standard` / `deep` — depth for plan-iterative-revision |
-| `verify_mode` | No | `full-cycle` | `full-cycle` / `audit-only` — fix stages or just review |
+| Plan file path | **Yes** | — | Path to the plan `.md` |
+| `verify` | No | `ask` | `ask` / `all` / `none` / part list — deep verification scope (non-interactive `ask` = `none`) |
+| `verify_depth` | No | `standard` | `quick` / `standard` / `deep` — `preset` for plan-iterative-revision |
+| `verify_mode` | No | `full-cycle` | `full-cycle` / `audit-only` — may verification edit the parts |
 
 ## What Happens
 
 ```
-1. BOOTSTRAP — read plan, detect language, preflight write check
-2. GATE DECISION — evaluate 5 factors: split or not?
-   → "Don't split" → outputs gate-pass notice, exits (not an error)
-   → "Split" → continue
-3. ANALYSIS — find stage boundaries, dependency graph, weights (🔴/🟡/🟢)
-4. DRAFT & CONFIRM — show split table to user, one retry if rejected
-5. GENERATE FILES — write roadmap + stg01..stgN files
-6. VERIFY (3 levels) — formal/cross-validation/content check
-7. OPTIONAL DEEP VERIFY — run plan-iterative-revision on selected stages
+1. BOOTSTRAP        — language, write preflight, existing artifacts
+2. GATE DECISION    — 5 factors: split or not? ("keep" is a normal outcome)
+3. ANALYSIS         — boundaries, dependency graph, parallel groups, weights 🔴/🟡/🟢
+4. DRAFT & CONFIRM  — you approve the split table (one retry)
+5. GENERATE         — <base>-roadmap.md + <base>-a.md, -b.md, …
+6. VERIFY           — validate-all (files, DAG, coverage, hash) + content re-read
+7. VERIFY CHOICE    — deep verification? (scope, depth, mode)
+8. DEEP VERIFY      — one plan-iterative-revision batch run over the parts, machine gate
 ```
 
 ## Output Files
 
-All files are created **next to** the original plan (which is NEVER modified):
+All files are created next to the original plan, which is never modified:
 
 | File | Purpose |
 |---|---|
-| `<base>-stg00-roadmap.md` | Stage map: dependencies, parallel groups, weights |
-| `<base>-stg01.md` ... `<base>-stgNN.md` | Self-contained stage files |
-| `<base>-stg00-verify-baseline.json` | Verification snapshot (if deep verify runs) |
-| `<base>-stg00-verify-ledger.json` | Verification results ledger |
+| `<base>-roadmap.md` | Part map: dependencies, parallel groups, weights |
+| `<base>-a.md`, `<base>-b.md`, … (`aa`, `ab` after `z`) | Self-contained parts |
+| `<base>-verify-baseline.json`, `<base>-verify-ledger.json` | Deep-verification snapshot and ledger |
+| `<base>-<id>-review-N.md`, `<base>-<id>-completion.md` | Review trail per part (written by plan-iterative-revision) |
 
-## Gate Decision
+## Deep Verification
 
-The skill may decide the plan does NOT need splitting (too small, already focused). This is a valid outcome — you'll get a `gate-pass` notice explaining why.
-
-## Verification Options
-
-When asked about deep verification:
-- **all** — verify every stage with `plan-iterative-revision`
-- **subset** — verify only selected stages (e.g., `stg01, stg03`)
-- **none** — skip deep verification (only formal + cross-validation done)
+`plan-iterative-revision` runs once on the roadmap and verifies the selected parts one after
+another. `verify-status` then checks every claim against the files: a `converged` part needs a
+validated review and a changed file, a `clean` part needs neither. `missing` parts are
+re-dispatched once; `inconsistent` stops the run. Parts with warnings are listed in the summary.
 
 ## Prerequisites
 
 - Python ≥ 3.8 in PATH
-- File write tools available
-- Original plan will NOT be modified (read-only)
-
-## Checklist Before Invoking
-
-- [ ] Plan exists and is a finalized implementation plan (ideally already passed iterative-revision)
-- [ ] Plan is large enough to warrant splitting (>15 tasks is a good heuristic)
-- [ ] Directory is writable for stg-file creation
+- Writable plan directory
+- For deep verification: `plan-iterative-revision` installed next to this skill, and a subagent tool
 
 ## Common Errors
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| "Gate: don't split" | Plan is small/focused enough | Not an error — proceed to executor directly |
-| "Cannot create stg files" | Write tools unavailable | Enable file write mode |
-| Conflict: existing stg files | Previous split exists | Choose: overwrite / rename / abort |
-| Stage too large (>15 tasks) | Coarse split | Re-run splitter on that specific stage |
+| "Gate: keep" | Plan is small or focused enough | Not an error; run plan-executor directly |
+| "Cannot write to directory" | Directory not writable | Check permissions |
+| Existing split artifacts | A previous split exists | Choose overwrite / another base / abort |
+| Part too large (> 15 tasks) | Coarse split | Re-run the splitter on that part |
+| `invalid stage id` | Roadmap row id is not letters | Use `a`, `b`, … in the Stage column |
 
 ## Pipeline Position
 
@@ -102,5 +87,5 @@ When asked about deep verification:
 plan-brainstorming → plan-writing → plan-iterative-revision → [YOU ARE HERE] → plan-executor → plan-resolver
 ```
 
-**Previous:** `plan-iterative-revision` (validates the plan)  
-**Next:** `plan-executor` (executes stages one by one)
+**Previous:** `plan-writing` or `plan-iterative-revision`
+**Next:** `plan-executor` on `<base>-roadmap.md`

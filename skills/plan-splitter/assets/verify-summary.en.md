@@ -1,14 +1,14 @@
 ## Deep verification summary
 
-| Stage | Result | Iterations | Remaining | Verified |
-|-------|--------|------------|-----------|----------|
+| Part | Result | Iterations | Remaining | Verdict | Stop reason |
+|------|--------|------------|-----------|---------|-------------|
 {{VERIFY_TABLE}}
 
 {{#IF_ALL_CLEAN}}
-All selected stages passed verification with no remaining issues.
+All selected parts passed verification with no remaining issues.
 {{/IF_ALL_CLEAN}}
 
 {{#IF_HAS_WARNINGS}}
-⚠️ Stages with remaining issues or machine verdict `satisfied_with_warning`/`missing`/`inconsistent`: {{WARNING_STAGES}}.
-Recommendation: run plan-iterative-revision manually on the flagged stages.
+⚠️ Parts with remaining issues or verdict `satisfied_with_warning`: {{WARNING_PARTS}}.
+Recommendation: run `/plan-iterative-revision {{BASE_NAME}}-<id>.md` on them by hand.
 {{/IF_HAS_WARNINGS}}

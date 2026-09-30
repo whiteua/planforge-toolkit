@@ -2,16 +2,40 @@
 """
 next_review_index.py — utility for the plan-iterative-revision skill.
 
-Subcommands:
+Run orchestration (used by SKILL.md):
+  bootstrap <plan> [--preset P] [--lenses L] [--rigor R] [--max M] [--stop-policy S]
+      One-shot start: paths, lang, run_start (first review number of this run), prev review,
+      resolved config, write probe, git root. Exit 0 ok, 1 not writable, 2 bad input.
+
+  record <plan> --run-start N0 --max M --issues <file|-> [--stop-policy S]
+         [--mode full-cycle|audit-only] [--interaction interactive|autonomous] [--user-stop] [--lang ru|en]
+      Takes the Phase A issues JSON, resolves 'carry' fingerprints, computes fingerprints, merges
+      duplicates, applies ALL loop gates (single authority), renders + writes + strictly validates
+      REVIEW(N) or the completion file, and prints {action, result, stop_reason, ..., final?}.
+
+  guard-begin <git-root> <label> / guard-check <git-root> <label> <allowed-path>...
+      Diff guard with snapshots stored in the OS temp dir (never inside the repository).
+      Use a label unique per plan and phase (e.g. "<basename>-phase-a"): concurrent runs
+      in the same repository must not share a label.
+
+  parts <roadmap>
+      Batch mode input: parse a plan-splitter '<base>-roadmap.md' and list its parts in table
+      order: {"dir", "base", "parts": [{"id", "path", "exists", "title"}]}.
+
+  batch-summary --results <file|->
+      Fold per-part final JSONs ({"parts": {"a": {...}}}) into one batch result:
+      {"result": <worst>, "parts": {...}, "counts": {...}}.
+
+Low-level subcommands:
   next <dir> <basename>
       Scan <dir> for files matching '<basename>-review-*.md', extract numeric N,
       print JSON: {"next": N+1, "prev": "<path>"|null, "max": N|0}.
 
-  digest <dir> <basename>
+  digest <dir> <basename> [--since N]
       Print a compact machine digest of REVIEW history as JSON:
       {iteration, active_contracts[], resolved_contracts[]}. No flows (S_i unknown at audit start).
 
-  flow-analyze <dir> <basename> --current <fps.json|->
+  flow-analyze <dir> <basename> --current <fps.json|-> [--since N]
       Set-algebra over fingerprint history vs current audit S_i. Print JSON:
       {iteration, flows{new,resolved,persisted,reintroduced}, persisted_counts, result, stop_reason}.
       result/stop_reason are a deterministic SUGGESTER; WORKFLOW remains authoritative.
@@ -88,16 +112,18 @@ VALID_CATEGORIES = {
 PRESETS = {
     "quick": {"lenses": 1, "rigor": "grep", "max": 3},
     "standard": {"lenses": 2, "rigor": "read", "max": 5},
-    "deep": {"lenses": 3, "rigor": "explore", "max": 7},
+    "deep": {"lenses": 4, "rigor": "explore", "max": 7},
 }
 RIGOR_LEVELS = ("grep", "read", "explore")
 STOP_POLICIES = ("pragmatic", "strict")
+MAX_LENSES = 4
 CHURN_WINDOW = 2
 K_STUCK = 3
+SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
 
 
 def print_json(data: object) -> None:
-    print(json.dumps(data, ensure_ascii=False, sort_keys=True))
+    print(json.dumps(data, ensure_ascii=True, sort_keys=True))
 
 
 def normalize_required_fix(text: str) -> str:
@@ -265,10 +291,14 @@ def parse_review_issues(text: str) -> List[Dict[str, str]]:
         first_line = required_fix.strip().splitlines()[0].strip() if required_fix.strip() else ""
         issues.append(
             {
+                "id": heading.group("id"),
+                "title": heading.group("title").strip(),
                 "fingerprint": fingerprint,
                 "severity": heading.group("severity").lower(),
                 "category": heading.group("category").lower(),
                 "required_fix": required_fix.strip(),
+                "acceptance": (extract_issue_field(block, "Acceptance") or "").strip(),
+                "location_in_plan": (extract_issue_field(block, "Location in plan") or "").strip(),
                 "fix": first_line,
                 "status": status,
             }
@@ -276,7 +306,7 @@ def parse_review_issues(text: str) -> List[Dict[str, str]]:
     return issues
 
 
-def collect_review_files(directory: str, basename: str) -> List[Tuple[int, str]]:
+def collect_review_files(directory: str, basename: str, since: int = 0) -> List[Tuple[int, str]]:
     if not os.path.isdir(directory):
         return []
     target_base = basename.lower()
@@ -286,16 +316,18 @@ def collect_review_files(directory: str, basename: str) -> List[Tuple[int, str]]
         if not m or m.group("base").lower() != target_base:
             continue
         try:
-            matches.append((int(m.group("n")), os.path.join(directory, entry)))
+            n = int(m.group("n"))
         except ValueError:
             continue
+        if n >= since:
+            matches.append((n, os.path.join(directory, entry)))
     matches.sort(key=lambda t: t[0])
     return matches
 
 
-def ordered_fingerprint_sets(directory: str, basename: str) -> List[set]:
+def ordered_fingerprint_sets(directory: str, basename: str, since: int = 0) -> List[set]:
     sets: List[set] = []
-    for _n, path in collect_review_files(directory, basename):
+    for _n, path in collect_review_files(directory, basename, since):
         fps = {iss["fingerprint"] for iss in parse_review_issues(read_text(path)) if iss["fingerprint"]}
         sets.append(fps)
     return sets
@@ -497,6 +529,8 @@ def parse_git_status_line(line: str) -> Optional[Dict[str, str]]:
     path = line[3:] if len(line) > 3 else ""
     if " -> " in path:
         path = path.split(" -> ", 1)[1]
+    if len(path) >= 2 and path[0] == path[-1] == '"':
+        path = path[1:-1]
     return {"status": status, "path": path.replace("\\", "/")}
 
 
@@ -512,10 +546,12 @@ def file_sha256_or_none(path: str) -> Optional[str]:
 
 def git_changed(root: str) -> Tuple[int, Dict[str, object]]:
     proc = subprocess.run(
-        ["git", "-C", root, "status", "--porcelain=v1", "--untracked-files=all"],
+        ["git", "-c", "core.quotepath=off", "-C", root, "status", "--porcelain=v1", "--untracked-files=all"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode != 0:
         return proc.returncode, {"error": proc.stderr.strip() or "git status failed", "root": root}
@@ -581,7 +617,7 @@ def cmd_check_allowed(before_json: str, after_json: str, allowed: Sequence[str])
     return 0 if not violations else 1
 
 
-def cmd_resolve_config(args: List[str]) -> int:
+def resolve_config(args: List[str]) -> Dict[str, object]:
     preset = "standard"
     stop_policy = "pragmatic"
     overrides: Dict[str, str] = {}
@@ -619,10 +655,10 @@ def cmd_resolve_config(args: List[str]) -> int:
     if "lenses" in overrides:
         try:
             lenses = int(overrides["lenses"])
-            if 1 <= lenses <= 3:
+            if 1 <= lenses <= MAX_LENSES:
                 config["lenses"] = lenses
             else:
-                errors.append("lenses must be in [1,3]")
+                errors.append(f"lenses must be in [1,{MAX_LENSES}]")
         except ValueError:
             errors.append(f"lenses must be an integer: {overrides['lenses']}")
     if "rigor" in overrides:
@@ -651,12 +687,17 @@ def cmd_resolve_config(args: List[str]) -> int:
     }
     if errors:
         result["error"] = "; ".join(errors)
+    return result
+
+
+def cmd_resolve_config(args: List[str]) -> int:
+    result = resolve_config(args)
     print_json(result)
-    return 0 if not errors else 2
+    return 2 if "error" in result else 0
 
 
-def cmd_digest(directory: str, basename: str) -> int:
-    files = collect_review_files(directory, basename)
+def cmd_digest(directory: str, basename: str, since: int = 0) -> int:
+    files = collect_review_files(directory, basename, since)
     if not files:
         print_json({"iteration": 1, "active_contracts": [], "resolved_contracts": []})
         return 0
@@ -673,9 +714,13 @@ def cmd_digest(directory: str, basename: str) -> int:
         active.append(
             {
                 "fingerprint": fingerprint,
+                "id": issue["id"],
                 "severity": issue["severity"],
+                "category": issue["category"],
                 "status": issue["status"],
                 "fix": issue["fix"],
+                "required_fix": issue["required_fix"],
+                "acceptance": issue["acceptance"],
             }
         )
 
@@ -690,6 +735,8 @@ def cmd_digest(directory: str, basename: str) -> int:
     resolved = [
         {
             "fingerprint": fingerprint,
+            "id": issue["id"],
+            "category": issue["category"],
             "severity": issue["severity"],
             "status": "Fixed",
             "fix": issue["fix"],
@@ -697,7 +744,14 @@ def cmd_digest(directory: str, basename: str) -> int:
         for fingerprint, issue in earlier.items()
         if fingerprint not in latest_fingerprints
     ]
-    print_json({"iteration": latest_n + 1, "active_contracts": active, "resolved_contracts": resolved})
+    print_json(
+        {
+            "iteration": latest_n + 1,
+            "latest_review": os.path.basename(latest_path),
+            "active_contracts": active,
+            "resolved_contracts": resolved,
+        }
+    )
     return 0
 
 
@@ -719,8 +773,8 @@ def load_current_fingerprints(arg: str) -> set:
     return {str(x).strip().lower() for x in data if str(x).strip()}
 
 
-def cmd_flow_analyze(directory: str, basename: str, current_arg: str) -> int:
-    history = ordered_fingerprint_sets(directory, basename)
+def cmd_flow_analyze(directory: str, basename: str, current_arg: str, since: int = 0) -> int:
+    history = ordered_fingerprint_sets(directory, basename, since)
     try:
         current = load_current_fingerprints(current_arg)
     except (OSError, ValueError) as exc:
@@ -748,12 +802,708 @@ def cmd_completion_path(directory: str, basename: str) -> int:
     return 0
 
 
+
+# ---------- batch mode over plan-splitter parts ----------
+
+ROADMAP_SUFFIX = "-roadmap.md"
+PART_ID_RE = re.compile(r"^[a-z]{1,2}$")
+ROADMAP_HEADER_RE = re.compile(r"\|\s*(stage|стадия)\s*\|", re.IGNORECASE)
+# Worst result first: the batch result is the worst part result.
+RESULT_SEVERITY = ("escalated", "stagnation", "limit", "converged", "clean")
+
+
+def parse_roadmap_parts(text: str) -> List[Dict[str, str]]:
+    """Minimal reader of the plan-splitter roadmap table: id + title, in table order."""
+    rows: List[Dict[str, str]] = []
+    in_table = False
+    for line in text.splitlines():
+        if not in_table:
+            in_table = bool(ROADMAP_HEADER_RE.search(line))
+            continue
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            if rows:
+                break
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) < 2 or all(re.fullmatch(r":?-{3,}:?", c) for c in cells if c):
+            continue
+        if ROADMAP_HEADER_RE.search(line):
+            continue
+        rows.append({"id": cells[0].lower(), "title": cells[1]})
+    return rows
+
+
+def cmd_parts(roadmap: str) -> int:
+    if not os.path.isfile(roadmap):
+        print_json({"error": f"roadmap not found: {roadmap}"})
+        return 2
+    name = os.path.basename(roadmap)
+    if not name.endswith(ROADMAP_SUFFIX):
+        print_json({"error": f"not a roadmap file (expected *{ROADMAP_SUFFIX}): {name}"})
+        return 2
+    directory = os.path.dirname(os.path.abspath(roadmap))
+    base = name[: -len(ROADMAP_SUFFIX)]
+    rows = parse_roadmap_parts(read_text(roadmap))
+    invalid = [row["id"] for row in rows if not PART_ID_RE.match(row["id"])]
+    if invalid:
+        print_json({"error": "invalid part ids in roadmap table: " + ", ".join(invalid)})
+        return 2
+    if not rows:
+        print_json({"error": "roadmap table is empty"})
+        return 2
+    parts = []
+    for row in rows:
+        path = os.path.join(directory, f"{base}-{row['id']}.md")
+        parts.append({"id": row["id"], "title": row["title"], "path": path, "exists": os.path.isfile(path)})
+    print_json({"roadmap": os.path.abspath(roadmap), "dir": directory, "base": base, "parts": parts})
+    return 0 if all(p["exists"] for p in parts) else 1
+
+
+def cmd_batch_summary(results_arg: str) -> int:
+    raw = sys.stdin.read() if results_arg == "-" else read_text(results_arg)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print_json({"error": f"invalid results JSON: {exc.msg}"})
+        return 2
+    parts = payload.get("parts") if isinstance(payload, dict) else None
+    if not isinstance(parts, dict) or not parts:
+        print_json({"error": "results JSON must be an object with a non-empty 'parts' object"})
+        return 2
+    counts = {name: 0 for name in RESULT_SEVERITY}
+    invalid: List[str] = []
+    for part_id, final in parts.items():
+        result = final.get("result") if isinstance(final, dict) else None
+        if result in counts:
+            counts[result] += 1
+        else:
+            invalid.append(str(part_id))
+    if invalid:
+        print_json({"error": "parts without a valid result: " + ", ".join(sorted(invalid))})
+        return 2
+    worst = next(name for name in RESULT_SEVERITY if counts[name])
+    remaining = sum(int(final.get("remaining_issues") or 0) for final in parts.values())
+    print_json({"result": worst, "remaining_issues": remaining, "counts": counts, "parts": parts})
+    return 0
+
+
+# ---------- run orchestration: bootstrap / record / guard ----------
+
+CYRILLIC_EXTRA = set("ЁёІіЇїЄєҐґ")
+STATUS_LINES = {
+    "user-stop": "FINAL — implementation skipped by user",
+    "limit": "FINAL — iteration limit reached",
+    "drain": "FINAL — only nit issues remain (pragmatic stop)",
+    "audit-only": "FINAL — audit-only mode, Phase B not run",
+    "escalated": "ESCALATED — stuck issue needs manual decision",
+    "stagnation": "FINAL — no progress between iterations",
+}
+REVIEW_TITLE = {"ru": "Ревизия", "en": "Revision"}
+REQUIRED_INPUT_FIELDS = ("title", "location_in_plan", "code_cross_check", "problem", "required_fix", "acceptance")
+
+
+def pop_since(args: List[str]) -> Tuple[List[str], Optional[int]]:
+    """Strip an optional '--since N' pair; return (rest, since) or (rest, None) on a bad value."""
+    rest: List[str] = []
+    since = 0
+    i = 0
+    while i < len(args):
+        if args[i] == "--since":
+            if i + 1 >= len(args):
+                return rest, None
+            try:
+                since = int(args[i + 1])
+            except ValueError:
+                return rest, None
+            i += 2
+            continue
+        rest.append(args[i])
+        i += 1
+    return rest, since
+
+
+def detect_lang(text: str) -> str:
+    alpha = [ch for ch in text if ch.isalpha()]
+    if not alpha:
+        return "en"
+    cyrillic = sum(1 for ch in alpha if "А" <= ch <= "я" or ch in CYRILLIC_EXTRA)
+    return "ru" if cyrillic / len(alpha) > 0.05 else "en"
+
+
+def git_root_of(directory: str) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", directory, "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return os.path.abspath(proc.stdout.strip())
+
+
+def git_blob_of(path: str) -> Optional[str]:
+    try:
+        proc = subprocess.run(["git", "hash-object", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except OSError:
+        return None
+    value = proc.stdout.strip()
+    return value if proc.returncode == 0 and re.match(r"^[0-9a-f]{40,64}$", value) else None
+
+
+def utc_now() -> str:
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def plan_parts(plan: str) -> Tuple[str, str]:
+    plan_abs = os.path.abspath(plan)
+    base = os.path.basename(plan_abs)
+    if base.lower().endswith(".md"):
+        base = base[:-3]
+    return os.path.dirname(plan_abs), base
+
+
+def next_review_number(directory: str, basename: str) -> Tuple[int, Optional[str]]:
+    files = collect_review_files(directory, basename)
+    if not files:
+        return 1, None
+    return files[-1][0] + 1, files[-1][1]
+
+
+def probe_writable(directory: str, basename: str) -> Optional[str]:
+    probe = os.path.join(directory, f".{basename}-review-write-test-{os.getpid()}.tmp")
+    try:
+        fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+        os.remove(probe)
+    except OSError as exc:
+        return f"cannot create files in {directory}: {exc}"
+    return None
+
+
+def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
+    if not os.path.isfile(plan):
+        print_json({"valid": False, "error": f"plan not found: {plan}"})
+        return 2
+    config = resolve_config(config_args)
+    if "error" in config:
+        print_json({"valid": False, "error": config["error"], "config": config})
+        return 2
+    directory, basename = plan_parts(plan)
+    n, prev = next_review_number(directory, basename)
+    errors: List[str] = []
+    probe_error = probe_writable(directory, basename)
+    if probe_error:
+        errors.append(probe_error)
+    warnings: List[str] = []
+    if not plan.lower().endswith(".md"):
+        warnings.append("plan file does not have .md extension")
+    git_root = git_root_of(directory)
+    if git_root is None:
+        warnings.append("plan is not inside a git repository; diff guard is unavailable")
+    print_json(
+        {
+            "valid": not errors,
+            "errors": errors,
+            "warnings": warnings,
+            "plan": os.path.abspath(plan),
+            "dir": directory,
+            "basename": basename,
+            "lang": detect_lang(read_text(plan)),
+            "run_start": n,
+            "next_review": os.path.join(directory, f"{basename}-review-{n}.md"),
+            "prev_review": prev,
+            "completion_path": os.path.join(directory, f"{basename}-completion.md"),
+            "git_root": git_root,
+            "config": config,
+        }
+    )
+    return 0 if not errors else 1
+
+
+# --- guard: snapshots live in the OS temp dir, never in the user's repo ---
+
+def guard_snapshot_path(root: str, label: str) -> str:
+    import tempfile
+
+    key = hashlib.sha1(os.path.realpath(root).encode("utf-8")).hexdigest()[:12]
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]", "_", label)
+    folder = os.path.join(tempfile.gettempdir(), "plan-iterative-revision", key)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"{safe_label}.json")
+
+
+def cmd_guard_begin(root: str, label: str) -> int:
+    code, snapshot = git_changed(root)
+    if code != 0:
+        print_json({"valid": False, "git": False, "warning": "git status unavailable; check changed files manually", **snapshot})
+        return 3
+    with open(guard_snapshot_path(root, label), "w", encoding="utf-8") as f:
+        json.dump(snapshot, f)
+    print_json({"valid": True, "git": True, "label": label, "changed_count": len(snapshot["changed"])})
+    return 0
+
+
+def relative_to_root(root: str, path: str) -> str:
+    if os.path.isabs(path):
+        try:
+            return normalize_path(os.path.relpath(os.path.realpath(path), os.path.realpath(root)))
+        except ValueError:
+            return normalize_path(path)
+    return normalize_path(path)
+
+
+def cmd_guard_check(root: str, label: str, allowed: Sequence[str]) -> int:
+    snapshot_path = guard_snapshot_path(root, label)
+    if not os.path.isfile(snapshot_path):
+        print_json({"valid": False, "error": f"no guard snapshot for label '{label}'; run guard-begin first"})
+        return 2
+    code, after = git_changed(root)
+    if code != 0:
+        print_json({"valid": False, "git": False, "warning": "git status unavailable; check changed files manually", **after})
+        return 3
+    before = load_changed_map(snapshot_path)
+    after_map = {
+        normalize_path(item["path"]): {"status": item["status"], "sha256": item["sha256"]} for item in after["changed"]
+    }
+    allowed_rel = [relative_to_root(root, path) for path in allowed]
+    changed = sorted(path for path in set(before) | set(after_map) if before.get(path) != after_map.get(path))
+    violations = [path for path in changed if not path_is_allowed(path, allowed_rel)]
+    os.remove(snapshot_path)
+    print_json({"valid": not violations, "changed": changed, "allowed": allowed_rel, "violations": violations})
+    return 0 if not violations else 1
+
+
+# --- record: gate + render + validate + write, one call per audit ---
+
+class RecordError(Exception):
+    pass
+
+
+def indent_block(text: str) -> str:
+    lines = str(text).strip("\n").splitlines() or [""]
+    return "\n".join("  " + line if line.strip() else "" for line in lines)
+
+
+def one_line(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def find_issue_by_fingerprint(directory: str, basename: str, fingerprint: str) -> Optional[Dict[str, str]]:
+    for _n, path in reversed(collect_review_files(directory, basename)):
+        for issue in parse_review_issues(read_text(path)):
+            if issue["fingerprint"] == fingerprint:
+                found = dict(issue)
+                found["review"] = os.path.basename(path)
+                return found
+    return None
+
+
+def normalize_input_issues(directory: str, basename: str, raw: object) -> List[Dict[str, str]]:
+    if not isinstance(raw, list):
+        raise RecordError("'issues' must be a list")
+    issues: List[Dict[str, str]] = []
+    errors: List[str] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            errors.append(f"issue #{index}: must be an object")
+            continue
+        issue = {key: ("" if value is None else str(value)) for key, value in item.items()}
+        carry = issue.get("carry", "").strip().lower()
+        if carry:
+            source = find_issue_by_fingerprint(directory, basename, carry)
+            if source is None:
+                errors.append(f"issue #{index}: carry fingerprint {carry} not found in review history")
+                continue
+            # Carried issues keep category + required fix verbatim so the fingerprint stays stable.
+            issue["category"] = source["category"]
+            issue["required_fix"] = source["required_fix"]
+            for key in ("title", "location_in_plan", "acceptance"):
+                if not issue.get(key, "").strip():
+                    issue[key] = source[key]
+            issue["carried_from"] = f"{source['review']}#{source['id']}"
+        severity = issue.get("severity", "").strip().lower()
+        category = issue.get("category", "").strip().lower()
+        if severity not in SEVERITIES:
+            errors.append(f"issue #{index}: invalid severity: {severity!r}")
+        if category not in VALID_CATEGORIES:
+            errors.append(f"issue #{index}: invalid category: {category!r}")
+        for key in REQUIRED_INPUT_FIELDS:
+            if not issue.get(key, "").strip():
+                errors.append(f"issue #{index}: missing {key}")
+        if issue.get("code_cross_check") and not code_cross_check_status(issue["code_cross_check"]):
+            errors.append(
+                f"issue #{index}: code_cross_check must start with one of: {', '.join(CODE_CROSS_CHECK_STATUSES)}"
+            )
+        issue["severity"] = severity
+        issue["category"] = category
+        issue["_order"] = str(index)
+        if severity in SEVERITIES and category in VALID_CATEGORIES and issue.get("required_fix", "").strip():
+            issue["fingerprint"] = make_fingerprint(category, issue["required_fix"])
+        issues.append(issue)
+    if errors:
+        raise RecordError("; ".join(errors))
+
+    # Merge duplicates by fingerprint: keep the highest severity, union locations/evidence.
+    merged: Dict[str, Dict[str, str]] = {}
+    for issue in issues:
+        fp = issue["fingerprint"]
+        kept = merged.get(fp)
+        if kept is None:
+            merged[fp] = issue
+            continue
+        if SEVERITY_RANK[issue["severity"]] < SEVERITY_RANK[kept["severity"]]:
+            issue["_order"] = kept["_order"]
+            merged[fp], issue, kept = issue, kept, issue
+        for key, sep in (("location_in_plan", "; "), ("evidence", "\n")):
+            extra = issue.get(key, "").strip()
+            if extra and extra not in kept.get(key, ""):
+                kept[key] = (kept.get(key, "").strip() + sep + extra).strip()
+    return sorted(merged.values(), key=lambda it: (SEVERITY_RANK[it["severity"]], int(it["_order"])))
+
+
+def consecutive_presence(history: List[set], current: set) -> Dict[str, int]:
+    """How many consecutive audits (ending with the current one) contain each fingerprint."""
+    counts: Dict[str, int] = {}
+    for fp in current:
+        k = 1
+        for s in reversed(history):
+            if fp not in s:
+                break
+            k += 1
+        counts[fp] = k
+    return counts
+
+
+def decide(
+    history: List[set],
+    issues: List[Dict[str, str]],
+    max_iter: int,
+    stop_policy: str,
+    mode: str,
+    interaction: str,
+    user_stop: bool,
+) -> Dict[str, object]:
+    """Single authority for loop gates. First match wins."""
+    current = {issue["fingerprint"] for issue in issues}
+    k = len(history) + 1
+    flows = compute_flows(history, current)
+    decision: Dict[str, object] = {"iteration": k, "flows": flows, "escalated": [], "status": None}
+
+    def stop(result: str, reason: Optional[str], status: Optional[str], write: bool = True) -> Dict[str, object]:
+        decision.update(
+            {"action": "stop", "result": result, "stop_reason": reason, "status": status, "write_review": write}
+        )
+        return decision
+
+    if not current:
+        return stop("clean" if k == 1 else "converged", None, None, write=False)
+    if user_stop:
+        return stop("limit", None, "user-stop")
+    if mode == "audit-only":
+        return stop("converged", None, "audit-only")
+    if stop_policy == "pragmatic" and all(issue["severity"] == "nit" for issue in issues):
+        return stop("converged", "drain", "drain")
+    prev = history[-1] if history else set()
+    cumulative: set = set().union(*history) if history else set()
+    reintroduced = sorted((cumulative - prev) & current)
+    if k >= 3 and reintroduced:
+        decision["escalated"] = reintroduced
+        return stop("escalated", "regression", "escalated")
+    if k >= 2 and current == prev:
+        return stop("stagnation", "unchanged", "stagnation")
+    # churn before stuck: a window with nothing resolved always implies a K_STUCK streak.
+    if classify_flow(history, current) == ("stagnation", "churn"):
+        return stop("stagnation", "churn", "stagnation")
+    stuck = sorted(fp for fp, n in consecutive_presence(history, current).items() if n >= K_STUCK)
+    if stuck:
+        decision["escalated"] = stuck
+        return stop("escalated", "stuck", "escalated")
+    if k > max_iter:
+        if interaction == "interactive":
+            decision.update({"action": "ask_limit", "result": None, "stop_reason": None, "write_review": False})
+            return decision
+        return stop("limit", None, "limit")
+    decision.update({"action": "implement", "result": None, "stop_reason": None, "write_review": True})
+    return decision
+
+
+def render_review(
+    n: int,
+    basename: str,
+    plan: str,
+    lang: str,
+    prev_review: Optional[str],
+    issues: List[Dict[str, str]],
+    payload: Dict[str, object],
+    flows: Dict[str, int],
+    status: Optional[str],
+) -> str:
+    counts = {severity: sum(1 for it in issues if it["severity"] == severity) for severity in SEVERITIES}
+    with open(plan, "rb") as f:
+        data = f.read()
+    blob = git_blob_of(plan)
+    lines = [
+        f"# {REVIEW_TITLE.get(lang, 'Revision')} {n}: {basename}",
+        "",
+        f"**Iteration**: {n}",
+        f"**Audited plan**: {os.path.basename(plan)}",
+        f"**Plan SHA-256**: {hashlib.sha256(data).hexdigest()}",
+        f"**Plan size**: {len(data)} bytes",
+    ]
+    if blob:
+        lines.append(f"**Plan git blob**: {blob}")
+    lines += [
+        f"**Audited at**: {utc_now()}",
+        f"**Previous review**: {os.path.basename(prev_review) if prev_review else 'none'}",
+        f"**Issues found**: {len(issues)} (blocker: {counts['blocker']}, major: {counts['major']}, "
+        f"minor: {counts['minor']}, nit: {counts['nit']})",
+        f"**Flow**: +{flows['new']} / -{flows['resolved']} / {flows['persisted']} persisted / "
+        f"{flows['reintroduced']} reintro | Profile: "
+        f"({counts['blocker']},{counts['major']},{counts['minor']},{counts['nit']})",
+    ]
+    if status:
+        lines.append(f"**Status**: {STATUS_LINES[status]}")
+
+    audit = payload.get("audit_state") if isinstance(payload.get("audit_state"), dict) else {}
+    carried = [it for it in issues if it.get("carried_from")]
+    rows = [
+        (
+            "Previous review contracts checked",
+            audit.get("previous_contracts", "yes" if prev_review else "n-a"),
+            audit.get("previous_contracts_notes", ""),
+        ),
+        ("Taxonomy sweep completed", audit.get("taxonomy", "yes"), "10 classes"),
+        ("Code cross-check completed", audit.get("code_cross_check", "yes"), audit.get("code_cross_check_notes", "")),
+        ("Review validated", "yes", "validate-review --strict-fingerprint"),
+        ("Deferred conflicts carried", str(len(carried)), ", ".join(it["carried_from"] for it in carried)),
+        ("Lenses used", str(audit.get("lenses_used", "")), ""),
+    ]
+    lines += ["", "## Audit state", "", "| Check | Status | Notes |", "|---|---|---|"]
+    lines += [f"| {name} | {one_line(value)} | {one_line(notes)} |" for name, value, notes in rows]
+    lines += ["", "## Summary", "", str(payload.get("summary") or "").strip() or "-", "", "## Issues", ""]
+    for k, it in enumerate(issues, start=1):
+        it["id"] = f"{n}.{k}"
+        lines += [
+            f"### [{n}.{k}] {it['severity']} · {it['category']} · {one_line(it['title'])}",
+            "",
+            f"- **Location in plan**: {one_line(it['location_in_plan'])}",
+            f"- **Location in code**: {one_line(it.get('location_in_code') or 'n/a')}",
+            f"- **Code cross-check**: {one_line(it['code_cross_check'])}",
+        ]
+        if it.get("carried_from"):
+            lines.append(f"- **Carried from**: {it['carried_from']}")
+        lines += ["- **Problem**:", indent_block(it["problem"])]
+        if it.get("evidence", "").strip():
+            lines += ["- **Evidence**:", indent_block(it["evidence"])]
+        lines += [
+            "- **Required fix (contract)**:",
+            indent_block(it["required_fix"]),
+            "- **Acceptance**:",
+            indent_block(it["acceptance"]),
+            f"- **Fingerprint**: {it['fingerprint']}",
+            "",
+        ]
+    lines += ["## Deferred from previous review", ""]
+    lines += [f"- [{it['id']}] carried from {it['carried_from']}" for it in carried] or ["none"]
+    lines += ["", "## Notes for implementation", "", str(payload.get("notes") or "").strip() or "none", ""]
+    return "\n".join(lines)
+
+
+COMPLETION_VERDICT = {
+    "en": "Cycle converged in {k} iterations. All review contracts have been applied to the plan.",
+    "ru": "Цикл сошёлся за {k} итераций. Все контракты ревизий применены к плану.",
+}
+
+
+def render_completion(lang: str, basename: str, plan: str, reviews: List[str]) -> str:
+    skill_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    template = read_text(os.path.join(skill_dir, "assets", f"completion-report.{lang}.md"))
+    with open(plan, "rb") as f:
+        sha = hashlib.sha256(f.read()).hexdigest()
+    values = {
+        "basename": basename,
+        "iterations": str(len(reviews)),
+        "final_plan_sha256": sha,
+        "finished_at_utc": utc_now(),
+        "verdict": COMPLETION_VERDICT.get(lang, COMPLETION_VERDICT["en"]).format(k=len(reviews)),
+        "list_of_review_files": "\n".join(f"- {name}" for name in reviews),
+    }
+    for key, value in values.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
+
+
+RECORD_OPTIONS = {
+    "--run-start": "run_start",
+    "--max": "max",
+    "--stop-policy": "stop_policy",
+    "--mode": "mode",
+    "--interaction": "interaction",
+    "--issues": "issues",
+    "--lang": "lang",
+}
+
+
+def parse_record_args(args: List[str]) -> Dict[str, object]:
+    opts: Dict[str, object] = {
+        "mode": "full-cycle",
+        "interaction": "autonomous",
+        "user_stop": False,
+        "stop_policy": "pragmatic",
+    }
+    positional: List[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--user-stop":
+            opts["user_stop"] = True
+            i += 1
+        elif arg in RECORD_OPTIONS:
+            if i + 1 >= len(args):
+                raise RecordError(f"missing value for {arg}")
+            opts[RECORD_OPTIONS[arg]] = args[i + 1]
+            i += 2
+        elif arg.startswith("--"):
+            raise RecordError(f"unknown option: {arg}")
+        else:
+            positional.append(arg)
+            i += 1
+    if len(positional) != 1:
+        raise RecordError("expected exactly one <plan> argument")
+    opts["plan"] = positional[0]
+    for key in ("run_start", "max"):
+        flag = "--" + key.replace("_", "-")
+        if key not in opts:
+            raise RecordError(f"{flag} is required")
+        try:
+            opts[key] = int(str(opts[key]))
+        except ValueError:
+            raise RecordError(f"{flag} must be an integer")
+    if "issues" not in opts:
+        raise RecordError("--issues <file|-> is required")
+    if opts["mode"] not in ("full-cycle", "audit-only"):
+        raise RecordError("--mode must be full-cycle or audit-only")
+    if opts["interaction"] not in ("interactive", "autonomous"):
+        raise RecordError("--interaction must be interactive or autonomous")
+    if opts.get("lang") not in (None, "ru", "en"):
+        raise RecordError("--lang must be ru or en")
+    if opts["stop_policy"] not in STOP_POLICIES:
+        raise RecordError(f"--stop-policy must be one of: {', '.join(STOP_POLICIES)}")
+    return opts
+
+
+def cmd_record(args: List[str]) -> int:
+    try:
+        opts = parse_record_args(args)
+    except RecordError as exc:
+        print_json({"error": str(exc)})
+        return 64
+    plan = str(opts["plan"])
+    if not os.path.isfile(plan):
+        print_json({"error": f"plan not found: {plan}"})
+        return 2
+    directory, basename = plan_parts(plan)
+    source = str(opts["issues"])
+    try:
+        payload = json.loads(sys.stdin.read() if source == "-" else read_text(source))
+        if isinstance(payload, list):
+            payload = {"issues": payload}
+        if not isinstance(payload, dict):
+            raise RecordError("issues JSON must be an object or a list")
+        issues = normalize_input_issues(directory, basename, payload.get("issues", []))
+    except (OSError, ValueError, RecordError) as exc:
+        print_json({"error": str(exc)})
+        return 2
+
+    run_start = int(opts["run_start"])  # type: ignore[arg-type]
+    history = ordered_fingerprint_sets(directory, basename, run_start)
+    decision = decide(
+        history,
+        issues,
+        int(opts["max"]),  # type: ignore[arg-type]
+        str(opts["stop_policy"]),
+        str(opts["mode"]),
+        str(opts["interaction"]),
+        bool(opts["user_stop"]),
+    )
+    lang = str(opts.get("lang") or detect_lang(read_text(plan)))
+    run_reviews = [os.path.basename(path) for _n, path in collect_review_files(directory, basename, run_start)]
+    out: Dict[str, object] = {
+        "action": decision["action"],
+        "result": decision["result"],
+        "stop_reason": decision["stop_reason"],
+        "iteration": decision["iteration"],
+        "flows": decision["flows"],
+        "escalated": decision["escalated"],
+        "review_path": None,
+        "completion_path": None,
+        "issues": [],
+    }
+
+    if decision.get("write_review"):
+        n, prev = next_review_number(directory, basename)
+        path = os.path.join(directory, f"{basename}-review-{n}.md")
+        text = render_review(
+            n, basename, plan, lang, prev, issues, payload, decision["flows"], decision["status"]  # type: ignore[arg-type]
+        )
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            print_json({"error": f"review file already exists: {path}"})
+            return 2
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        valid, report = validate_review(path, strict_fingerprint=True)
+        if not valid:
+            os.remove(path)
+            print_json({"error": "rendered review failed validation", "validation": report})
+            return 1
+        out["review_path"] = path
+        run_reviews.append(os.path.basename(path))
+        out["issues"] = [
+            {"id": it["id"], "severity": it["severity"], "fingerprint": it["fingerprint"], "title": one_line(it["title"])}
+            for it in issues
+        ]
+    elif decision["result"] == "converged":
+        path = os.path.join(directory, f"{basename}-completion.md")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(render_completion(lang, basename, plan, run_reviews))
+        out["completion_path"] = path
+
+    if decision["action"] == "stop":
+        final: Dict[str, object] = {
+            "result": decision["result"],
+            "iterations": len(run_reviews),
+            "remaining_issues": len(issues) if decision.get("write_review") else 0,
+            "escalated": decision["escalated"],
+            "stop_reason": decision["stop_reason"],
+            "flows": decision["flows"],
+        }
+        audit = payload.get("audit_state")
+        lenses = audit.get("lenses_used") if isinstance(audit, dict) else None
+        if isinstance(lenses, int) and 1 <= lenses <= MAX_LENSES:
+            final["lenses_used"] = lenses
+        out["final"] = final
+    print_json(out)
+    return 0
+
+
 def main(argv: List[str]) -> int:
     if len(argv) < 2:
         print(__doc__ or "", file=sys.stderr)
         return 64
 
     cmd = argv[1]
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__ or "")
+        return 0
     if cmd == "next":
         if len(argv) != 4:
             print("usage: next_review_index.py next <dir> <basename>", file=sys.stderr)
@@ -761,16 +1511,54 @@ def main(argv: List[str]) -> int:
         return cmd_next(argv[2], argv[3])
 
     if cmd == "digest":
-        if len(argv) != 4:
-            print("usage: next_review_index.py digest <dir> <basename>", file=sys.stderr)
+        rest, since = pop_since(argv[2:])
+        if len(rest) != 2 or since is None:
+            print("usage: next_review_index.py digest <dir> <basename> [--since N]", file=sys.stderr)
             return 64
-        return cmd_digest(argv[2], argv[3])
+        return cmd_digest(rest[0], rest[1], since)
 
     if cmd == "flow-analyze":
-        if len(argv) != 6 or argv[4] != "--current":
-            print("usage: next_review_index.py flow-analyze <dir> <basename> --current <fps.json|->", file=sys.stderr)
+        rest, since = pop_since(argv[2:])
+        if len(rest) != 4 or rest[2] != "--current" or since is None:
+            print(
+                "usage: next_review_index.py flow-analyze <dir> <basename> --current <fps.json|-> [--since N]",
+                file=sys.stderr,
+            )
             return 64
-        return cmd_flow_analyze(argv[2], argv[3], argv[5])
+        return cmd_flow_analyze(rest[0], rest[1], rest[3], since)
+
+    if cmd == "parts":
+        if len(argv) != 3:
+            print("usage: next_review_index.py parts <roadmap>", file=sys.stderr)
+            return 64
+        return cmd_parts(argv[2])
+
+    if cmd == "batch-summary":
+        if len(argv) != 4 or argv[2] != "--results":
+            print("usage: next_review_index.py batch-summary --results <file|->", file=sys.stderr)
+            return 64
+        return cmd_batch_summary(argv[3])
+
+    if cmd == "bootstrap":
+        if len(argv) < 3:
+            print("usage: next_review_index.py bootstrap <plan> [resolve-config flags...]", file=sys.stderr)
+            return 64
+        return cmd_bootstrap(argv[2], argv[3:])
+
+    if cmd == "record":
+        return cmd_record(argv[2:])
+
+    if cmd == "guard-begin":
+        if len(argv) != 4:
+            print("usage: next_review_index.py guard-begin <git-root> <label>", file=sys.stderr)
+            return 64
+        return cmd_guard_begin(argv[2], argv[3])
+
+    if cmd == "guard-check":
+        if len(argv) < 5:
+            print("usage: next_review_index.py guard-check <git-root> <label> <allowed-path>...", file=sys.stderr)
+            return 64
+        return cmd_guard_check(argv[2], argv[3], argv[4:])
 
     if cmd == "preflight-review":
         if len(argv) != 5:

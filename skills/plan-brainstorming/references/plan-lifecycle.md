@@ -30,14 +30,15 @@ as an automatic call from a later skill back into an earlier one.
 | idea | (chat / chat input) | - | Raw user intent |
 | spec | `<plan-root>-spec.md` | `plan-brainstorming` | What & why; the agreed design |
 | impl | `<plan-root>-impl.md` (same dir as spec) | `plan-writing` | How; bite-sized implementation tasks with steps |
+| execution result | code in the working tree (uncommitted; the engineer commits) | `plan-executor` | Working software |
 
-**Naming derivation:** `<plan-root>` = plan filename minus extension, minus any
-descriptive suffix after the numeric segment.  
+**Naming derivation:** spec: `<plan-root>` = goal filename minus extension,
+minus any descriptive suffix after the numeric segment. Impl: the spec name
+with `-spec` replaced by `-impl` (`plan_tool.py plan-path`).  
 Examples: `plan01.md` → spec `plan01-spec.md` → impl `plan01-impl.md`;
 `plan02-goal.md` → `plan02-spec.md` → `plan02-impl.md`;
-`superplan03-abstract.md` → `superplan03-spec.md` → `superplan03-impl.md`.
-
-| execution result | code + commits | `subagent-driven-development` / `executing-plans` | Working software |
+`superplan03-abstract.md` → `superplan03-spec.md` → `superplan03-impl.md`;
+`review01-conn-spec.md` → `review01-conn-impl.md`.
 
 ## Handoff Rules
 

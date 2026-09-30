@@ -1,201 +1,98 @@
-# REVIEW FILE FORMAT
+# Review File Format
 
-Жёсткая схема файла `<basename>-review-<N>.md`. Этот формат — контракт между Фазой А (которая
-его создаёт) и Фазой Б (которая его применяет). Любое отклонение ломает имплементацию.
+`TOOL record` renders every `<basename>-review-<N>.md` and validates it with
+`validate-review --strict-fingerprint` before returning. This document describes that format for
+readers and for the validator. Other skills depend on it: `plan-splitter verify-status` runs the
+same validator on new review files.
 
-## Filename
+## File name
 
-`<dir>/<basename>-review-<N>.md`, где:
+`<dir>/<basename>-review-<N>.md`. `N` is the highest existing number plus one; gaps are allowed.
+Review files are immutable history once written.
 
-- `<dir>`, `<basename>` — производные от пути главного плана.
-- `<N>` — целое число, монотонно возрастает; вычисляется через `scripts/next_review_index.py`.
-
-## Skeleton (русский вариант)
+## Layout
 
 ```markdown
-# Ревизия N: <basename>
+# Revision N: <basename>            (Ревизия N: ... for Russian plans)
 
 **Iteration**: N
 **Audited plan**: <basename>.md
-**Plan SHA-256**: <64-hex>
+**Plan SHA-256**: <64 hex>
 **Plan size**: <bytes> bytes
-**Plan git blob**: <git-hash>            <!-- опционально -->
-**Audited at**: <ISO-8601 UTC, напр. 2026-05-09T12:34:56Z>
+**Plan git blob**: <hash>           (only inside a git repository)
+**Audited at**: <ISO-8601 UTC, e.g. 2026-05-09T12:34:56Z>
 **Previous review**: <basename>-review-<N-1>.md | none
 **Issues found**: <total> (blocker: x, major: y, minor: z, nit: w)
-**Flow**: +N / -R / P persisted / X reintro | Profile: (B,M,m,n)   <!-- опционально, observability -->
-
-## Audit state
-
-| Check | Status | Notes |
-|---|---|---|
-| Previous review contracts checked | yes/no/n-a | <кратко> |
-| Taxonomy sweep completed | yes/no | 10 classes |
-| Code cross-check completed | yes/no | verified / not found / ambiguous / not applicable statuses used |
-| Review validated | yes/no | `validate-review` before Phase B |
-| Deferred conflicts carried | <N> | <кратко> |
-| Lenses used | <L> | опционально: число аспектных линз (C1) |
-| Cache hits | <H> | опционально: пропущенных пересверок кода (C4) |
-
-## Summary
-
-<1–3 предложения: общая оценка плана и характер найденных проблем>
-
-## Issues
-
-### [N.1] <SEVERITY> · <category> · <title>
-
-- **Location in plan**: <раздел / подраздел плана + якорь, если есть>
-- **Location in code**: <file:line> | n/a
-- **Code cross-check**: verified | not found | ambiguous | not applicable — <краткое обоснование>
-- **Problem**:
-  <развёрнутое описание проблемы>
-- **Evidence**:
-  > Цитата из плана:
-  > <дословный фрагмент>
-
-  > Цитата из кода (если применимо):
-  > ```<lang>
-  > <фрагмент>
-  > ```
-- **Required fix (contract)**:
-  <однозначное описание того, что должно быть в плане ПОСЛЕ имплементации.
-  Это поле — ОБЯЗАТЕЛЬНОЕ. Без него Фаза Б не сможет применить issue.>
-- **Acceptance**:
-  <как проверить, что исправлено: ключевые фразы / структура / отсутствие старого фрагмента>
-- **Fingerprint**: <8 hex chars from `python scripts/next_review_index.py fingerprint <category> <required-fix>`>
-
-### [N.2] ...
-
-(и т.д.)
-
-## Deferred from previous review (если есть)
-
-- [<prev_id>] перенесено как [N.k] с повышенной severity (<old> → <new>): <причина>
-
-## Notes for implementation
-
-<необязательная секция: общие подсказки для Фазы Б, порядок применения, риски>
-```
-
-## Skeleton (English variant)
-
-```markdown
-# Revision N: <basename>
-
-**Iteration**: N
-**Audited plan**: <basename>.md
-**Plan SHA-256**: <64-hex>
-**Plan size**: <bytes> bytes
-**Plan git blob**: <git-hash>            <!-- optional -->
-**Audited at**: <ISO-8601 UTC>
-**Previous review**: <basename>-review-<N-1>.md | none
-**Issues found**: <total> (blocker: x, major: y, minor: z, nit: w)
-**Flow**: +N / -R / P persisted / X reintro | Profile: (B,M,m,n)   <!-- optional, observability -->
+**Flow**: +new / -resolved / P persisted / X reintro | Profile: (B,M,m,n)
+**Status**: FINAL — ... | ESCALATED — ...   (only on a final review)
 
 ## Audit state
 
 | Check | Status | Notes |
 |---|---|---|
 | Previous review contracts checked | yes/no/n-a | ... |
-| Taxonomy sweep completed | yes/no | 10 classes |
-| Code cross-check completed | yes/no | verified / not found / ambiguous / not applicable statuses used |
-| Review validated | yes/no | `validate-review` before Phase B |
-| Deferred conflicts carried | <N> | ... |
-| Lenses used | <L> | optional: number of audit lenses (C1) |
-| Cache hits | <H> | optional: skipped code cross-checks (C4) |
+| Taxonomy sweep completed | yes | 10 classes |
+| Code cross-check completed | yes | ... |
+| Review validated | yes | validate-review --strict-fingerprint |
+| Deferred conflicts carried | <count> | <review#id, ...> |
+| Lenses used | <L> | |
 
 ## Summary
 
-<1–3 sentences>
+<1-3 sentences>
 
 ## Issues
 
-### [N.1] <SEVERITY> · <category> · <title>
+### [N.1] <severity> · <category> · <title>
 
-- **Location in plan**: ...
-- **Location in code**: ...
-- **Code cross-check**: verified | not found | ambiguous | not applicable — ...
-- **Problem**: ...
-- **Evidence**:
-  > Plan quote: ...
-  > Code quote: ```...```
-- **Required fix (contract)**: ...
-- **Acceptance**: ...
-- **Fingerprint**: <8 hex chars from `python scripts/next_review_index.py fingerprint <category> <required-fix>`>
+- **Location in plan**: <section>
+- **Location in code**: <file:line> | n/a
+- **Code cross-check**: verified | not found | ambiguous | not applicable — <reason>
+- **Carried from**: <basename>-review-<M>.md#<M.k>    (only for carried issues)
+- **Problem**:
+  <text>
+- **Evidence**:                                        (optional)
+  <quotes>
+- **Required fix (contract)**:
+  <what the plan must say after the fix>
+- **Acceptance**:
+  <how to verify the fix>
+- **Fingerprint**: <8 hex>
 
 ## Deferred from previous review
 
-...
+- [N.k] carried from <review#id> | none
 
 ## Notes for implementation
 
-...
+<text> | none
 ```
 
-## Field rules
+## Rules
 
-| Field | Required | Notes |
-|---|---|---|
-| `Plan SHA-256` | yes | вычисляется `scripts/next_review_index.py hash <PLAN>` |
-| `Plan size` | yes | в байтах |
-| `Audited at` | yes | UTC, ISO-8601 с суффиксом `Z` |
-| `Plan git blob` | optional | только если git доступен и репо инициализировано |
-| `Previous review` | yes | имя файла или дословно `none` |
-| `Issues found` | yes | агрегаты обязательны |
-| `Flow` | optional | observability: `+N / -R / P persisted / X reintro \| Profile: (B,M,m,n)`; validator не парсит |
-| `Required fix (contract)` | yes | без него issue нельзя имплементировать |
-| `Acceptance` | yes | без него нельзя верифицировать имплементацию |
-| `Code cross-check` | yes | один из статусов: verified / not found / ambiguous / not applicable |
-| `Fingerprint` | yes | детект залипания между итерациями, генерируется командой `fingerprint` |
+- Issues are ordered by severity (blocker → major → minor → nit), then by input order. Ids are
+  `N.k`, starting at 1.
+- Multi-line field bodies are indented by two spaces, so their content cannot end a field early.
+- Fingerprint: SHA-1 of `<category lowercase>\n<first 200 chars of the whitespace-normalized
+  required fix>`, first 8 hex characters.
+- Severity: `blocker`, `major`, `minor`, `nit`. Category: `logic`, `code`, `math`, `ops`, `db`,
+  `contract`, `tests`, `security`, `perf`, `code-plan-mismatch`, `unfulfilled-contract` (legacy).
 
-## Severity / category vocabulary
+## Status markers
 
-- **Severity**: `blocker`, `major`, `minor`, `nit` (всё в нижнем регистре в строке заголовка
-  issue, заглавными — в декоративной части).
-- **Category**: `logic`, `code`, `math`, `ops`, `db`, `contract`, `tests`, `security`, `perf`,
-  `code-plan-mismatch`, `unfulfilled-contract`.
+| Marker | Written when |
+|---|---|
+| `FINAL — implementation skipped by user` | the user chose "stop" at the limit question |
+| `FINAL — iteration limit reached` | autonomous run hit `max` |
+| `FINAL — only nit issues remain (pragmatic stop)` | `drain` gate |
+| `FINAL — audit-only mode, Phase B not run` | `audit-only` mode |
+| `FINAL — no progress between iterations` | `unchanged` or `churn` gate |
+| `ESCALATED — stuck issue needs manual decision` | `regression` or `stuck` gate |
 
-## ID scheme
+Phase B never runs on a review that has a `Status` line.
 
-`[N.k]` — `N` совпадает с номером ревизии, `k` — порядковый номер issue внутри ревизии,
-начиная с `1`. ID должны быть уникальны в пределах файла и устойчивы к перестановкам.
+## Validator checks
 
-## Validation
-
-Любой созданный review-файл обязан пройти:
-
-```bash
-python scripts/next_review_index.py validate-review <review-file>
-```
-
-Для новых ревью, где fingerprints сгенерированы канонической командой, можно включать строгий режим:
-
-```bash
-python scripts/next_review_index.py validate-review --strict-fingerprint <review-file>
-```
-
-Validator проверяет обязательные секции, обязательные поля, severity/category vocabulary,
-`Code cross-check` vocabulary, количество issues и severity-агрегаты из `Issues found`.
-В строгом режиме также сверяет fingerprint каждого issue.
-
-## Final-revision marker
-
-Если ревью создано на этапе пользовательского «остановить» (см. WORKFLOW), в шапке добавить
-строку:
-
-```
-**Status**: FINAL — implementation skipped by user
-```
-
-И секцию `## Notes for implementation` оставить пустой (имплементация не будет выполнена).
-
-Если ревью создано на этапе эскалации застрявшего issue (см. WORKFLOW / PHASE-B, C3), в шапке
-вместо `FINAL` добавить:
-
-```
-**Status**: ESCALATED — stuck issue needs manual decision
-```
-
-Секцию `## Notes for implementation` оставить пустой (Фаза Б на финальном review не запускается).
-Валидатор не проверяет значение `Status` и не парсит строки таблицы — оба расширения совместимы.
+Required headers and sections; severity, category and `Code cross-check` vocabulary; unique ids;
+issue count and per-severity counts against `Issues found`; `Required fix`, `Acceptance` and an
+8-hex `Fingerprint` in every issue; with `--strict-fingerprint`, each fingerprint recomputed.

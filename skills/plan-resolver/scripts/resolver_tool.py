@@ -15,7 +15,7 @@ import re
 import string
 import sys
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 
 ALLOWED_PLAN_EXTENSIONS = {".md", ".markdown", ".txt", ".text"}
@@ -30,9 +30,15 @@ FIELD_RE_TEMPLATE = r"^- \*\*{label}\*\*:\s*(?P<body>.*?)(?=\n- \*\*|\n\s*\d+\)\
 PLAN_HEADING_RE = re.compile(r"^#{1,6}\s+(?P<rest>.*\S)\s*$")
 PLAN_BULLET_RE = re.compile(r"^\s*[-*+]\s+(?:\[[ xX]\]\s+)?(?P<rest>.*\S)\s*$")
 PLAN_NUMBERED_RE = re.compile(r"^\s*(?P<id>\d+(?:\.\d+)*)[.)]\s+\S")
-PLAN_TABLE_STAGE_ID_RE = re.compile(r"^\s*\|\s*(?P<id>stg\d+)\s*\|", re.IGNORECASE)
-PLAN_LEADING_ID_RE = re.compile(r"^(?P<id>\d+(?:\.\d+)*|stg\d+)[.):]?\s+\S", re.IGNORECASE)
-PLAN_STAGE_ID_RE = re.compile(r"\bstg\d+\b", re.IGNORECASE)
+# plan-splitter part ids (roadmap table rows): a, b, ... aa. Letters need a separator to count as ids.
+PLAN_TABLE_STAGE_ID_RE = re.compile(r"^\s*\|\s*(?P<id>[a-z]{1,2})\s*\|", re.IGNORECASE)
+PLAN_LEADING_ID_RE = re.compile(r"^(?:(?P<id>\d+(?:\.\d+)*)[.):]?|(?P<part>[a-z]{1,2})[.):])\s+\S", re.IGNORECASE)
+# plan-writing task headings: "### Task 1.2: Title" / "### Задача 3: Название".
+# Separators mirror plan-executor `_TASK_RE`: ':', '-', '—', or '.' followed by whitespace.
+PLAN_KEYWORD_ID_RE = re.compile(
+    r"^(?:Task|Задача)\s+(?P<id>\d+(?:\.\d+)*)\s*(?:[:\-)]|—|\.(?=\s|$))", re.IGNORECASE
+)
+PLAN_FENCE_RE = re.compile(r"^\s*(```|~~~)")
 ANCHOR_RE = re.compile(r"[^\s:#]+#L\d+(?:-L?\d+)?", re.IGNORECASE)
 CONFIDENCE_RE = re.compile(r"confidence\s*[:=]\s*(?P<level>high|medium|low)", re.IGNORECASE)
 AMBIGUOUS_RE = re.compile(r"\bambiguous\b", re.IGNORECASE)
@@ -82,7 +88,13 @@ SECTION_ALIASES = {
     "issues": ("## Список ошибок", "## Issues"),
     "task": ("## Задача", "## Task"),
     "context": ("## Дополнительный контекст", "## Additional Context"),
+    "fix_log": ("## Журнал исправлений", "## Fix Log"),
 }
+LEVEL_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+FIX_STATES = ("applied", "needs-user", "skipped")
+FIX_LOG_LINE_RE = re.compile(
+    r"^- (?:Ошибка|Error) (?P<id>\d+):\s*(?P<state>applied|needs-user|skipped)\b", re.IGNORECASE | re.MULTILINE
+)
 
 
 class ToolError(Exception):
@@ -155,16 +167,16 @@ CYRILLIC_RATIO_THRESHOLD = 0.05
 
 
 def detect_plan_language(plan_path: str) -> str:
-    """Ecosystem convention (see plan-iterative-revision invariant #9):
-    cyrillic_ratio > 0.05 -> ru, otherwise en. Unreadable/empty -> ru."""
+    """Ecosystem convention (see plan-iterative-revision `detect_lang` in scripts/next_review_index.py):
+    cyrillic_ratio > 0.05 -> ru, otherwise en. Unreadable/empty -> en."""
     try:
         with open(plan_path, encoding="utf-8", errors="ignore") as fh:
             text = fh.read()
     except OSError:
-        return "ru"
+        return "en"
     letters = [ch for ch in text if ch.isalpha()]
     if not letters:
-        return "ru"
+        return "en"
     cyrillic = sum(1 for ch in letters if "\u0400" <= ch <= "\u04ff")
     return "ru" if cyrillic / len(letters) > CYRILLIC_RATIO_THRESHOLD else "en"
 
@@ -264,13 +276,29 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     next_n = (max(numbers) + 1) if numbers else 1
     next_open_name = f"{master_base}-report-{next_n}.md"
     next_final_name = f"{master_base}-report-{next_n}-final.md"
+    master_sha = sha256_file(master_abs)
+    language = detect_plan_language(master_abs)
+    previous_consecutive = 0
+    if last_report:
+        previous_consecutive = parse_int(parse_header(read_text(str(last_report["abs_path"]))).get("consecutive_open_invocations")) or 0
+    report_header = {
+        "master_plan_path": posix_rel(master_abs, plan_dir_abs),
+        "master_plan_sha256": master_sha,
+        "master_plan_size": os.path.getsize(master_abs),
+        "audit_iteration": next_n,
+        "consecutive_open_invocations_if_open": previous_consecutive + 1,
+        "consecutive_open_invocations_if_final": 0,
+        "previous_report_path": os.path.basename(str(last_report["abs_path"])) if last_report else None,
+        "previous_report_sha256": last_report["sha256"] if last_report else None,
+        "language": language,
+    }
     result = {
         "valid": True,
         "closed": False,
         "workspace_root": workspace_root,
         "master_plan": master_rel,
         "master_plan_abs": master_abs,
-        "master_plan_sha256": sha256_file(master_abs),
+        "master_plan_sha256": master_sha,
         "master_plan_size": os.path.getsize(master_abs),
         "plan_dir": plan_dir_rel if plan_dir_rel != "." else ".",
         "plan_dir_abs": plan_dir_abs,
@@ -281,8 +309,9 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         "next_final_name": next_final_name,
         "next_open_path": posix_rel(os.path.join(plan_dir_abs, next_open_name), workspace_root),
         "next_final_path": posix_rel(os.path.join(plan_dir_abs, next_final_name), workspace_root),
-        "language": detect_plan_language(master_abs),
+        "language": language,
         "pass_type": "first" if not report_items else "subsequent",
+        "report_header": report_header,
         "errors": [],
         "warnings": warnings,
     }
@@ -414,10 +443,15 @@ def should_ignore(rel_path: str, is_dir: bool, patterns: Sequence[str]) -> bool:
     return is_fixed_excluded(rel_path, is_dir) or matches_gitignore(rel_path, is_dir, patterns)
 
 
-def fingerprint_tree(root: str) -> Dict[str, str]:
+def fingerprint_tree(root: str, base: Optional[Dict[str, object]] = None) -> Tuple[Dict[str, str], Dict[str, List[int]], int]:
+    """Hash the tree; reuse base hashes for files whose size and mtime_ns are unchanged."""
     root_abs = os.path.abspath(root)
     patterns = load_gitignore_patterns(root_abs)
+    base_files = dict(base.get("files") or {}) if base else {}
+    base_stats = dict(base.get("stats") or {}) if base else {}
     files: Dict[str, str] = {}
+    stats: Dict[str, List[int]] = {}
+    hashed = 0
     for current_root, dirs, filenames in os.walk(root_abs, topdown=True):
         kept_dirs = []
         for dirname in dirs:
@@ -435,10 +469,17 @@ def fingerprint_tree(root: str) -> Dict[str, str]:
             rel_file = posix_rel(full_file, root_abs)
             if should_ignore(rel_file, False, patterns):
                 continue
-            files[rel_file] = sha256_file(full_file)
+            info = os.stat(full_file)
+            stat = [info.st_size, info.st_mtime_ns]
+            if rel_file in base_files and base_stats.get(rel_file) == stat:
+                files[rel_file] = str(base_files[rel_file])
+            else:
+                files[rel_file] = sha256_file(full_file)
+                hashed += 1
+            stats[rel_file] = stat
             if len(files) > MAX_FINGERPRINT_FILES:
                 raise ToolError("fingerprint-scope-too-large: more than 200000 files after exclusions", 2)
-    return dict(sorted(files.items()))
+    return dict(sorted(files.items())), dict(sorted(stats.items())), hashed
 
 
 def cmd_fingerprint_workspace(args: argparse.Namespace) -> int:
@@ -454,12 +495,17 @@ def cmd_fingerprint_workspace(args: argparse.Namespace) -> int:
     except ValueError:
         pass
     try:
-        files = fingerprint_tree(root)
-        payload = {"algorithm": "sha256-tree-v1", "root": root, "file_count": len(files), "files": files}
+        base = None
+        if args.base:
+            base = load_snapshot(args.base)
+            if os.path.abspath(str(base.get("root") or "")) != root or not isinstance(base.get("stats"), dict):
+                base = None
+        files, stats, hashed = fingerprint_tree(root, base)
+        payload = {"algorithm": "sha256-tree-v2", "root": root, "file_count": len(files), "files": files, "stats": stats}
         write_json_file(out_json, payload)
-        print_json({"valid": True, "path": out_json, "file_count": len(files)})
+        print_json({"valid": True, "path": out_json, "file_count": len(files), "hashed": hashed, "base_used": base is not None})
         return 0
-    except (OSError, ToolError) as exc:
+    except (OSError, json.JSONDecodeError, ToolError) as exc:
         print_json({"valid": False, "errors": [str(exc)]})
         return getattr(exc, "code", 2)
 
@@ -657,6 +703,9 @@ def parse_issues(text: str) -> List[Dict[str, object]]:
                 "level": normalize_level(level),
                 "status": normalize_status(status),
                 "title": title,
+                "origin": (field_value(block, "origin") or "").lower(),
+                "linked_items": field_value(block, "linked_items") or "",
+                "evidence": field_value(block, "evidence") or "",
                 "description": description,
                 "recommendations": recommendations,
                 "emoji": issue_emoji(head),
@@ -721,7 +770,11 @@ def extract_stage_id(line: str) -> str:
         cleaned = cleaned.replace(token, "")
     cleaned = " ".join(cleaned.replace("|", " ").split())
     match = re.match(r"^(?P<id>\d+(?:\.\d+)*)(?:[.)])?(?:\s|$)", cleaned)
-    return match.group("id") if match else ""
+    if match:
+        return match.group("id")
+    # Part ids (a, b, ... aa) count only with a separator: "- ✅ a: Scaffold".
+    part = re.match(r"^(?P<id>[a-z]{1,2})[.):](?:\s|$)", cleaned, re.IGNORECASE)
+    return part.group("id").lower() if part else ""
 
 
 def parse_stage_items(text: str) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], List[Dict[str, str]]]:
@@ -987,13 +1040,13 @@ def validate_report(path: str) -> Tuple[bool, Dict[str, object]]:
 def cmd_parse_report(args: argparse.Namespace) -> int:
     if not os.path.isfile(args.report):
         print_json({"valid": False, "errors": [f"file not found: {args.report}"]})
-        return 1
+        return 2
     try:
         print_json(parse_report_document(args.report))
         return 0
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         print_json({"valid": False, "errors": [str(exc)]})
-        return 1
+        return 2
 
 
 def cmd_validate_report(args: argparse.Namespace) -> int:
@@ -1036,12 +1089,13 @@ def cmd_iteration_check(args: argparse.Namespace) -> int:
 def extract_plan_task_id(line: str) -> str:
     heading = PLAN_HEADING_RE.match(line)
     if heading:
-        inner = PLAN_LEADING_ID_RE.match(heading.group("rest"))
-        return normalize_plan_task_id(inner.group("id")) if inner else ""
+        rest = heading.group("rest")
+        inner = PLAN_LEADING_ID_RE.match(rest) or PLAN_KEYWORD_ID_RE.match(rest)
+        return normalize_plan_task_id(_leading_id(inner)) if inner else ""
     bullet = PLAN_BULLET_RE.match(line)
     if bullet:
         inner = PLAN_LEADING_ID_RE.match(bullet.group("rest"))
-        return normalize_plan_task_id(inner.group("id")) if inner else ""
+        return normalize_plan_task_id(_leading_id(inner)) if inner else ""
     table_stage = PLAN_TABLE_STAGE_ID_RE.match(line)
     if table_stage:
         return normalize_plan_task_id(table_stage.group("id"))
@@ -1051,13 +1105,25 @@ def extract_plan_task_id(line: str) -> str:
     return ""
 
 
+def _leading_id(match: "re.Match[str]") -> str:
+    groups = match.groupdict()
+    return groups.get("id") or groups.get("part") or ""
+
+
 def normalize_plan_task_id(task_id: str) -> str:
-    return task_id.lower() if PLAN_STAGE_ID_RE.fullmatch(task_id) else task_id
+    return task_id.lower()
 
 def extract_plan_task_ids(text: str) -> List[str]:
     ids: List[str] = []
     seen = set()
+    in_fence = False
     for line in text.splitlines():
+        # Code blocks hold file contents or commands, never plan task units.
+        if PLAN_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
         task_id = extract_plan_task_id(line)
         if task_id and task_id not in seen:
             seen.add(task_id)
@@ -1067,11 +1133,7 @@ def extract_plan_task_ids(text: str) -> List[str]:
 
 def report_covered_ids(text: str) -> set:
     phases, tasks, _ = parse_stage_items(text)
-    covered = {str(item["id"]) for item in phases} | {str(item["id"]) for item in tasks}
-    for item in phases + tasks:
-        raw_text = str(item.get("raw_text", ""))
-        covered.update(normalize_plan_task_id(match.group(0)) for match in PLAN_STAGE_ID_RE.finditer(raw_text))
-    return covered
+    return {str(item["id"]) for item in phases} | {str(item["id"]) for item in tasks}
 
 
 def cmd_task_census(args: argparse.Namespace) -> int:
@@ -1116,6 +1178,255 @@ def cmd_task_census(args: argparse.Namespace) -> int:
     return 0 if not uncovered else 1
 
 
+def list_plan_reports(plan_dir_abs: str, base: str) -> List[Dict[str, object]]:
+    items: List[Dict[str, object]] = []
+    for name in os.listdir(plan_dir_abs):
+        parsed = parse_report_filename(name)
+        path = os.path.join(plan_dir_abs, name)
+        if parsed and str(parsed["base"]).lower() == base.lower() and os.path.isfile(path):
+            items.append({"n": int(parsed["n"]), "final": bool(parsed["final"]), "abs_path": path})
+    items.sort(key=lambda item: (int(item["n"]), bool(item["final"])))
+    return items
+
+
+def discover_open_plans(root: str) -> List[Dict[str, str]]:
+    groups: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+    for current_root, dirs, filenames in os.walk(root, topdown=True):
+        dirs[:] = [
+            d for d in dirs
+            if d != ".git" and not is_fixed_excluded(posix_rel(os.path.join(current_root, d), root), True)
+        ]
+        for name in filenames:
+            parsed = parse_report_filename(name)
+            if parsed:
+                key = (current_root, str(parsed["base"]).lower())
+                groups.setdefault(key, []).append({"n": int(parsed["n"]), "final": bool(parsed["final"]), "name": name})
+    candidates: List[Dict[str, str]] = []
+    for (directory, base), reports in sorted(groups.items()):
+        last = max(reports, key=lambda item: (int(item["n"]), bool(item["final"])))
+        if last["final"]:
+            continue
+        masters = [
+            name for name in sorted(os.listdir(directory))
+            if os.path.splitext(name)[0].lower() == base
+            and os.path.splitext(name)[1].lower() in ALLOWED_PLAN_EXTENSIONS
+            and os.path.isfile(os.path.join(directory, name))
+        ]
+        if len(masters) == 1:
+            candidates.append(
+                {
+                    "master_plan": posix_rel(os.path.join(directory, masters[0]), root),
+                    "last_report": posix_rel(os.path.join(directory, str(last["name"])), root),
+                }
+            )
+    return candidates
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    root = os.path.abspath(args.workspace_root)
+    if not os.path.isdir(root):
+        print_json({"valid": False, "errors": [f"discover-missing-workspace: {root}"]})
+        return 2
+    if not args.plan:
+        candidates = discover_open_plans(root)
+        print_json({"valid": True, "mode": "workspace", "candidates": candidates, "errors": []})
+        return 0 if len(candidates) == 1 else 1
+    try:
+        master_abs, master_rel = ensure_inside(root, args.plan)
+    except ToolError as exc:
+        print_json({"valid": False, "errors": [str(exc)]})
+        return exc.code
+    if not os.path.isfile(master_abs):
+        print_json({"valid": False, "errors": [f"discover-missing-plan: {master_rel}"]})
+        return 2
+    base = os.path.splitext(os.path.basename(master_abs))[0]
+    reports = [posix_rel(str(item["abs_path"]), root) for item in list_plan_reports(os.path.dirname(master_abs), base)]
+    last = reports[-1] if reports else None
+    state = "none" if last is None else ("closed" if last.lower().endswith("-final.md") else "open")
+    print_json(
+        {
+            "valid": True,
+            "mode": "plan",
+            "master_plan": master_rel,
+            "reports": reports,
+            "plans_list": [master_rel] + reports,
+            "last_report": last,
+            "state": state,
+            "errors": [],
+        }
+    )
+    return 0
+
+
+def report_language(text: str, header: Dict[str, str]) -> str:
+    language = header.get("language", "")
+    if language in VALID_LANGUAGES:
+        return language
+    return "ru" if SECTION_ALIASES["issues"][0] in text else "en"
+
+
+def cmd_open_issues(args: argparse.Namespace) -> int:
+    if not os.path.isfile(args.report):
+        print_json({"valid": False, "errors": [f"file not found: {args.report}"]})
+        return 2
+    text = read_text(args.report)
+    open_issues = [issue for issue in parse_issues(text) if issue["status"] != "fixed"]
+    fields = ("id", "level", "status", "title", "linked_items", "evidence", "description", "recommendations")
+    print_json(
+        {
+            "valid": True,
+            "report": args.report,
+            "language": report_language(text, parse_header(text)),
+            "is_final": os.path.basename(args.report).lower().endswith("-final.md"),
+            "open_count": len(open_issues),
+            "fix_order": [
+                issue["id"]
+                for issue in sorted(open_issues, key=lambda item: (LEVEL_RANK.get(str(item["level"]), 9), int(item["id"])))
+            ],
+            "issues": [{key: issue[key] for key in fields} for issue in open_issues],
+            "task": get_section(text, "task") or "",
+            "errors": [],
+        }
+    )
+    return 0
+
+
+def cmd_protect(args: argparse.Namespace) -> int:
+    files: Dict[str, str] = {}
+    missing = [path for path in args.paths if not os.path.isfile(path)]
+    if missing:
+        print_json({"valid": False, "errors": [f"file not found: {path}" for path in missing]})
+        return 2
+    for path in args.paths:
+        files[os.path.abspath(path)] = sha256_file(path)
+    write_json_file(os.path.abspath(args.out_json), {"algorithm": "sha256-files-v1", "files": files})
+    print_json({"valid": True, "path": os.path.abspath(args.out_json), "file_count": len(files), "errors": []})
+    return 0
+
+
+def cmd_assert_protected(args: argparse.Namespace) -> int:
+    try:
+        snapshot = load_snapshot(args.snapshot_json)
+    except (OSError, json.JSONDecodeError, ToolError) as exc:
+        print_json({"valid": False, "errors": [str(exc)]})
+        return 2
+    removed: List[str] = []
+    modified: List[str] = []
+    for path, digest in sorted(dict(snapshot["files"]).items()):
+        if not os.path.isfile(path):
+            removed.append(path)
+        elif sha256_file(path) != digest:
+            modified.append(path)
+    valid = not removed and not modified
+    print_json({"valid": valid, "removed": removed, "modified": modified, "violations": removed + modified})
+    return 0 if valid else 1
+
+
+def parse_fix_log(text: str) -> Dict[int, str]:
+    section = get_section(text, "fix_log") or ""
+    return {int(match.group("id")): match.group("state").lower() for match in FIX_LOG_LINE_RE.finditer(section)}
+
+
+def cmd_mark_fix(args: argparse.Namespace) -> int:
+    if not os.path.isfile(args.report):
+        print_json({"valid": False, "errors": [f"file not found: {args.report}"]})
+        return 2
+    if os.path.basename(args.report).lower().endswith("-final.md"):
+        print_json({"valid": False, "errors": ["mark-fix-final-report: final reports are closed"]})
+        return 1
+    text = read_text(args.report)
+    issue = next((item for item in parse_issues(text) if item["id"] == args.issue_id), None)
+    if issue is None:
+        print_json({"valid": False, "errors": [f"mark-fix-unknown-issue: {args.issue_id}"]})
+        return 1
+    if issue["status"] == "fixed":
+        print_json({"valid": False, "errors": [f"mark-fix-issue-already-fixed: {args.issue_id}"]})
+        return 1
+
+    ru = report_language(text, parse_header(text)) == "ru"
+    heading = SECTION_ALIASES["fix_log"][0 if ru else 1]
+    entry = f"- {'Ошибка' if ru else 'Error'} {args.issue_id}: {args.state}"
+    if args.files:
+        entry += " | files: " + ", ".join(args.files)
+    if args.note:
+        entry += " | note: " + " ".join(args.note.split())
+    entry_re = re.compile(rf"^- (?:Ошибка|Error) {args.issue_id}:")
+
+    bounds = section_bounds(text, SECTION_ALIASES["fix_log"])
+    if bounds is None:
+        updated = text.rstrip("\n") + f"\n\n{heading}\n\n{entry}\n"
+        action = "added"
+    else:
+        start, end = bounds
+        lines = [line for line in text[start:end].strip("\n").splitlines() if line.strip()]
+        replaced = [entry if entry_re.match(line) else line for line in lines]
+        action = "updated" if replaced != lines else "added"
+        if action == "added":
+            replaced.append(entry)
+        tail = text[end:]
+        body = "\n" + "\n".join(replaced) + ("\n\n" if tail else "\n")
+        updated = text[:start] + body + tail
+    with open(args.report, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(updated)
+    print_json({"valid": True, "report": args.report, "issue_id": args.issue_id, "state": args.state, "action": action, "errors": []})
+    return 0
+
+
+def normalize_title(title: object) -> str:
+    return " ".join(str(title).lower().split())
+
+
+def cmd_cycle_check(args: argparse.Namespace) -> int:
+    for candidate in (args.prev_report, args.new_report):
+        if not os.path.isfile(candidate):
+            print_json({"valid": False, "errors": [f"file not found: {candidate}"]})
+            return 2
+    prev_text = read_text(args.prev_report)
+    prev_open = [issue for issue in parse_issues(prev_text) if issue["status"] != "fixed"]
+    prev_open_ids = {int(issue["id"]) for issue in prev_open}
+    prev_open_titles = {normalize_title(issue["title"]) for issue in prev_open}
+    fix_log = parse_fix_log(prev_text)
+    needs_user_titles = {normalize_title(i["title"]) for i in prev_open if fix_log.get(int(i["id"])) == "needs-user"}
+    applied_titles = {normalize_title(i["title"]) for i in prev_open if fix_log.get(int(i["id"])) == "applied"}
+
+    new_issues = parse_issues(read_text(args.new_report))
+    new_open = [issue for issue in new_issues if issue["status"] != "fixed"]
+    fixed_now = [
+        issue["id"]
+        for issue in new_issues
+        if issue["status"] == "fixed"
+        and (normalize_title(issue["title"]) in prev_open_titles or int(issue["id"]) in prev_open_ids)
+    ]
+    needs_user = [issue["id"] for issue in new_open if normalize_title(issue["title"]) in needs_user_titles]
+    claimed_not_fixed = [issue["id"] for issue in new_open if normalize_title(issue["title"]) in applied_titles]
+    fixable = [issue["id"] for issue in new_open if issue["id"] not in needs_user]
+
+    if os.path.basename(args.new_report).lower().endswith("-final.md"):
+        action = "complete"
+    elif not fixed_now:
+        action = "stop-stalled"
+    elif not fixable:
+        action = "ask-user"
+    elif args.cycle >= args.limit:
+        action = "stop-limit"
+    else:
+        action = "continue"
+    print_json(
+        {
+            "valid": True,
+            "action": action,
+            "cycle": args.cycle,
+            "limit": args.limit,
+            "fixed_now": fixed_now,
+            "open_ids": [issue["id"] for issue in new_open],
+            "needs_user_ids": needs_user,
+            "claimed_not_fixed_ids": claimed_not_fixed,
+            "errors": [],
+        }
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="plan-resolver helper utility")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1135,6 +1446,7 @@ def build_parser() -> argparse.ArgumentParser:
     fingerprint = subparsers.add_parser("fingerprint-workspace")
     fingerprint.add_argument("root")
     fingerprint.add_argument("out_json")
+    fingerprint.add_argument("--base", help="previous snapshot; unchanged size+mtime files reuse its hashes")
     fingerprint.set_defaults(func=cmd_fingerprint_workspace)
 
     parse_report = subparsers.add_parser("parse-report")
@@ -1160,6 +1472,39 @@ def build_parser() -> argparse.ArgumentParser:
     census.add_argument("plan")
     census.add_argument("report")
     census.set_defaults(func=cmd_task_census)
+
+    discover = subparsers.add_parser("discover")
+    discover.add_argument("workspace_root")
+    discover.add_argument("plan", nargs="?")
+    discover.set_defaults(func=cmd_discover)
+
+    open_issues = subparsers.add_parser("open-issues")
+    open_issues.add_argument("report")
+    open_issues.set_defaults(func=cmd_open_issues)
+
+    protect = subparsers.add_parser("protect")
+    protect.add_argument("out_json")
+    protect.add_argument("paths", nargs="+")
+    protect.set_defaults(func=cmd_protect)
+
+    protected = subparsers.add_parser("assert-protected")
+    protected.add_argument("snapshot_json")
+    protected.set_defaults(func=cmd_assert_protected)
+
+    mark_fix = subparsers.add_parser("mark-fix")
+    mark_fix.add_argument("report")
+    mark_fix.add_argument("issue_id", type=int)
+    mark_fix.add_argument("state", choices=FIX_STATES)
+    mark_fix.add_argument("--files", nargs="*", default=[])
+    mark_fix.add_argument("--note", default="")
+    mark_fix.set_defaults(func=cmd_mark_fix)
+
+    cycle = subparsers.add_parser("cycle-check")
+    cycle.add_argument("prev_report")
+    cycle.add_argument("new_report")
+    cycle.add_argument("cycle", type=int)
+    cycle.add_argument("limit", nargs="?", type=int, default=2)
+    cycle.set_defaults(func=cmd_cycle_check)
 
     return parser
 

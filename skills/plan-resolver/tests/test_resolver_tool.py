@@ -112,12 +112,12 @@ class BootstrapTests(unittest.TestCase):
             data = read_json(run_tool("bootstrap", str(root), "main-plan.md"))
             self.assertEqual(data["language"], "en")
 
-    def test_bootstrap_language_empty_plan_defaults_ru(self) -> None:
+    def test_bootstrap_language_empty_plan_defaults_en(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write(root / "main-plan.md", "1. 2. 3.\n")
             data = read_json(run_tool("bootstrap", str(root), "main-plan.md"))
-            self.assertEqual(data["language"], "ru")
+            self.assertEqual(data["language"], "en")
 
     def test_bootstrap_has_no_deprecation_warning_under_strict_warnings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -588,13 +588,13 @@ class TaskCensusTests(unittest.TestCase):
                 root / "main-plan.md",
                 "| Stage | Title | Depends |\n"
                 "|---|---|---|\n"
-                "| stg01 | Scaffold | - |\n"
-                "| stg02 | Ledger | stg01 |\n",
+                "| a | Scaffold | - |\n"
+                "| b | Ledger | a |\n",
             )
             report = valid_report().replace(
                 "- ✅ 1. Подготовка",
-                "- ✅ 1 stg01 Scaffold done\n"
-                "- ✅ 2 stg02 Ledger done",
+                "- ✅ a: Scaffold done\n"
+                "- ✅ b: Ledger done",
             )
             write(root / "main-plan-report-1.md", report)
             process = run_tool(
@@ -603,9 +603,41 @@ class TaskCensusTests(unittest.TestCase):
             data = read_json(process)
             self.assertEqual(process.returncode, 0, data)
             self.assertEqual(data["units_extracted"], 2)
-            self.assertEqual(data["plan_ids"], ["stg01", "stg02"])
-            self.assertEqual(data["covered"], ["stg01", "stg02"])
+            self.assertEqual(data["plan_ids"], ["a", "b"])
+            self.assertEqual(data["covered"], ["a", "b"])
             self.assertEqual(data["uncovered"], [])
+
+    def test_task_heading_separators_match_executor(self) -> None:
+        # "Task 1.2 —" used to be truncated to id "1" by regex backtracking.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("resolver_tool", str(ROOT / "scripts" / "resolver_tool.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        extract = module.extract_plan_task_ids
+        text = (
+            "### Task 1.1: colon\n### Task 1.2 — em dash\n### Задача 2.2: ru\n"
+            "#### Task 2.3 - hyphen\n### Task 3. dot\n## A note\n## a: part heading\n"
+        )
+        self.assertEqual(extract(text), ["1.1", "1.2", "2.2", "2.3", "3", "a"])
+
+    def test_plan_writing_task_headings_skip_code_fences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(
+                root / "main-plan.md",
+                "# Plan\n\n### Task 1: Parse flag\n\n```markdown\n## Task 9: file content\n1. not a task\n```\n\n"
+                "### Task 1.1: Docs\n\n### Задача 2: Проверка\n",
+            )
+            report = valid_report().replace(
+                "- ✅ 1. Подготовка", "- ✅ 1 Parse flag\n  - ✅ 1.1 Docs\n- ⚠️ 2 Проверка"
+            )
+            write(root / "main-plan-report-1.md", report)
+            process = run_tool(
+                "task-census", str(root / "main-plan.md"), str(root / "main-plan-report-1.md")
+            )
+            data = read_json(process)
+            self.assertEqual(process.returncode, 0, data)
+            self.assertEqual(data["plan_ids"], ["1", "1.1", "2"])
 
     def test_full_coverage_exit_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -639,6 +671,172 @@ class TaskCensusTests(unittest.TestCase):
             self.assertEqual(process.returncode, 1, data)
             self.assertIn("1.2", data["uncovered"])
             self.assertNotIn("1.1", data["uncovered"])
+
+
+def issues_report(issues: list, n: int = 1, extra: str = "") -> str:
+    """issues: list of (status, level, title) tuples."""
+    blocks = []
+    for idx, (status, level, title) in enumerate(issues, start=1):
+        blocks.append(
+            f"""{idx}) Ошибка {idx}: {status} | {level} | {title}
+- **level**: {level}
+- **status**: {status}
+- **title**: {title}
+- **origin**: carry
+- **evidence**: src/app.py#L{idx}-L{idx + 2}
+- **description**: {LONG_DESCRIPTION}
+- **recommendations**: Исправить {title}."""
+        )
+    body = "\n\n".join(blocks) or "Ошибок не найдено."
+    return valid_report().replace(valid_report().split("## Список ошибок\n\n", 1)[1].split("\n\n## Задача", 1)[0], body).replace(
+        "# Отчет о выполнении плана 1", f"# Отчет о выполнении плана {n}"
+    ) + extra
+
+
+class FixLoopToolTests(unittest.TestCase):
+    def test_fingerprint_base_reuses_unchanged_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root = Path(tmp)
+            write(root / "a.txt", "a\n")
+            write(root / "b.txt", "b\n")
+            start = Path(snaps) / "start.json"
+            data = read_json(run_tool("fingerprint-workspace", str(root), str(start)))
+            self.assertEqual((data["hashed"], data["base_used"]), (2, False))
+            write(root / "b.txt", "bb changed\n")
+            current = Path(snaps) / "current.json"
+            data = read_json(run_tool("fingerprint-workspace", str(root), str(current), "--base", str(start)))
+            self.assertEqual((data["hashed"], data["base_used"]), (1, True))
+            process = run_tool("assert-readonly", str(start), str(current), "a.txt")
+            self.assertEqual(read_json(process)["violations"], ["b.txt"])
+
+    def test_parse_report_missing_file_is_exit_two(self) -> None:
+        self.assertEqual(run_tool("parse-report", "no-such-report-1.md").returncode, 2)
+
+    def test_bootstrap_prefills_report_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root / "docs" / "main-plan.md", "# Main\n")
+            report1 = root / "docs" / "main-plan-report-1.md"
+            write(report1, valid_report())
+            data = read_json(run_tool("bootstrap", str(root), "docs/main-plan.md", "docs/main-plan-report-1.md"))
+            header = data["report_header"]
+            self.assertEqual(header["master_plan_path"], "main-plan.md")
+            self.assertEqual(header["audit_iteration"], 2)
+            self.assertEqual(header["previous_report_path"], "main-plan-report-1.md")
+            self.assertEqual(header["previous_report_sha256"], sha256(report1))
+            self.assertEqual(header["consecutive_open_invocations_if_open"], 2)
+            self.assertEqual(header["consecutive_open_invocations_if_final"], 0)
+
+    def test_discover_by_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root / "main-plan.md", "# Main\n")
+            data = read_json(run_tool("discover", str(root), "main-plan.md"))
+            self.assertEqual((data["state"], data["plans_list"]), ("none", ["main-plan.md"]))
+            write(root / "main-plan-report-2.md", valid_report())
+            write(root / "main-plan-report-1.md", valid_report())
+            write(root / "other-report-1.md", valid_report())
+            data = read_json(run_tool("discover", str(root), "main-plan.md"))
+            self.assertEqual(data["state"], "open")
+            self.assertEqual(data["plans_list"], ["main-plan.md", "main-plan-report-1.md", "main-plan-report-2.md"])
+            write(root / "main-plan-report-3-final.md", valid_report(final=True))
+            self.assertEqual(read_json(run_tool("discover", str(root), "main-plan.md"))["state"], "closed")
+
+    def test_discover_workspace_finds_single_open_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root / "a" / "alpha.md", "# A\n")
+            write(root / "a" / "alpha-report-1.md", valid_report())
+            write(root / "b" / "beta.md", "# B\n")
+            write(root / "b" / "beta-report-1-final.md", valid_report(final=True))
+            process = run_tool("discover", str(root))
+            data = read_json(process)
+            self.assertEqual(process.returncode, 0, data)
+            self.assertEqual(data["candidates"], [{"master_plan": "a/alpha.md", "last_report": "a/alpha-report-1.md"}])
+            write(root / "c" / "gamma.md", "# C\n")
+            write(root / "c" / "gamma-report-1.md", valid_report())
+            process = run_tool("discover", str(root))
+            self.assertEqual(process.returncode, 1)
+            self.assertEqual(len(read_json(process)["candidates"]), 2)
+
+    def test_open_issues_orders_by_severity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-1.md"
+            write(report, issues_report([
+                ("⭕️ not-fixed", "low", "Косметика"),
+                ("✅ fixed", "critical", "Уже закрыто"),
+                ("⚠️ regressed", "high", "Регрессия"),
+            ]))
+            data = read_json(run_tool("open-issues", str(report)))
+            self.assertEqual(data["open_count"], 2)
+            self.assertEqual(data["fix_order"], [3, 1])
+            self.assertEqual(data["issues"][0]["evidence"], "src/app.py#L1-L3")
+            self.assertEqual(data["language"], "ru")
+
+    def test_protect_and_assert_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            plan = Path(tmp) / "main-plan.md"
+            write(plan, "# Main\n")
+            snapshot = Path(snaps) / "protect.json"
+            self.assertEqual(run_tool("protect", str(snapshot), str(plan)).returncode, 0)
+            self.assertEqual(run_tool("assert-protected", str(snapshot)).returncode, 0)
+            write(plan, "# Main edited\n")
+            process = run_tool("assert-protected", str(snapshot))
+            self.assertEqual(process.returncode, 1)
+            data = read_json(process)
+            self.assertEqual(len(data["modified"]), 1)
+            self.assertTrue(data["modified"][0].endswith("main-plan.md"))
+            plan.unlink()
+            self.assertEqual(len(read_json(run_tool("assert-protected", str(snapshot)))["removed"]), 1)
+
+    def test_mark_fix_upserts_fix_log_and_keeps_report_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-1.md"
+            write(report, issues_report([("⭕️ not-fixed", "high", "A"), ("⭕️ not-fixed", "low", "B")]))
+            process = run_tool("mark-fix", str(report), "1", "applied", "--files", "src/app.py", "--note", "done")
+            self.assertEqual(process.returncode, 0, read_json(process))
+            self.assertEqual(run_tool("mark-fix", str(report), "2", "needs-user", "--note", "plan contradicts").returncode, 0)
+            process = run_tool("mark-fix", str(report), "1", "skipped")
+            self.assertEqual(read_json(process)["action"], "updated")
+            text = report.read_text(encoding="utf-8")
+            self.assertEqual(text.count("## Журнал исправлений"), 1)
+            self.assertIn("- Ошибка 1: skipped\n", text)
+            self.assertIn("- Ошибка 2: needs-user | note: plan contradicts", text)
+            self.assertEqual(run_tool("validate-report", str(report)).returncode, 0)
+            self.assertEqual(run_tool("mark-fix", str(report), "9", "applied").returncode, 1)
+
+    def test_mark_fix_rejects_final_and_fixed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            final = Path(tmp) / "main-plan-report-1-final.md"
+            write(final, valid_report(final=True))
+            self.assertEqual(run_tool("mark-fix", str(final), "1", "applied").returncode, 1)
+            report = Path(tmp) / "main-plan-report-2.md"
+            write(report, issues_report([("✅ fixed", "high", "A")]))
+            self.assertEqual(run_tool("mark-fix", str(report), "1", "applied").returncode, 1)
+
+    def cycle(self, prev_issues: list, new_issues: list, cycle: int, limit: int = 2, final: bool = False, log: str = "") -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            prev = Path(tmp) / "main-plan-report-1.md"
+            write(prev, issues_report(prev_issues, extra=log))
+            new = Path(tmp) / ("main-plan-report-2-final.md" if final else "main-plan-report-2.md")
+            write(new, issues_report(new_issues, n=2))
+            process = run_tool("cycle-check", str(prev), str(new), str(cycle), str(limit))
+            self.assertEqual(process.returncode, 0, process.stdout)
+            return read_json(process)
+
+    def test_cycle_check_actions(self) -> None:
+        open_a, open_b = ("⭕️ not-fixed", "high", "A"), ("⭕️ not-fixed", "low", "B")
+        fixed_a, fixed_b = ("✅ fixed", "high", "A"), ("✅ fixed", "low", "B")
+        self.assertEqual(self.cycle([open_a], [fixed_a], 1, final=True)["action"], "complete")
+        self.assertEqual(self.cycle([open_a, open_b], [fixed_a, open_b], 1)["action"], "continue")
+        self.assertEqual(self.cycle([open_a, open_b], [fixed_a, open_b], 2)["action"], "stop-limit")
+        stalled = self.cycle([open_a], [open_a], 1, log="\n## Журнал исправлений\n\n- Ошибка 1: applied\n")
+        self.assertEqual(stalled["action"], "stop-stalled")
+        self.assertEqual(stalled["claimed_not_fixed_ids"], [1])
+        ask = self.cycle([open_a, open_b], [fixed_a, open_b], 1, log="\n## Журнал исправлений\n\n- Ошибка 2: needs-user\n")
+        self.assertEqual((ask["action"], ask["needs_user_ids"]), ("ask-user", [2]))
+        # already-fixed carry-over issues do not count as progress of this cycle
+        self.assertEqual(self.cycle([fixed_a, open_b], [fixed_a, open_b], 1)["action"], "stop-stalled")
 
 
 if __name__ == "__main__":

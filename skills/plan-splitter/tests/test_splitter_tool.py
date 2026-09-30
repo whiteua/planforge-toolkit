@@ -102,16 +102,66 @@ class TestCountTasksInOriginal(unittest.TestCase):
         ) + "\n"
         self.assertEqual(self.mod.count_tasks_in_original(text), 5)
 
-    def test_mixed_takes_max(self):
-        # 2 Task headings + 6 numbered items -> max wins (6).
+    def test_headings_win_over_nested_steps(self):
+        # Task headings are the unit; numbered steps inside them are not tasks.
         text = (
             "# Plan\n\n"
             "### Задача 1: первая\n\n"
             "1. шаг\n2. шаг\n3. шаг\n\n"
-            "### Задача 2: вторая\n\n"
+            "### Task 2 — вторая\n\n"
             "4. шаг\n5. шаг\n6. шаг\n"
         )
-        self.assertEqual(self.mod.count_tasks_in_original(text), 6)
+        self.assertEqual(self.mod.count_tasks_in_original(text), 2)
+
+    def test_numbered_items_in_fences_and_indented_are_ignored(self):
+        text = "# Plan\n\n1. Step one\n   1. nested\n```\n1. code\n2. code\n```\n2. Step two\n"
+        self.assertEqual(self.mod.count_tasks_in_original(text), 2)
+
+
+class TestPartIds(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_module()
+
+    def test_bijective_base26(self):
+        self.assertEqual([self.mod.part_id(n) for n in (1, 2, 26, 27, 28, 52, 53)],
+                         ["a", "b", "z", "aa", "ab", "az", "ba"])
+
+    def test_stage_filename_accepts_ordinal_and_id(self):
+        self.assertEqual(self.mod.stage_filename("plan", 3), "plan-c.md")
+        self.assertEqual(self.mod.stage_filename("plan", "C"), "plan-c.md")
+        with self.assertRaises(ValueError):
+            self.mod.stage_filename("plan", "stg01")
+
+    def test_roadmap_table_normalizes_case_and_separators(self):
+        text = (
+            "| Stage | Title | Depends on | Parallel group | Weight |\n"
+            "|---|---|---|---|---|\n"
+            "| A | First | — | A | 🟢 light |\n"
+            "| b | Second | A c | B | 🟡 medium |\n"
+            "| stg03 | Old | a | B | 🟡 medium |\n"
+        )
+        rows = self.mod.parse_roadmap_table(text)
+        self.assertEqual([r["id"] for r in rows], ["a", "b", "stg03"])
+        self.assertEqual(rows[1]["depends"], "a,c")
+        self.assertIn("invalid stage id", rows[2]["error"])
+
+    def test_preflight_lists_all_split_artifacts(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("plan.md", "plan-roadmap.md", "plan-a.md", "plan-a-review-1.md",
+                         "plan-b-completion.md", "plan-verify-ledger.json", "plan-impl.md", "other-a.md"):
+                with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                    f.write("x")
+            proc = subprocess.run([sys.executable, TOOL, "preflight", d, "plan"], capture_output=True, text=True)
+            data = json.loads(proc.stdout)
+            self.assertEqual(data["existing"], ["plan-a-review-1.md", "plan-a.md", "plan-b-completion.md",
+                                                "plan-roadmap.md", "plan-verify-ledger.json"])
+
+    def test_json_output_is_ascii_safe(self):
+        proc = subprocess.run([sys.executable, TOOL, "detect-lang", TOOL], capture_output=True, text=True,
+                              encoding="ascii", errors="strict")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn('"lang"', proc.stdout)
 
 
 if __name__ == "__main__":

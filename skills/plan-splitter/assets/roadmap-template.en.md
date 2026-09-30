@@ -2,7 +2,7 @@
 
 > Source: [{{BASE_NAME}}.md](./{{BASE_NAME}}.md)
 > Generated: {{ISO8601_UTC}}
-> Stages: {{N}}
+> Parts: {{N}}
 
 ## Overview
 
@@ -12,53 +12,53 @@
 
 | Stage | Title | Depends on | Parallel group | Weight |
 |-------|-------|------------|----------------|--------|
-| stg01 | {{TITLE_1}} | — | A | 🔴 heavy |
-| stg02 | {{TITLE_2}} | stg01 | B | 🟡 medium |
-| stg03 | {{TITLE_3}} | stg01 | B | 🟢 light |
-| stg04 | {{TITLE_4}} | stg02, stg03 | C | 🟡 medium |
+| a | {{TITLE_A}} | — | A | 🔴 heavy |
+| b | {{TITLE_B}} | a | B | 🟡 medium |
+| c | {{TITLE_C}} | a | B | 🟢 light |
+| d | {{TITLE_D}} | b, c | C | 🟡 medium |
 
 ### Parallel groups
 
-- **Group A** (blocking): stg01 — runs first, blocks the rest.
-- **Group B** (parallel): stg02, stg03 — can run concurrently after group A.
-- **Group C**: stg04 — runs only after group B completes.
+- **Group A** (blocking): a — runs first, blocks the rest.
+- **Group B** (parallel): b, c — can run concurrently after group A.
+- **Group C**: d — runs only after group B completes.
 
 ### Visualization (Mermaid)
 
 ```mermaid
 graph LR
-    stg01 --> stg02
-    stg01 --> stg03
-    stg02 --> stg04
-    stg03 --> stg04
+    a --> b
+    a --> c
+    b --> d
+    c --> d
 ```
 
 ## Stages
 
-### stg01: {{TITLE_1}}
-- **File**: [{{BASE_NAME}}-stg01.md](./{{BASE_NAME}}-stg01.md)
+### a: {{TITLE_A}}
+- **File**: [{{BASE_NAME}}-a.md](./{{BASE_NAME}}-a.md)
 - **Depends on**: —
-- **Blocks**: stg02, stg03
+- **Blocks**: b, c
 - **Weight**: 🔴 heavy
-- **Summary**: {{SHORT_1}}
+- **Summary**: {{SHORT_A}}
 
-### stg02: {{TITLE_2}}
-- **File**: [{{BASE_NAME}}-stg02.md](./{{BASE_NAME}}-stg02.md)
-- **Depends on**: stg01
-- **Blocks**: stg04
+### b: {{TITLE_B}}
+- **File**: [{{BASE_NAME}}-b.md](./{{BASE_NAME}}-b.md)
+- **Depends on**: a
+- **Blocks**: d
 - **Weight**: 🟡 medium
-- **Summary**: {{SHORT_2}}
+- **Summary**: {{SHORT_B}}
 
-### stg03: {{TITLE_3}}
-- **File**: [{{BASE_NAME}}-stg03.md](./{{BASE_NAME}}-stg03.md)
-- **Depends on**: stg01
-- **Blocks**: stg04
+### c: {{TITLE_C}}
+- **File**: [{{BASE_NAME}}-c.md](./{{BASE_NAME}}-c.md)
+- **Depends on**: a
+- **Blocks**: d
 - **Weight**: 🟢 light
-- **Summary**: {{SHORT_3}}
+- **Summary**: {{SHORT_C}}
 
-### stg04: {{TITLE_4}}
-- **File**: [{{BASE_NAME}}-stg04.md](./{{BASE_NAME}}-stg04.md)
-- **Depends on**: stg02, stg03
+### d: {{TITLE_D}}
+- **File**: [{{BASE_NAME}}-d.md](./{{BASE_NAME}}-d.md)
+- **Depends on**: b, c
 - **Blocks**: —
 - **Weight**: 🟡 medium
-- **Summary**: {{SHORT_4}}
+- **Summary**: {{SHORT_D}}

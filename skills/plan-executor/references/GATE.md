@@ -3,21 +3,22 @@
 ## Tiered Verification
 
 - 🟢 green: run the relevant tests, lint, typecheck, or the narrowest executable check.
-- 🟡 yellow: green checks plus an LLM grader or focused review of behavior against the unit contract.
-- 🔴 red: yellow checks plus adversarial subagent review where writer and grader are separate.
+- 🟡 yellow: green checks plus a focused review of behaviour against the unit's done-state (Postconditions or `Done when:`).
+- 🔴 red: yellow checks plus an adversarial subagent review where writer and grader are separate.
 
-## Retry & Rollback
-
-On gate failure, restore the previous checkpoint with `checkpoint-restore` when git is available. In step mode, ask the engineer for manual rollback or confirmation. Retry the same unit until `attempts >= 3`; then STOP and generate a stop-report.
+A checkpoint task (`### Task N: Checkpoint — …`) is gated by running its command and comparing the output with its `Expected:` line.
 
 ## No Tests → Escalate
 
-If no executable check exists, do not claim success by inspection alone. Нет тестов — эскалация, **не фейк-пас**: use grader/human review and record the evidence.
+If no executable check exists, do not claim success by inspection alone: use grader or human review and record the evidence.
 
-## Checkpoint Failure = Gate Failure
+## Retry & Rollback
 
-If `checkpoint-create` fails, do not call `ledger-mark done`. Treat the checkpoint failure as gate failure, preserve `last_error`, and retry or STOP according to the attempts policy.
+On gate failure call `unit-finish <unit> fail --error "<signature>"`. It returns:
+
+- `decision: retry` — ask the engineer to confirm `checkpoint-restore <repo> <restore_to>` (or to keep the current state), then call `unit-begin` again; it returns the same unit as `retry-available`.
+- `decision: stop` — `stop_reason` is `exhausted` (3 attempts) or `stagnated` (same signature twice). STOP with a stop-report.
 
 ## Restore Requires Confirmation
 
-`checkpoint-restore` executes `git reset --hard` - a destructive, irreversible operation. The agent MUST obtain explicit engineer confirmation before calling it. In auto-mode, if no confirmation channel is available, the agent must STOP and generate a stop-report instead of restoring silently.
+`checkpoint-restore` rewrites working-tree files to the snapshot and deletes files created after it (branch, HEAD and index stay unchanged). It is destructive for uncommitted work: the agent MUST obtain explicit engineer confirmation first. In auto mode without a confirmation channel, STOP with a stop-report instead of restoring.

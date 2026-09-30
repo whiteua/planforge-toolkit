@@ -23,10 +23,8 @@
 
 ## Language
 
-Язык отчёта определяется системной локалью, а не содержимым MASTER_PLAN:
-- язык по-умолчанию → `ru`.
-- `ru`, `ru_*`, `Russian` в `LC_ALL`, `LC_MESSAGES`, `LANGUAGE`, `LANG` или locale API → `ru`;
-- иначе → `en`.
+Язык отчёта определяется содержимым MASTER_PLAN: доля кириллицы среди букв > 5% → `ru`,
+иначе `en`; пустой или нечитаемый план → `en`. Системная локаль не учитывается.
 
 ## Output Fields
 
@@ -36,4 +34,9 @@
 - `plan_dir`, `plan_dir_abs`;
 - `reports`, `last_report`;
 - `next_n`, `next_open_name`, `next_final_name`, `next_open_path`, `next_final_path`;
-- `language`, `pass_type`.
+- `language`, `pass_type`;
+- `report_header` — готовые значения frontmatter нового отчёта: `master_plan_path` (относительно
+  `PLAN_DIR`), `master_plan_sha256`, `master_plan_size`, `audit_iteration`,
+  `consecutive_open_invocations_if_open` / `_if_final`, `previous_report_path`,
+  `previous_report_sha256` (`null` на первом проходе), `language`. Агент копирует их, а не
+  вычисляет заново.

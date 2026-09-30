@@ -25,7 +25,7 @@ class ResultSchema(unittest.TestCase):
         self.assertIn("stop_reason", props)
         self.assertEqual(
             props["stop_reason"]["enum"],
-            ["regression", "churn", "drain", "stuck", None],
+            ["regression", "churn", "unchanged", "drain", "stuck", None],
         )
         self.assertIn("flows", props)
         self.assertIs(props["flows"]["additionalProperties"], False)

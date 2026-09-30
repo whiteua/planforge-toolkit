@@ -4,12 +4,16 @@ splitter_tool.py — utility for the plan-splitter skill.
 
 Subcommands:
   preflight <dir> <base_name>
-      Check write access to <dir> and list any existing stg-files. Returns JSON:
+      Check write access to <dir> and list existing split artifacts for this base
+      (roadmap, part files, review/completion files, verify JSONs). Returns JSON:
       {"writable": bool, "existing": ["<file>", ...], "warning": "<text>"|null}.
-      Existing files are a WARNING, not an error — the agent decides what to do.
+      Existing files are a WARNING, not an error: the agent decides what to do.
 
-  stage-name <base> <N>
-      Print '<base>-stg<NN>.md' (NN = zero-padded N, e.g. 1 -> "stg01").
+  part-id <N>
+      Print the part id for ordinal N (1 -> a, 26 -> z, 27 -> aa).
+
+  stage-name <base> <N|id>
+      Print '<base>-<id>.md' for ordinal N or part id (e.g. 1 -> "<base>-a.md").
 
   detect-lang <file>
       Detect language by cyrillic_ratio. Print JSON:
@@ -25,16 +29,20 @@ Subcommands:
       Print JSON: {"valid": bool, "missing": [...], "errors": [...], "stages": [...]}.
 
   validate-all <dir> <base_name>
-      Cross-validation of the whole set: roadmap + all stages.
+      Cross-validation of the whole set: '<base>-roadmap.md' + all '<base>-<id>.md' parts.
       Checks: file existence, DAG (no cycles), depends->exist, parallel-group consistency,
-      task-coverage (sum of stage tasks >= original-plan tasks), original-plan hash.
+      task-coverage (sum of part tasks >= original-plan tasks), original-plan hash.
       Print JSON with detailed results. Exit 0 on success, 1 on failure.
 
-  verify-baseline <dir> <base_name> [--stages all|stgNN[,stgNN...]]
-      Snapshot selected stage SHA-256 values and pre-existing review files.
+  verify-baseline <dir> <base_name> [--stages all|a[,b...]]
+      Snapshot selected part SHA-256 values and pre-existing review files.
+      'all' takes the parts from the roadmap table, in table order.
+
+  verify-record <dir> <base_name> --results <file|-> --ledger <file> [--mode full-cycle|audit-only]
+      Upsert the ledger from plan-iterative-revision's batch JSON ({"parts": {"a": {...}}}).
 
   verify-status <dir> <base_name> --baseline <file> --ledger <file> --validator <file>
-      Verify ledger entries against current stage/review artifacts.
+      Verify ledger entries against current part/review artifacts.
 
   hash <file>
       Print SHA-256 hex of <file> raw bytes.
@@ -53,10 +61,16 @@ import tempfile
 from typing import Dict, List, Optional, Set, Tuple
 
 
-STAGE_FILE_RE = re.compile(r"^(?P<base>.+)-stg(?P<n>\d{2,})(?P<suffix>-roadmap)?\.md$", re.IGNORECASE)
-REVIEW_FILE_RE = re.compile(r"^(?P<base>.+)-stg(?P<stg>\d{2})-review-(?P<n>\d+)\.md$", re.IGNORECASE)
+# Part ids are lowercase letters: a..z, then aa, ab, ... (bijective base-26).
+PART_ID_RE = re.compile(r"^[a-z]{1,2}$")
+ROADMAP_SUFFIX = "-roadmap.md"
+STAGE_FILE_RE = re.compile(r"^(?P<base>.+)-(?P<part>[a-z]{1,2})\.md$")
+ROADMAP_FILE_RE = re.compile(r"^(?P<base>.+)-roadmap\.md$")
+REVIEW_FILE_RE = re.compile(r"^(?P<base>.+)-(?P<part>[a-z]{1,2})-review-(?P<n>\d+)\.md$")
+PART_ARTIFACT_RE = re.compile(r"^(?P<base>.+)-(?P<part>[a-z]{1,2})-(?:review-\d+|completion)\.md$")
+VERIFY_JSON_RE = re.compile(r"^(?P<base>.+)-verify-(?:baseline|ledger)\.json$")
 CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
-LETTER_RE = re.compile(r"[A-Za-z\u0400-\u04FF]")
+FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
 REQUIRED_STAGE_SECTIONS = (
     "## Цель",
@@ -90,7 +104,8 @@ GRANULARITY_TASK_THRESHOLD = 15  # tasks per stage; above this is a soft warning
 
 
 def print_json(data: object, exit_code: int = 0) -> None:
-    print(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2))
+    # ASCII-only output survives any console code page; json.loads restores the text.
+    print(json.dumps(data, ensure_ascii=True, sort_keys=True, indent=2))
     sys.exit(exit_code)
 
 
@@ -113,7 +128,8 @@ def _load_json(path: str) -> Dict[str, object]:
 
 
 def cyrillic_ratio(text: str) -> float:
-    letters = LETTER_RE.findall(text)
+    """Ecosystem convention (same formula in plan-iterative-revision and plan-resolver)."""
+    letters = [ch for ch in text if ch.isalpha()]
     if not letters:
         return 0.0
     cyr = sum(1 for ch in letters if CYRILLIC_RE.match(ch))
@@ -126,10 +142,34 @@ def detect_lang_for_text(text: str) -> Tuple[str, float]:
     return lang, ratio
 
 
-def stage_filename(base: str, n: int) -> str:
-    if n < 0:
-        raise ValueError("Stage number must be non-negative")
-    return f"{base}-stg{n:02d}.md"
+def part_id(n: int) -> str:
+    """1 -> a, 26 -> z, 27 -> aa (bijective base-26)."""
+    if n < 1:
+        raise ValueError("Part ordinal must be >= 1")
+    letters = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(ord("a") + rem) + letters
+    return letters
+
+
+def normalize_part_id(raw: str) -> str:
+    """Accept an ordinal ('3') or a part id in any case ('C'); return the canonical id."""
+    value = str(raw).strip()
+    if value.isdigit():
+        return part_id(int(value))
+    value = value.lower()
+    if not PART_ID_RE.match(value):
+        raise ValueError(f"Invalid part id: {raw}")
+    return value
+
+
+def stage_filename(base: str, part: object) -> str:
+    return f"{base}-{normalize_part_id(str(part))}.md"
+
+
+def roadmap_filename(base: str) -> str:
+    return f"{base}{ROADMAP_SUFFIX}"
 
 
 def sha256_file(path: str) -> str:
@@ -149,34 +189,34 @@ def _get_flag(args: List[str], flag: str, default: Optional[str] = None) -> Opti
     return args[index + 1]
 
 
+def roadmap_part_ids(directory: str, base: str) -> List[str]:
+    """Part ids in roadmap-table order; the roadmap is the source of truth for 'all'."""
+    roadmap_path = os.path.join(directory, roadmap_filename(base))
+    if not os.path.isfile(roadmap_path):
+        raise ValueError(f"Roadmap not found: {roadmap_path}")
+    rows = parse_roadmap_table(read_text(roadmap_path))
+    return [row["id"] for row in rows if not row.get("error")]
+
+
 def _stage_ids(stages_arg: str, directory: str, base: str) -> List[str]:
     if stages_arg == "all":
-        stage_ids: List[str] = []
-        for n in range(1, 100):
-            if os.path.isfile(os.path.join(directory, stage_filename(base, n))):
-                stage_ids.append(f"stg{n:02d}")
-        return stage_ids
-
-    stage_ids = []
-    for raw_stage in stages_arg.split(","):
-        stage = raw_stage.strip().lower()
-        if not re.match(r"^stg\d{2}$", stage):
-            raise ValueError(f"Invalid stage id: {raw_stage}")
-        path = os.path.join(directory, f"{base}-{stage}.md")
+        stage_ids = roadmap_part_ids(directory, base)
+    else:
+        stage_ids = [normalize_part_id(raw) for raw in re.split(r"[,\s]+", stages_arg) if raw.strip()]
+    for stage in stage_ids:
+        path = os.path.join(directory, stage_filename(base, stage))
         if not os.path.isfile(path):
             raise ValueError(f"Stage file not found: {path}")
-        stage_ids.append(stage)
-    return sorted(stage_ids)
+    return stage_ids
 
 
 def _reviews_for_stage(directory: str, base: str, stage: str) -> List[str]:
     reviews: List[Tuple[int, str]] = []
-    stage_number = stage[3:]
     for name in os.listdir(directory):
         match = REVIEW_FILE_RE.match(name)
         if not match:
             continue
-        if match.group("base") == base and match.group("stg") == stage_number:
+        if match.group("base") == base and match.group("part") == stage:
             reviews.append((int(match.group("n")), name))
     reviews.sort(key=lambda item: item[0])
     return [name for _n, name in reviews]
@@ -226,17 +266,19 @@ def cmd_preflight(directory: str, base_name: str) -> None:
         result["error"] = f"Cannot write to {directory}: {e}"
         print_json(result, 1)
 
-    # Scan for existing stg-files.
+    # Scan for existing split artifacts of this base.
     existing: List[str] = []
     for name in os.listdir(directory):
-        m = STAGE_FILE_RE.match(name)
-        if m and m.group("base") == base_name:
-            existing.append(name)
+        for pattern in (STAGE_FILE_RE, ROADMAP_FILE_RE, PART_ARTIFACT_RE, VERIFY_JSON_RE):
+            m = pattern.match(name)
+            if m and m.group("base") == base_name:
+                existing.append(name)
+                break
     existing.sort()
     result["existing"] = existing
     if existing:
         result["warning"] = (
-            f"Found {len(existing)} existing stg-file(s) for base '{base_name}'. "
+            f"Found {len(existing)} existing split artifact(s) for base '{base_name}'. "
             "Ask the user before overwriting."
         )
     print_json(result, 0)
@@ -245,8 +287,11 @@ def cmd_preflight(directory: str, base_name: str) -> None:
 # ---------- stage-name ----------
 
 def cmd_stage_name(base: str, n_str: str) -> None:
-    n = int(n_str)
-    print(stage_filename(base, n))
+    print(stage_filename(base, n_str))
+
+
+def cmd_part_id(n_str: str) -> None:
+    print(part_id(int(n_str)))
 
 
 # ---------- detect-lang ----------
@@ -350,20 +395,21 @@ def parse_roadmap_table(text: str) -> List[Dict[str, str]]:
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if len(cells) < 5:
                 continue
-            stage_id = cells[0].strip()
-            if not re.match(r"^stg\d{2,}$", stage_id, re.IGNORECASE):
-                continue
+            stage_id = cells[0].strip().lower()
             depends_raw = cells[2].strip()
             depends: List[str] = []
             if depends_raw and depends_raw not in ("—", "-", ""):
-                depends = [d.strip() for d in re.split(r"[,\s]+", depends_raw) if d.strip()]
-            rows.append({
-                "id": stage_id.lower(),
+                depends = [d.strip().lower() for d in re.split(r"[,\s]+", depends_raw) if d.strip()]
+            row = {
+                "id": stage_id,
                 "title": cells[1].strip(),
                 "depends": ",".join(depends),
                 "group": cells[3].strip(),
                 "weight": cells[4].strip(),
-            })
+            }
+            if not PART_ID_RE.match(stage_id):
+                row["error"] = f"invalid stage id: {cells[0].strip()} (expected a, b, ... aa)"
+            rows.append(row)
     return rows
 
 
@@ -376,11 +422,13 @@ def cmd_validate_roadmap(path: str) -> None:
     errors: List[str] = []
     if not stages:
         errors.append("Dependency table not found or empty")
+    errors.extend(str(s["error"]) for s in stages if s.get("error"))
+    stages = [s for s in stages if not s.get("error")]
     stage_ids = {s["id"] for s in stages}
     for s in stages:
         deps = [d for d in s["depends"].split(",") if d]
         for d in deps:
-            if d.lower() not in stage_ids:
+            if d not in stage_ids:
                 errors.append(f"Stage {s['id']} depends on unknown stage '{d}'")
 
     errors.extend(validate_mermaid_block(text))
@@ -434,32 +482,43 @@ def has_cycle(graph: Dict[str, List[str]]) -> Optional[List[str]]:
     return None
 
 
+def _lines_outside_fences(text: str) -> List[str]:
+    kept: List[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            kept.append(line)
+    return kept
+
+
 def count_tasks_in_stage(text: str) -> int:
-    """Count tasks in a stage file's '## Задачи' / '## Tasks' section."""
-    # Find the section header.
+    """Count top-level numbered items in the '## Задачи' / '## Tasks' section (code fences ignored)."""
     m = re.search(r"^##\s+(?:Задачи|Tasks)\s*$", text, re.MULTILINE)
     if not m:
         return 0
     start = m.end()
     next_sec = re.search(r"^##\s+", text[start:], re.MULTILINE)
     section = text[start: start + next_sec.start()] if next_sec else text[start:]
-    # Count numbered list items "1. ", "2. " etc.
-    return len(re.findall(r"^\s*\d+\.\s+\S", section, re.MULTILINE))
+    return sum(1 for line in _lines_outside_fences(section) if re.match(r"^\d+\.\s+\S", line))
 
 
 def count_tasks_in_original(text: str) -> int:
-    """Coarse task estimate: numbered list items OR Task/Задача headings, whichever is larger."""
-    numbered = len(re.findall(r"^\s*\d+\.\s+\S", text, re.MULTILINE))
-    headings = len(re.findall(
-        r"^#{2,4}\s*(?:Task|Задача)\s+\S+?:", text, re.MULTILINE))
-    return max(numbered, headings)
+    """Task/Задача headings when the plan has them; otherwise top-level numbered items outside fences."""
+    lines = _lines_outside_fences(text)
+    headings = sum(1 for line in lines if re.match(r"^#{2,4}\s*(?:Task|Задача)\s+\S+?\s*(?:[:\-]|—|\.\s)", line))
+    if headings:
+        return headings
+    return sum(1 for line in lines if re.match(r"^\d+\.\s+\S", line))
 
 
 def cmd_validate_all(directory: str, base_name: str) -> None:
     if not os.path.isdir(directory):
         print_json({"valid": False, "error": f"Directory not found: {directory}"}, 1)
 
-    roadmap_path = os.path.join(directory, f"{base_name}-stg00-roadmap.md")
+    roadmap_path = os.path.join(directory, roadmap_filename(base_name))
     original_path = os.path.join(directory, f"{base_name}.md")
 
     errors: List[str] = []
@@ -474,6 +533,8 @@ def cmd_validate_all(directory: str, base_name: str) -> None:
     errors.extend(validate_mermaid_block(roadmap_text))
 
     stages = parse_roadmap_table(roadmap_text)
+    errors.extend(str(s["error"]) for s in stages if s.get("error"))
+    stages = [s for s in stages if not s.get("error")]
     if not stages:
         errors.append("Roadmap dependency table is empty")
         print_json({"valid": False, "errors": errors}, 1)
@@ -482,13 +543,7 @@ def cmd_validate_all(directory: str, base_name: str) -> None:
     stage_ids = {s["id"] for s in stages}
     stage_files: Dict[str, str] = {}
     for s in stages:
-        # Extract numeric N from id like "stg03"
-        m = re.match(r"^stg(\d+)$", s["id"], re.IGNORECASE)
-        if not m:
-            errors.append(f"Invalid stage id: {s['id']}")
-            continue
-        n = int(m.group(1))
-        fname = stage_filename(base_name, n)
+        fname = stage_filename(base_name, s["id"])
         fpath = os.path.join(directory, fname)
         if not os.path.isfile(fpath):
             errors.append(f"Stage file missing: {fname}")
@@ -500,7 +555,7 @@ def cmd_validate_all(directory: str, base_name: str) -> None:
             errors.append(f"{fname}: missing sections {miss}")
 
     # 2. DAG check
-    graph: Dict[str, List[str]] = {s["id"]: [d.lower() for d in s["depends"].split(",") if d] for s in stages}
+    graph: Dict[str, List[str]] = {s["id"]: [d for d in s["depends"].split(",") if d] for s in stages}
     cycle = has_cycle(graph)
     if cycle:
         errors.append(f"Dependency cycle: {' -> '.join(cycle)}")
@@ -571,13 +626,70 @@ def cmd_verify_baseline(directory: str, base_name: str, stages_arg: str) -> None
 
     stages: Dict[str, object] = {}
     for stage in _stage_ids(stages_arg, directory, base_name):
-        stage_path = os.path.join(directory, f"{base_name}-{stage}.md")
+        stage_path = os.path.join(directory, stage_filename(base_name, stage))
         stages[stage] = {
             "stg_sha": sha256_file(stage_path),
             "review_files": _reviews_for_stage(directory, base_name, stage),
         }
 
     print_json({"base_name": base_name, "stages": stages}, 0)
+
+
+# ---------- verify-record ----------
+
+RESULT_VALUES = ("clean", "converged", "stagnation", "limit", "escalated")
+
+
+def cmd_verify_record(directory: str, base_name: str, results_arg: str, ledger_path: str, mode: str) -> None:
+    """Upsert the verify ledger from plan-iterative-revision's batch JSON."""
+    if mode not in ("full-cycle", "audit-only"):
+        raise ValueError("--mode must be full-cycle or audit-only")
+    raw = sys.stdin.read() if results_arg == "-" else read_text(results_arg)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid results JSON: {exc}") from exc
+    parts = payload.get("parts") if isinstance(payload, dict) else None
+    if not isinstance(parts, dict):
+        raise ValueError("Results JSON must be an object with a 'parts' object")
+
+    ledger: Dict[str, object] = {"base_name": base_name, "verify_mode": mode, "stages": {}}
+    if os.path.isfile(ledger_path):
+        ledger = _load_json(ledger_path)
+        if not isinstance(ledger.get("stages"), dict):
+            ledger["stages"] = {}
+    stages = ledger["stages"]  # type: ignore[index]
+    errors: List[str] = []
+    for raw_id, entry in parts.items():
+        try:
+            stage = normalize_part_id(raw_id)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        if not isinstance(entry, dict):
+            errors.append(f"{stage}: part entry must be an object")
+            continue
+        previous = stages.get(stage) if isinstance(stages.get(stage), dict) else {}  # type: ignore[union-attr]
+        attempts = int(previous.get("attempts") or 0) + 1  # type: ignore[union-attr]
+        result = entry.get("result")
+        error = entry.get("error")
+        if result not in RESULT_VALUES:
+            error = error or f"invalid result: {result!r}"
+            result = None
+        stages[stage] = {  # type: ignore[index]
+            "verify_mode": mode,
+            "result": result,
+            "iterations": entry.get("iterations"),
+            "remaining_issues": entry.get("remaining_issues"),
+            "stop_reason": entry.get("stop_reason"),
+            "escalated": entry.get("escalated", []),
+            "attempts": attempts,
+            "error": error,
+        }
+    with open(ledger_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(ledger, f, ensure_ascii=False, sort_keys=True, indent=2)
+        f.write("\n")
+    print_json({"ledger": ledger_path, "recorded": sorted(parts.keys()), "errors": errors}, 0 if not errors else 1)
 
 
 # ---------- verify-status ----------
@@ -612,7 +724,7 @@ def cmd_verify_status(
         baseline_reviews = set(baseline_entry.get("review_files", []))
         current_reviews = _current_reviews(directory, base_name, stage)
         new_reviews = [name for name in current_reviews if name not in baseline_reviews]
-        stage_path = os.path.join(directory, f"{base_name}-{stage}.md")
+        stage_path = os.path.join(directory, stage_filename(base_name, stage))
         stg_sha_changed = sha256_file(stage_path) != baseline_entry.get("stg_sha")
 
         ledger_entry = ledger_stages.get(stage)
@@ -662,6 +774,7 @@ def cmd_verify_status(
         stages[stage] = {
             "verdict": verdict,
             "result": result,
+            "stop_reason": ledger_entry.get("stop_reason") if isinstance(ledger_entry, dict) else None,
             "verify_mode": verify_mode,
             "new_reviews": new_reviews,
             "reviews_validated": reviews_validated,
@@ -687,13 +800,15 @@ def cmd_hash(path: str) -> None:
 
 USAGE = """Usage:
   splitter_tool.py preflight <dir> <base_name>
-  splitter_tool.py stage-name <base> <N>
+  splitter_tool.py part-id <N>
+  splitter_tool.py stage-name <base> <N|id>
   splitter_tool.py detect-lang <file>
   splitter_tool.py validate-stage <file>
   splitter_tool.py validate-roadmap <file>
   splitter_tool.py validate-all <dir> <base_name>
-    splitter_tool.py verify-baseline <dir> <base_name> [--stages all|stgNN[,stgNN...]]
-    splitter_tool.py verify-status <dir> <base_name> --baseline <file> --ledger <file> --validator <file> [--stages all|stgNN[,stgNN...]]
+  splitter_tool.py verify-baseline <dir> <base_name> [--stages all|a[,b...]]
+  splitter_tool.py verify-record <dir> <base_name> --results <file|-> --ledger <file> [--mode full-cycle|audit-only]
+  splitter_tool.py verify-status <dir> <base_name> --baseline <file> --ledger <file> --validator <file> [--stages all|a[,b...]]
   splitter_tool.py hash <file>
 """
 
@@ -709,6 +824,8 @@ def main(argv: List[str]) -> None:
             cmd_preflight(args[0], args[1])
         elif cmd == "stage-name" and len(args) == 2:
             cmd_stage_name(args[0], args[1])
+        elif cmd == "part-id" and len(args) == 1:
+            cmd_part_id(args[0])
         elif cmd == "detect-lang" and len(args) == 1:
             cmd_detect_lang(args[0])
         elif cmd == "validate-stage" and len(args) == 1:
@@ -720,6 +837,13 @@ def main(argv: List[str]) -> None:
         elif cmd == "verify-baseline" and len(args) >= 2:
             stages_arg = _get_flag(args[2:], "--stages", "all") or "all"
             cmd_verify_baseline(args[0], args[1], stages_arg)
+        elif cmd == "verify-record" and len(args) >= 2:
+            results_arg = _get_flag(args[2:], "--results")
+            ledger_path = _get_flag(args[2:], "--ledger")
+            mode = _get_flag(args[2:], "--mode", "full-cycle") or "full-cycle"
+            if not results_arg or not ledger_path:
+                raise ValueError("verify-record requires --results and --ledger")
+            cmd_verify_record(args[0], args[1], results_arg, ledger_path, mode)
         elif cmd == "verify-status" and len(args) >= 2:
             baseline_path = _get_flag(args[2:], "--baseline")
             ledger_path = _get_flag(args[2:], "--ledger")

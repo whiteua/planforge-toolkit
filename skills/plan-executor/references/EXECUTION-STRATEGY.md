@@ -1,19 +1,17 @@
 # EXECUTION-STRATEGY
 
-## One Diagnosis Three Params
+## One Diagnosis, Three Params
 
-Run `recommend-strategy <weight> --task-text <text>` per unit. The result has one coordinated decision:
+`unit-begin` returns `strategy` for the unit, derived from its weight and title:
 
 - `isolation`: `main` or `subagent`
 - `model_depth`: `light`, `medium`, or `deep`
-- `gate_tier`: `green`, `yellow`, or `red`
+- `gate_tier`: `green`, `yellow`, or `red` (see `GATE.md`)
 
-Manual overrides are allowed, but record the reason in the working notes before execution.
+Titles with whole words such as refactor, architecture, security, migration, concurrency, auth/OAuth raise `isolation`/`model_depth` to `subagent`/`deep` without changing `gate_tier`. Manual overrides are allowed; record the reason in the working notes.
 
-## Context Scoping
+## Context
 
-Run `scope-context <stage_path>` for staged work. The command returns paths mentioned in Inputs, Outputs, or Files sections. The tool returns paths only; the agent reads the files itself and keeps source plan markdown read-only.
+Work from `unit-begin`'s `text` (the unit's own section or stage file) and `files` (paths from its `Files`/`Inputs`/`Outputs` blocks, with `lines` hints such as `4-6`). Read those files yourself; do not re-read the whole plan for every unit.
 
-## Empty Scope Fallback
-
-If `scope-context` returns no paths, use `Grep/Glob` searches for class, function, command, file, or feature names from the unit text. Do not build or rely on a Repo Map; keep context local to the unit.
+If `files` is empty, search with Grep/Glob for class, function, command or file names from `text`. Do not build or rely on a repo map; keep context local to the unit.

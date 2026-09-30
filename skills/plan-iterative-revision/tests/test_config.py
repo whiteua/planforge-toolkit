@@ -29,7 +29,7 @@ class ResolveConfig(unittest.TestCase):
 
     def test_deep_preset(self):
         d = json.loads(run("resolve-config", "--preset", "deep").stdout)
-        self.assertEqual((d["lenses"], d["rigor"], d["max"]), (3, "explore", 7))
+        self.assertEqual((d["lenses"], d["rigor"], d["max"]), (4, "explore", 7))
 
     def test_override_wins_over_preset(self):
         d = json.loads(run("resolve-config", "--preset", "deep", "--lenses", "1", "--max", "2").stdout)
@@ -46,7 +46,7 @@ class ResolveConfig(unittest.TestCase):
         self.assertIn("error", json.loads(p.stdout))
 
     def test_bad_lenses(self):
-        p = run("resolve-config", "--lenses", "4")
+        p = run("resolve-config", "--lenses", "5")
         self.assertEqual(p.returncode, 2)
         self.assertIn("error", json.loads(p.stdout))
 

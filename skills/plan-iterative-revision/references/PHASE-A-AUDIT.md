@@ -1,249 +1,143 @@
-# PHASE A — AUDIT
+# Phase A: Audit
 
-Цель фазы: найти все ошибки в главном плане и записать их в **новый** review-файл.
-Никакие другие файлы не трогаются.
+Goal: find every problem in `PLAN` and hand the list to `TOOL record` as JSON. Phase A edits no
+file; `record` writes the review.
 
 ## Inputs
 
-- `PLAN` — путь к главному плану.
-- `prev_review` — путь к последнему review-файлу или `null`.
+- `PLAN`, the config from `bootstrap` (`lenses`, `rigor`), the audit number `k`.
+- For `k > 1`: the digest `D` from `TOOL digest <dir> <basename> --since <run_start>`:
+  `active_contracts` (issues of the latest review, with full `required_fix` and `acceptance`) and
+  `resolved_contracts` (issues of earlier reviews in this run that are no longer open).
 
-## Historical context at i>1 — digest only
+Read `PLAN` once, in full. If the Phase B self-check just read the whole plan and nothing changed
+since, reuse that text instead. Lenses and taxonomy classes are checklists over the text you already
+have; do not re-read the plan for each of them. Do not read old review files in full. Read a single
+issue block only when the digest entry is not enough.
 
-На итерации `i>1` единственный исторический контекст для Фазы А — вывод команды:
+## Step 1: Contract verification (k > 1)
 
-```bash
-python "<SKILL_DIR>/scripts/next_review_index.py" digest "<DIR>" "<BASE>"
-```
+For every entry of `D.active_contracts`, check the current plan against its `required_fix` and
+`acceptance`:
 
-Использовать только агрегаты `active_contracts` / `resolved_contracts`. Полные файлы
-`REVIEW(N)` не читаются повторно в качестве общего контекста. Исключение: точечный `Read`
-одного блока `REVIEW` по `fingerprint`, если нужно разобрать `deferred-conflict` или
-неясный `persisted`.
+- Fully applied: nothing to record.
+- Not applied or only partly applied: add a **carry** issue:
 
-Step 1 — Contract verification остаётся обязательным: digest ограничивает исторический
-контекст, но не отменяет проверку активных контрактов в текущем `PLAN`.
+  ```json
+  {"carry": "<fingerprint>", "severity": "<one step higher, max blocker>",
+   "code_cross_check": "not applicable — contract check", "problem": "<what is still missing>",
+   "evidence": "<plan quote>"}
+  ```
 
-## Precondition — review file must be creatable
+  `record` copies the category, required fix, title, location and acceptance from the earlier
+  review, so the fingerprint stays the same. Never re-state an open contract as a new issue with
+  different wording: that breaks stuck and regression detection.
 
-WORKFLOW обязан выполнить review-write preflight **до** запуска этой фазы. Если будущий
-`REVIEW(N)` нельзя физически создать рядом с планом или текущий режим агента не предоставляет
-инструмент записи файлов, Фаза А не начинается.
+If a `resolved_contracts` entry is broken again, record it with `carry` as well; `record` treats
+that as a regression.
 
-Запрещено проводить аудит «в уме», складывать найденные issues только в memory/session notes,
-печатать их только в чат или править главный план без созданного review-файла. В такой ситуации
-нужно остановиться и сообщить пользователю, какой `REVIEW(N)` не удалось создать и что требуется
-переключить режим или добавить инструмент записи файлов.
+## Step 2: Lenses
 
-## Output
+Run `lenses` passes; each one has a focus:
 
-- Список объектов `Issue` (см. структуру ниже). На основании этого списка
-  WORKFLOW решит, создавать ли новый `REVIEW(N)` файл.
+| Lens | Enabled when | Focus | Main classes |
+|---|---|---|---|
+| L1 | always | engineering + code cross-check | `code`, `db`, `ops`, `perf`, `security`, `math`, `code-plan-mismatch` |
+| L2 | lenses ≥ 2 | logic, coherence, contracts | `logic`, `contract` |
+| L3 | lenses ≥ 3 | completeness, edge cases, acceptance criteria | `tests`, missing scenarios |
+| L4 | lenses = 4 (`deep`) | red team: triggers, failure modes, production consequences, abuse | `security`, `ops`, `logic` |
 
-## Step 1 — Contract verification (если prev_review существует)
+- With `lenses = 1`, L1 covers all 10 classes of [ERROR-TAXONOMY.md](ERROR-TAXONOMY.md).
+  With more lenses, the column is a priority, not an exclusive scope.
+- Within a lens, go class by class and ask the questions from the taxonomy. One class at a time
+  keeps attention focused.
+- An L4 issue is valid only if its `required_fix` names the trigger condition and the production
+  consequence.
+- Duplicates across lenses are fine: `record` merges issues with the same fingerprint and keeps
+  the highest severity.
 
-Для каждого issue из `prev_review`:
+## Step 3: Code cross-check (mandatory)
 
-1. Найти его `Required fix (contract)` (поле обязательно по REVIEW-FILE-FORMAT.md).
-2. Проверить, что в текущем `PLAN` это требование отражено: grep по ключевым фразам
-   контракта, по нумерации раздела, по упомянутым символам/именам файлов.
-3. Если **не** реализовано → создать новый Issue:
-   - `category = unfulfilled-contract`
-   - `severity = blocker`
-   - `Required fix` = дословный контракт из предыдущего ревью.
-   - `Evidence` включает ссылку на `<basename>-review-(N-1).md#issue-id`.
-4. Если реализовано частично → создать Issue с `severity = major` и описанием расхождения.
-5. Если в предыдущем ревью был `deferred-conflict` — повысить severity на ступень
-   (minor → major, major → blocker, blocker остаётся blocker).
-6. Если переоткрывается issue, который в предыдущей Фазе Б был помечен `deferred-conflict` —
-   учитывать текущее значение `deferral_count[fingerprint]` для отображения в Audit state,
-   но НЕ инкрементировать счётчик. Инкремент происходит исключительно при новой пометке
-   `deferred-conflict` в Фазе Б (PHASE-B-IMPLEMENT.md). При успешном применении в Фазе Б
-   счётчик сбрасывается. Достижение порога `K_STUCK` (3) обрабатывает WORKFLOW (эскалация, C3/E).
+A plan that is not checked against the code is fiction. Depth depends on `rigor`:
 
-## Step 2 — Taxonomy sweep
+- `grep`: `Grep`/`Glob` for the symbols and paths the plan mentions.
+- `read` (standard): additionally `Read` the definitions you found.
+- `explore` (deep): additionally delegate large modules or subsystems to an `Explore` subagent.
 
-## Multi-lens audit (C1) — число проходов = `lenses` из конфига
-
-Фаза А выполняется как `lenses` последовательных проходов; каждый — ПОЛНОЕ чтение плана
-со своим оценочным фокусом. Линзы добавляются по порядку 1 → 2 → 3 → 4:
-
-| Линза | Фокус | Классы таксономии (преимущественно) |
-|---|---|---|
-| L1 (всегда) | техника + сверка с кодом | `code`, `db`, `ops`, `perf`, `security`, `math`, `code-plan-mismatch` |
-| L2 (`lenses>=2`) | логика + связность + контракты | `logic`, `contract`, `unfulfilled-contract` |
-| L3 (`lenses==3`) | полнота + edge-cases + критерии приёмки | `tests`, пропущенные сценарии/acceptance |
-| L4 (`preset==deep`) | red-team: triggers / failure / production consequences / abuse | `security`, `ops`, `logic` (attacking focus) |
-
-L4 включается только при `preset==deep`. Найденные L4 issues проходят тот же
-`fingerprint` / flow pipeline, что и остальные issues. L4 issue невалиден, если
-`required-fix` не называет trigger condition и production consequence. Это только
-prompt-contract: формат `REVIEW` и `validate-review` не меняются. Для deep записывать
-`lenses_used = 4`.
-
-- `lenses==1` — поведение идентично единому taxonomy sweep ниже.
-- **Scope clarification:** при `lenses==1` L1 покрывает ВСЕ 10 классов таксономии
-  (идентично текущему единому sweep); при `lenses>=2` столбец «Классы таксономии
-  (преимущественно)» указывает ПРИОРИТЕТНЫЙ фокус каждой линзы, а не эксклюзивную
-  область — L1 по-прежнему проходит все 10 классов, но с акцентом на технические,
-  в то время как L2/L3 добавляют дополнительный фокусированный проход по своим классам.
-- Каждая линза порождает свои in-memory Issue-объекты.
-- **Merge + dedup** по каноническому `fingerprint`: при коллизии берётся issue с ВЫСШЕЙ
-  severity, поля `Location`/`Evidence` объединяются.
-- Фактическое число использованных линз записывается строкой `| Lenses used | <L> | ... |`
-  в таблицу `## Audit state` review-файла.
-
-### Taxonomy sweep (per lens)
-
-Пройти по главному плану **по одному классу за раз** (см. `ERROR-TAXONOMY.md`). На каждый
-проход:
-
-- Читать план целиком (или большими блоками).
-- Для конкретного класса задавать себе вопросы из соответствующего раздела таксономии.
-- Каждое найденное расхождение — новый Issue.
-
-Не пытаться искать сразу все классы — это размывает внимание.
-
-## Step 3 — Cross-check with code (ОБЯЗАТЕЛЬНО)
-
-### Уровень строгости сверки — `rigor` из конфига
-
-- `grep` — только `Grep` по символам/путям (быстро, минимальная сверка).
-- `read` (default Standard) — `Grep` + `Read` определений упомянутых символов/файлов.
-- `explore` (Deep) — дополнительно subagent `Explore` на крупные модули/подсистемы
-  (правило крупных модулей ниже).
-
-`rigor` задаёт глобальный уровень; отдельные утверждения могут быть углублены точечно
-(см. перепроверку ambiguous, C2).
-
-План без сверки с кодом — фантазия. Для каждого упоминания в плане:
-
-| Что упомянуто в плане | Что проверить в коде |
+| Plan mentions | Check in code |
 |---|---|
-| Путь к файлу (`src/x/y.ts`) | `Read` файла; путь существует, файл живой |
-| Имя класса/функции/типа | `Grep` по `class X`, `function X`, `def X`, `type X = ` |
-| Сигнатура (параметры, возвращаемое значение) | `Read` определения; сравнить параметры/типы |
-| Имя таблицы / колонки БД | `Grep` по `models/`, `entities/`, `schema.sql`, `migrations/` |
-| HTTP-эндпоинт (метод + путь) | `Grep` по роутингу; сравнить method, path, payload |
-| Имя env-переменной / config-ключа | `Grep` по `.env*`, `appsettings*.json`, `config/` |
-| Имя пакета / зависимости | `Read` `package.json` / `*.csproj` / `requirements.txt` / `Cargo.toml` |
-| Миграция БД (номер, эффект) | `Read` соответствующего файла миграции |
+| File path | the file exists and is live |
+| Class, function, type | `Grep` for its definition |
+| Signature | `Read` the definition, compare parameters and return type |
+| Table or column | models, entities, `schema.sql`, migrations |
+| HTTP endpoint | routing: method, path, payload |
+| Env variable or config key | `.env*`, `appsettings*.json`, `config/` |
+| Package or dependency | `package.json`, `*.csproj`, `requirements.txt`, `Cargo.toml` |
+| Migration | the migration file itself |
 
-**Правило крупных модулей**: если упомянут крупный модуль / подсистема (например,
-«AdminService», «биллинг»), запустить subagent **Explore** с узким запросом, например:
+Explore prompt for a large module:
 
-> «Quick exploration: how is X implemented today? What public API does it expose?
-> Return: list of public methods with signatures, list of related DB tables, current behavior
-> in 3-5 bullet points. Do not edit anything.»
+> Quick exploration: how is X implemented today? What public API does it expose? Return: public
+> methods with signatures, related DB tables, current behavior in 3-5 bullets. Do not edit anything.
 
-Полученный отчёт сравнить с тем, что описано в плане. Расхождения → Issues с
-`category = code-plan-mismatch`.
+Every checked claim gets one status: `verified`, `not found`, `ambiguous`, `not applicable`.
+`not found` and `ambiguous` usually become issues when the plan depends on the object.
+Objects the plan itself creates (new tables, endpoints, files) are `not applicable`; still check
+that nothing with the same name already exists, since a collision is an issue.
 
-### Traceable status for every checked claim
+Reuse inside a run: the skill never changes code, so a claim you verified in an earlier audit
+stays verified while its text in the plan is unchanged. Always re-check claims that were
+`not found` or `ambiguous`, and raise the depth to at least `read` for them.
 
-Для каждого утверждения плана о коде, файлах, API, таблицах, миграциях или конфигурации
-назначить один из статусов и сохранить его в заметках аудита:
+## Severity
 
-- `verified` — подтверждено чтением кода / grep / Explore.
-- `not found` — объект не найден; создать issue, если план строится на этом объекте.
-- `ambiguous` — найдено несколько кандидатов или не хватает контекста; создать issue, если
-  неоднозначность влияет на реализацию.
-- `not applicable` — утверждение не относится к текущему коду.
+- **blocker**: the plan cannot be implemented as written (contradiction, reference to missing
+  code, schema change that breaks production, migration without rollback).
+- **major**: implementing the plan leads to a serious bug or rework (wrong signature, missing
+  index, no acceptance criteria for a key feature).
+- **minor**: lowers quality without blocking (missing edge case, stale file name, trivial test).
+- **nit**: style, numbering, formatting. Report only when there are many and they get in the way.
 
-Каждый issue должен содержать поле `Code cross-check` с одним из этих статусов и кратким
-обоснованием. Review-файл должен содержать таблицу `Audit state`, где указано, что code
-cross-check выполнен.
+## Output: the issues JSON
 
-### Memoized code cross-check (C4) — кэш `verified` на один запуск
-
-- Кэшируется ТОЛЬКО статус `verified`. `ambiguous`, `not found`, `not applicable` — не кэшируются.
-- **Ключ записи** = `claim_text_hash` И множество `SHA-256` ВСЕХ файлов, реально прочитанных
-  при верификации этого утверждения (не только «упомянутого» в плане). Хеши — командой
-  `python "<SKILL_DIR>/scripts/next_review_index.py" hash <file>`.
-- **Инвалидация:** на итерации i+1 запись валидна, только если (а) текст утверждения в плане
-  не изменился И (б) SHA-256 каждого файла записи совпадает с текущим. Иначе — полная пересверка.
-- **Fail-safe:** если список реально прочитанных файлов для утверждения не зафиксирован — НЕ
-  кэшировать (сверить заново).
-- Полный taxonomy sweep по ТЕКСТУ плана выполняется КАЖДУЮ итерацию — кэш экономит только
-  повторное чтение неизменившегося кода, но не пропускает аудит логики/полноты.
-- **Инструментовка (обязательна):** инкрементировать `cache_hits` при пропуске пересверки и
-  `cross_checks_performed` при выполнении; обе цифры — в `## Audit state` (`| Cache hits | H | ... |`)
-  и в финальном JSON (`cache_hits`).
-
-### Forced re-verification of ambiguous / not found (C2)
-
-- Утверждения со статусом `ambiguous` или `not found` на итерации i заносятся в `recheck_set`.
-- На итерации i+1 такие утверждения НЕ берутся из `memo_cache` и сверяются заново с точечным
-  повышением `rigor` (до `read`/`explore` для конкретного утверждения), даже если глобальный
-  `rigor` ниже. Это ловит ошибки, замаскированные под «неоднозначность».
-- Числовой confidence-score НЕ вводится.
-
-## Issue structure
-
-Каждый Issue (in-memory, перед записью в файл):
+Write all text in the plan's language. Pass the JSON to `record` as a file in the OS temp
+directory (never inside the repository) or on stdin.
 
 ```json
 {
-  "id": "<N>.<seq>",
-  "severity": "blocker | major | minor | nit",
-  "category": "logic | code | math | ops | db | contract | tests | security | perf | code-plan-mismatch | unfulfilled-contract",
-  "title": "<краткое>",
-  "location_in_plan": "## раздел / подраздел [+ якорь]",
-  "location_in_code": "<file:line>"  | null,
-  "problem": "<описание>",
-  "evidence": "<цитаты из плана + цитаты из кода>",
-  "required_fix": "<контракт: что должно появиться/измениться в плане>",
-  "acceptance": "<как проверить, что исправлено>",
-  "fingerprint": "<результат scripts/next_review_index.py fingerprint>"
+  "summary": "1-3 sentences: overall state of the plan and nature of the problems.",
+  "audit_state": {
+    "previous_contracts": "yes | no | n-a",
+    "previous_contracts_notes": "3 contracts checked, 1 carried",
+    "taxonomy": "yes | partial",
+    "code_cross_check": "yes | partial",
+    "code_cross_check_notes": "12 claims: 10 verified, 1 not found, 1 ambiguous",
+    "lenses_used": 2
+  },
+  "issues": [
+    {
+      "severity": "major",
+      "category": "code-plan-mismatch",
+      "title": "Short title",
+      "location_in_plan": "## 3. Data model / 3.2",
+      "location_in_code": "src/models/user.ts:42",
+      "code_cross_check": "not found — no column `role_id` in migrations",
+      "problem": "What is wrong and why it matters.",
+      "evidence": "> Plan: ...\n\n```ts\n// code quote\n```",
+      "required_fix": "Unambiguous contract: what the plan must say after the fix.",
+      "acceptance": "How to check the fix in the plan text."
+    }
+  ],
+  "notes": "Optional hints for Phase B."
 }
 ```
 
-Поле `fingerprint` нужно WORKFLOW для детекта залипания (тот же набор две итерации подряд).
-Вычислять только командой:
+- `category`: `logic`, `code`, `math`, `ops`, `db`, `contract`, `tests`, `security`, `perf`,
+  `code-plan-mismatch`. (`unfulfilled-contract` exists only in old reviews; use `carry` instead.)
+- `code_cross_check` must start with one of the four statuses.
+- `location_in_code` and `evidence` are optional; every other field is required.
+- The fingerprint is `category` + the first 200 characters of `required_fix` (whitespace
+  normalized). `record` computes it; you never do.
+- An empty `issues` list means the plan is clean.
 
-```bash
-python "<SKILL_DIR>/scripts/next_review_index.py" fingerprint "<category>" "<required_fix>"
-```
-
-### Стабильность fingerprint
-
-`fingerprint = hash(category + required-fix)`. От него зависят `deferral_count` и flow sets,
-поэтому Фаза А не должна без необходимости перефразировать persisted `required-fix`.
-
-## Severity rubric
-
-- **blocker** — план в текущем виде нельзя реализовать (противоречие, ссылка на несуществующий
-  код, схема БД сломает прод, миграция без rollback и т.п.). Также: невыполненный контракт
-  предыдущего ревью.
-- **major** — реализация по плану приведёт к серьёзному багу / переработке (неверная сигнатура,
-  пропущенный индекс, отсутствие критериев приёмки на ключевую фичу).
-- **minor** — несоответствие, ухудшающее качество, но не блокирующее (нет упоминания edge case,
-  устаревшее имя файла, отсутствие тривиального теста).
-- **nit** — стилистика, нумерация, форматирование. Включать только если их много и они мешают
-  имплементации.
-
-## Forbidden in Phase A
-
-- Любые `Edit` / `Write` в файлы, кроме `REVIEW(N)` (а сам `REVIEW(N)` пишется только после
-  возврата управления в WORKFLOW).
-- Продолжать аудит, если review-write preflight не пройден или в текущем режиме нет инструмента
-  для создания `REVIEW(N)`.
-- Использовать memory/session notes, чат-ответ или правку главного плана как замену
-  `REVIEW(N)`.
-- Любые правки кода.
-- Любые правки предыдущих ревью.
-- Запуск тестов, сборок, линтеров, миграций.
-- Создание snapshot-копий плана.
-
-## Done criteria for Phase A
-
-- Пройдена contract verification (если был prev_review).
-- Review-write preflight был пройден до начала аудита; если не пройден — фаза не стартовала.
-- Пройден taxonomy sweep по всем 10 классам.
-- Сделана cross-check с кодом для всех упомянутых символов / файлов / схем.
-- Сформирован список Issues с обязательными полями (см. структуру).
-- Для каждого issue есть `Code cross-check`, `Required fix (contract)`, `Acceptance` и
-  канонический `Fingerprint`.
-- Созданный review-файл проходит
-  `python scripts/next_review_index.py validate-review <review-file>` до передачи в Фазу Б.
-- Управление возвращено в WORKFLOW для записи review-файла или выхода.
+`record` rejects invalid input with exit code 2 and writes nothing; fix the JSON and call it again.

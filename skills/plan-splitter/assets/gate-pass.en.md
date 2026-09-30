@@ -1,4 +1,4 @@
-✅ The plan is compact enough; stage decomposition is not required.
+✅ The plan is compact enough; decomposition is not required.
 
-Recommendation: review plan quality via
+Recommendation: audit plan quality via
   /plan-iterative-revision {{PLAN_PATH}}

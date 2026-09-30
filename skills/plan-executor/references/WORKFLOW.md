@@ -2,50 +2,36 @@
 
 ## BOOTSTRAP
 
-1. Run `detect-input <plan_path>`.
-2. For staged input, run `parse-roadmap <roadmap_path>` and `recommend-parallel <exec_dir>` after ledger init.
-3. For whole input, run `parse-tasks <plan_path>`; if no units are found and `--whole` was set, `ledger-init` automatically creates a single unit `whole` (title from H1 or filename) — continue normally. Without `--whole`, stop and follow `INPUT-DETECTION.md`.
-4. Run `ledger-init <exec_dir> <plan_path>`; the ledger is the only source of truth.
-5. Run `checkpoint-detect <workdir>` before auto execution. Without git, auto rollback is unavailable; use step mode.
-6. The `exec_dir` MUST be located outside the workdir (e.g., sibling to plan files). This guarantees `git add -A` and `git reset --hard` in workdir never touch `state.json`. Never place `.exec/` inside the repository being modified.
+1. `ledger-init <exec_dir> <plan_path> --workdir <repo>` detects the input (roadmap or whole plan), parses units, writes `state.json`, and takes a baseline snapshot of `<repo>`.
+2. `exec_dir` MUST be outside `<repo>` (e.g. sibling to the repository) or git-ignored; otherwise `exec-dir-inside-workdir`. Snapshots and restores then never touch `state.json`.
+3. A dirty working tree gives `dirty-worktree`: ask the engineer to commit/stash, or re-run with `--allow-dirty` (the baseline then includes those changes).
+4. Without git (`workdir` not a repository) snapshots are `null`: rollback is manual, so ask the engineer before every retry.
+5. Re-running `ledger-init` on an existing ledger resumes it: `running` units go back to `pending`. If the plan file changed, `plan-drift` returns the `added`/`removed` unit ids — STOP and ask. Continue only with a new `exec_dir` or `--accept-drift` (units are rebuilt; `done` units with the same id are kept).
 
-## EXECUTE LOOP
+## LOOP
 
-1. Run `ledger-next <exec_dir>` to choose the next executable unit.
-2. Run `recommend-strategy <weight> --task-text <text>` for `{isolation, model_depth, gate_tier}`.
-3. Run `scope-context <stage_path>` and let the agent read returned paths itself.
-4. Run `ledger-mark <exec_dir> <unit> running` to claim the unit and start the attempt counter.
-5. Execute exactly one unit.
-6. Gate the result according to `GATE.md`.
-7. On success: `checkpoint-create`, then `ledger-mark <unit> done --checkpoint <sha>`, then `render-progress`.
-8. On failure: `ledger-mark <unit> failed --error "<message>"`, then retry or STOP.
+`unit-begin` returns one of these reasons:
 
-## Reason Dispatch
+| `reason` | Meaning | Action |
+|---|---|---|
+| `ready` | Next pending unit, dependencies done; marked `running` | Execute, gate, `unit-finish` |
+| `retry-available` | The failed unit, retryable; marked `running` | Same as `ready`; fix the recorded `last_error` first |
+| `in-progress` | A unit is still `running` | Gate the current state, `unit-finish` |
+| `exhausted` | 3 attempts used | STOP, stop-report |
+| `stagnated` | The same error signature twice in a row | STOP, stop-report |
+| `blocked` | Pending units wait on `blocked_by` | STOP, stop-report |
+| `all-done` | Every unit is done | FINALIZE |
 
-| `ledger-next` reason | Action |
-|---|---|
-| `ready` | Proceed with execute loop (steps 2-8). |
-| `retry-available` | Same as `ready` - the unit is failed and eligible for another attempt. |
-| `all-done` | Exit loop, proceed to FINALIZE. |
-| `blocked` | All pending units depend on incomplete predecessors. Retry the failed predecessor first (it will be returned as `retry-available` in a subsequent `ledger-next` call). Once the predecessor completes, the blocked unit becomes `ready`. If no predecessor is retryable - STOP. |
-| `no-pending` | No pending and no retryable failed units remain. STOP with stop-report. |
+A failed unit is always handled before any other unit, so later units never run on top of a broken one. In whole plans units are strictly sequential (each depends on the previous one).
+
+`unit-finish <unit> pass` snapshots `<repo>` into `refs/plan-executor/<run>/<unit>`, marks the unit done with that snapshot and renders `progress.md`. If the snapshot fails the unit is marked failed instead (checkpoint failure = gate failure).
+
+`unit-finish <unit> fail --error "<signature>"` marks the unit failed and returns `decision` and `restore_to` (last done unit's snapshot, or the baseline). Use a short, stable signature — e.g. the failing test id plus the assertion — so stagnation detection can compare attempts (case and whitespace are ignored).
+
+## Subagents
+
+Subagents may inspect code and return diff/status/logs. Only the parent session calls `unit-finish`, marks units, or decides the gate.
 
 ## FINALIZE
 
-When `ledger-next` returns `all-done`, render final progress and propose `plan-resolver` according to `RESOLVER-PROPOSAL.md`.
-
-## Subagent Isolation Protocol
-
-Subagents may inspect code and return diff/status/logs, but `ledger-mark только родитель`. A subagent never edits `state.json`, never marks a unit done, and never decides final gate status alone.
-
-## Retry & Attempts
-
-`attempts` increments when a unit is marked running. `attempts >= 3` means STOP: one primary attempt plus two retries are exhausted.
-
-## Stagnation Detection
-
-If the new failure has identical `last_error` to the previous failure, `identical last_error → STOP`. Do not spend attempts on the same unresolved failure signature.
-
-## Checkpoint Atomicity
-
-`checkpoint-create` must succeed before `ledger-mark done`. If checkpoint creation fails, treat it as gate failure and keep the unit not-done.
+Render final progress, propose `plan-resolver` per `RESOLVER-PROPOSAL.md`, and offer `checkpoint-prune <exec_dir>` to delete the run's snapshot refs.

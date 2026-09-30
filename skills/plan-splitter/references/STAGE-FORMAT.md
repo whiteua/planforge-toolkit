@@ -1,86 +1,74 @@
-# STAGE-FORMAT — формат stg-файла и правила деривации контента
+# Part File Format
 
-## 1. Имя файла
+## 1. File name
 
-`<base_name>-stg<NN>.md`, где `NN` — двузначное число с ведущим нулём (`stg01`, `stg02`, ..., `stg99`). Получать строго через `splitter_tool.py stage-name <base> <N>`.
+`<BASE>-<id>.md`, where `<id>` is the part letter: `a`, `b`, … `z`, `aa`, `ab`, … Get it from
+`TOOL stage-name <BASE> <N>` (ordinal) or `TOOL part-id <N>`.
 
-## 2. Обязательные секции
+## 2. Required sections, in order
 
-В порядке появления:
+1. `# Stage <id>: <Title>` (`# Стадия <id>: …` in Russian)
+2. A blockquote header: `Source`, `Roadmap`, `Depends on`, `Blocks`, `Weight`.
+3. `## Goal` (`## Цель`)
+4. `## Inputs` (`## Входные данные`)
+5. `## Tasks` (`## Задачи`)
+6. `## Completion criteria` (`## Критерии завершения`)
+7. `## Outputs (handoff)` (`## Выходные данные (handoff)`)
+8. `## Notes` (`## Примечания`)
 
-1. `# Стадия NN: <Название>` (или `# Stage NN:` в EN)
-2. Шапка-блок-цитата с метаданными: `Источник`, `Roadmap`, `Зависит от`, `Блокирует`, `Вес`.
-3. `## Цель` (`## Goal`)
-4. `## Входные данные` (`## Inputs`)
-5. `## Задачи` (`## Tasks`)
-6. `## Критерии завершения` (`## Completion criteria`)
-7. `## Выходные данные (handoff)` (`## Outputs (handoff)`)
-8. `## Примечания` (`## Notes`)
+A missing section makes `validate-stage` return `valid: false`.
 
-Отсутствие любой из этих секций → `validate-stage` возвращает `valid: false`.
+## 3. Content rules
 
-## 3. Правила содержимого
+- **Goal**: one or two sentences describing the result, checkable by eye. Not a task list.
+- **Inputs**: with no dependencies, "Original plan: [link]. No specific inputs." Otherwise the
+  concrete artifacts, state and decisions handed over by each dependency; they must match that
+  part's **Outputs** section word for word where possible.
+- **Tasks**: a numbered list (`1.`, `2.`, …) of self-contained instructions. No back-references
+  ("see above", "as in the original"). Enough context to act with only this file and the roadmap.
+  8–15 tasks is the typical size; `validate-stage` warns above 15 (soft, does not fail).
+  Numbered items inside code fences are not tasks; `validate-all` counts only top-level items.
+- **Completion criteria**: a checkbox list of verifiable facts (a call succeeds, a file exists,
+  a test passes). Not goals.
+- **Outputs (handoff)**: what downstream parts receive: files, state, decisions, configs, phrased so
+  the text can be reused as their **Inputs**.
+- **Notes**: risks, open points, recommendations. May be empty, but the heading must exist.
 
-### 3.1 «Цель»
+## 4. Boundary heuristics
 
-Одно-два предложения. Формулировка результата стадии, измеримая глазом. **Не задачи, не описание процесса**.
+A part is a group of tasks that:
 
-### 3.2 «Входные данные»
+1. belongs to one module or layer (a module change is a candidate boundary);
+2. shares one mental context;
+3. ends in a checkable deliverable;
+4. fits one agent pass (8–15 tasks).
 
-- Если `depends = «—»` → «Оригинальный план: [ссылка на base_name.md]. Специфических входов нет.»
-- Если `depends = stgXX` → перечислить конкретные артефакты/состояния/решения, передаваемые от stgXX. Они должны точно соответствовать секции «Выходные данные» в stgXX.
+## 5. Grouping rules
 
-### 3.3 «Задачи»
+- Explicit phases or sections of the original are the starting point.
+- A task that straddles two parts goes to the one whose result it depends on more.
+- Shared or infrastructure tasks (setup, configs) go to the first part.
+- A task whose artifact several parts need goes to a blocking part.
 
-Нумерованный список (`1.`, `2.`, ...). Каждая задача — самодостаточная инструкция:
-- **Без** ссылок «см. выше», «как в оригинале», «предыдущий пункт».
-- Достаточно контекста, чтобы агент понял, что делать, читая ТОЛЬКО эту стадию + roadmap.
-- 8–15 задач — типовой размер. Если получается > 15 — стадия слишком большая.
-- `validate-stage` автоматически поднимает `granularity_warning` при > 15 задач (мягкое предупреждение; на `valid` не влияет). Реакция — рекомендовать ручной перезапуск splitter на этой стадии (см. §7).
+## 6. Content transformation (not a verbatim copy)
 
-### 3.4 «Критерии завершения»
+1. Rephrase tasks as self-contained instructions for an agent.
+2. Add the context each part needs to be understood without the original.
+3. Make abstract tasks concrete, checkable action items.
+4. Preserve intent: nothing from the original is lost or distorted.
 
-Checkbox-список (`- [ ] ...`). Каждый критерий — **проверяемый** (исполнился вызов, файл существует, тест прошёл и т.п.). **Не цели и не описания**.
+A plan from `plan-writing` (`### Task N:` headings with `**Files:**`, steps and done-states)
+keeps that structure inside `## Tasks`: one numbered item per task, with its files, steps and
+done-state as nested content. `plan-executor` runs a part as one unit, so the part text must be
+executable as a whole.
 
-### 3.5 «Выходные данные (handoff)»
+## 7. Oversized part
 
-Что эта стадия передаёт следующим: артефакты на диске, изменения состояния, принятые решения, конфиги. Формулировать так, чтобы текст можно было дословно использовать как «Входные данные» в зависимой стадии.
-
-### 3.6 «Примечания»
-
-Риски, неопределённости, рекомендации по выполнению. Может быть пустым (но секция должна присутствовать).
-
-## 4. Эвристики определения границ стадий
-
-Стадия — это группа задач, которые:
-1. Относятся к одному модулю/слою. Смена модуля = потенциальная граница.
-2. Имеют общий контекст. Для них нужна одна и та же «картина в голове».
-3. Формируют законченный deliverable. По завершении есть проверяемый результат.
-4. Помещаются в один проход агента (ориентир: 8–15 задач).
-
-## 5. Правила группировки задач
-
-- Если оригинал имеет явные секции/фазы — использовать как отправную точку.
-- Если задача пересекает границы двух стадий — целиком в ту, от результата которой она больше зависит.
-- Общие/инфраструктурные задачи (настройка, конфиги) — в первую стадию.
-- Задачи, порождающие артефакты для нескольких стадий, — в blocking-стадию.
-
-## 6. Трансформация контента (НЕ дословное копирование)
-
-При формировании контента стадии из оригинала:
-
-1. **Переформулировать** задачи как самодостаточные инструкции для агента.
-2. **Добавить контекст** — каждая стадия понятна без чтения оригинала.
-3. **Конкретизировать** — абстрактные задачи разбить на проверяемые action items.
-4. **Сохранить intent** — смысл задач оригинала не должен быть потерян или искажён.
-
-## 7. Рекомендация перезапуска splitter
-
-Если после анализа стадия всё ещё содержит > 10–12 задач, добавить в её файл:
+If a part still holds more than 10–12 tasks after analysis, add to its file:
 
 ```markdown
-> ⚠️ Эта стадия может быть слишком объёмной для одного прохода.
-> Рекомендуется: `plan-splitter <base>-stgNN.md`
+> ⚠️ This part may be too large for a single pass.
+> Recommended: `plan-splitter <BASE>-<id>.md`
 ```
 
-Это **ручная рекурсия** под контролем пользователя; автоматического дробления нет.
+This is manual recursion under the user's control; the skill never splits recursively.

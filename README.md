@@ -39,9 +39,9 @@ Each skill is an independent, installable module. Together they form a coherent 
 | [`plan-brainstorming`](skills/plan-brainstorming/) | Turn ideas into validated design specs through collaborative dialogue | — | Depth-tiered elaboration, spec contract validation |
 | [`plan-writing`](skills/plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` | Contract-driven generation, plan lifecycle model |
 | [`plan-splitter`](skills/plan-splitter/) | Decompose a large plan into self-contained stages for parallel execution | — | Gate-decision (5-factor), topological ordering + parallel groups, 3-level VERIFY, self-sufficiency invariant, SHA-256 origin fingerprint |
-| [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | — | Persistent progress ledger, multi-session continuity, gated SDLC workflow |
+| [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | — | Persistent progress ledger with resume and plan-drift detection, strictly ordered units with retry-first policy, gated SDLC workflow, rollback snapshots in hidden git refs (no branch commits) |
 | [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan until it is error-free | — | Set-algebraic flow analysis (new/resolved/persisted/reintroduced), SHA-1 issue fingerprinting, two-phase separation (audit ≠ implement), regression/churn/stagnation hard-stops, 10-class error taxonomy, immutable append-only review trail |
-| [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report | — | task-census completeness gate, evidence anchors (`path#Lx-Ly`), confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only invariant |
+| [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report; optionally fix the code and re-audit (`fix` / `auto`) | — | task-census completeness gate, evidence anchors (`path#Lx-Ly`), confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only audit invariant, separated fix → re-audit loop with protected plan and bounded cycles |
 | [`writing-skills`](skills/writing-skills/) | Create, test, and deploy new agent skills using TDD methodology | — | Red-green-refactor for skills, subagent-based behavioural testing |
 
 ---
@@ -60,9 +60,9 @@ Each skill is an independent, installable module. Together they form a coherent 
              │
       ┌──────▼──────┐        ┌───────────────────────────┐
       │large plan?  │──yes──►│    plan-splitter          │
-      └──────┬──────┘        │  plan → stg00-roadmap.md  │
+      └──────┬──────┘        │  plan → <base>-roadmap.md │
              │ no            └──────────┬────────────────┘
-             │                          │ stg01..stgN.md
+             │                          │ <base>-a.md, -b.md, …
              └──────────┬───────────────┘
                         │
   ┌─────────────────────▼─────────────────────┐
@@ -307,7 +307,9 @@ The skill will guide you through the full brainstorming → spec → plan cycle.
 ### Auditing implementation progress
 
 ```
-/plan-resolver docs/plans/plan01-auth-impl.md
+/plan-resolver docs/plans/plan01-auth-impl.md          # audit only
+/plan-resolver docs/plans/plan01-auth-impl.md fix      # fix last report's issues, re-audit
+/plan-resolver docs/plans/plan01-auth-impl.md auto     # audit → fix → audit, up to 2 cycles
 ```
 
 ### Iteratively fixing a plan
@@ -350,7 +352,7 @@ This section documents the engineering techniques applied across the toolkit. Ea
 
 Cheap, exact operations (file parsing, counting, hashing, shell probes) run as CLI tool commands with machine-readable exit codes. Semantic judgment (is this task implemented? is this plan coherent?) stays inside `SKILL.md` reference docs and is never mixed with deterministic checks. This separation prevents hallucinations from contaminating objective results and keeps tool logic testable independently.
 
-**Used in:** `plan-resolver`, `plan-splitter`, `plan-executor`
+**Used in:** `plan-resolver`, `plan-splitter`, `plan-executor`, `plan-brainstorming` (spec check, findings input), `plan-writing` (plan check)
 
 ---
 
@@ -412,7 +414,7 @@ No generated stage file may contain back-references to another stage or to the o
 
 ### Topological ordering + parallel groups
 
-The dependency graph of plan tasks is resolved into a partial order. Independent tasks are grouped into parallel execution sets; dependent tasks are sequenced. The roadmap file (`-stg00-roadmap.md`) encodes both the sequential chains and the parallel groups explicitly, so the executor or a human can schedule work optimally.
+The dependency graph of plan tasks is resolved into a partial order. Independent tasks are grouped into parallel execution sets; dependent tasks are sequenced. The roadmap file (`<base>-roadmap.md`) encodes both the sequential chains and the parallel groups explicitly, so the executor or a human can schedule work optimally.
 
 **Used in:** `plan-splitter`
 
@@ -450,7 +452,7 @@ After each audit pass, the tool computes four sets over issue fingerprints:
 | **persisted** | `prev ∩ current` | Issues present in both the last iteration and now |
 | **reintroduced** | `(cumulative − prev) ∩ current` | Issues that existed before, disappeared, and have reappeared |
 
-These four categories drive **hard-stop decisions**: if `reintroduced ≠ ∅` after 3+ iterations the loop halts with `ESCALATED` (regression detected); if `resolved = ∅` and `new ≠ ∅` over a sliding window of 2 iterations, `STAGNATION` is declared (churn). The agent cannot override these stops — they are computed deterministically by the tool script.
+These four categories drive **hard-stop decisions**: if `reintroduced ≠ ∅` after 3+ iterations the loop halts with `ESCALATED` (regression detected); if the fingerprint set is identical to the previous audit, or `resolved = ∅` and `new ≠ ∅` over a sliding window of 2 iterations, `STAGNATION` is declared (unchanged / churn); a fingerprint present in 3 consecutive audits is `ESCALATED` as stuck. History covers the current run only, so reviews from earlier runs never trigger a stop. The agent cannot override these stops: a single `record` call computes them deterministically, together with fingerprints, rendering and validation of the review file.
 
 **Used in:** `plan-iterative-revision`
 
@@ -458,7 +460,7 @@ These four categories drive **hard-stop decisions**: if `reintroduced ≠ ∅` a
 
 ### SHA-1 issue fingerprinting
 
-Every issue found during audit receives a stable 8-character fingerprint: `SHA-1(category + normalized_required_fix)[:8]`. The same conceptual issue always produces the same fingerprint regardless of iteration number, phrasing variations, or surrounding context. This enables precise cross-iteration tracking: the system distinguishes “new bug” from “same bug resurfaced” without relying on textual similarity heuristics. Fingerprints are validated by the tool and form the atoms of the flow-analysis algebra.
+Every issue found during audit receives a stable 8-character fingerprint: `SHA-1(category + normalized_required_fix)[:8]`. The same conceptual issue always produces the same fingerprint regardless of iteration number, phrasing variations, or surrounding context. This enables precise cross-iteration tracking: the system distinguishes “new bug” from “same bug resurfaced” without relying on textual similarity heuristics. Fingerprints are computed by the tool, never by the agent, and form the atoms of the flow-analysis algebra. When a contract from the previous review is still unapplied, the agent re-reports it by fingerprint (`carry`), and the tool copies its category and required fix verbatim, so the identity cannot drift through rephrasing.
 
 **Used in:** `plan-iterative-revision`
 
@@ -479,7 +481,7 @@ This mirrors the Fagan Inspection pattern (IBM, 1976): the inspector and the fix
 
 ### 10-class error taxonomy with multi-lens sweep
 
-Audit passes are structured around 10 orthogonal error classes: `logic`, `code`, `math`, `ops`, `db`, `contract`, `tests`, `security`, `perf`, `code-plan-mismatch`. The agent performs **one complete lens pass per class** — re-reading the plan with a specific focus each time — rather than scanning for everything at once. This prevents attention scattering and ensures coverage across all concern domains. Depth is configurable: `quick` (L1 only), `standard` (L1+L2), `deep` (L1–L4 with red-team attack pass).
+Audit passes are structured around 10 orthogonal error classes: `logic`, `code`, `math`, `ops`, `db`, `contract`, `tests`, `security`, `perf`, `code-plan-mismatch`. The agent reads the plan once and then checks **one class at a time** within each lens, rather than scanning for everything at once. This prevents attention scattering and ensures coverage across all concern domains. Depth is configurable: `quick` (L1 only), `standard` (L1+L2), `deep` (L1–L4 with red-team attack pass).
 
 **Used in:** `plan-iterative-revision`
 
@@ -492,7 +494,7 @@ Each iteration produces a numbered review file (`-review-1.md`, `-review-2.md`, 
 - Input for contract verification (each “Required fix” becomes a contractual obligation checked in the next iteration)
 - Source data for the flow-analysis algebra
 
-The tool validates review structure deterministically (`validate-review --strict-fingerprint`) before the agent proceeds.
+The agent hands its findings to the tool as JSON; the tool renders the review file and validates it deterministically (`validate-review --strict-fingerprint`) before the agent proceeds.
 
 **Used in:** `plan-iterative-revision`
 

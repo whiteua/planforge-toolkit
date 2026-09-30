@@ -4,7 +4,11 @@
   "remaining_issues": 2,
   "escalated": [],
   "lenses_used": 2,
-  "cache_hits": 11,
   "stop_reason": "drain",
-  "flows": { "new": 0, "resolved": 1, "persisted": 2, "reintroduced": 0 }
+  "flows": {
+    "new": 0,
+    "resolved": 1,
+    "persisted": 2,
+    "reintroduced": 0
+  }
 }

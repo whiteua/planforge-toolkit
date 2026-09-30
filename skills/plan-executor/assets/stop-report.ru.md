@@ -7,7 +7,8 @@
 ## Остановлено на
 
 Единица: `{{unit_id}}`
-Чекпоинт: `{{checkpoint_id}}`
+Причина: `{{stop_reason}}`
+Откат к: `{{restore_to}}`
 
 ## Последняя ошибка
 
@@ -15,13 +16,17 @@
 
 ## Последний diff
 
+```text
+{{diff_stat}}
+```
+
 ```diff
-{{last_diff}}
+{{diff_excerpt}}
 ```
 
 ## Как откатиться
 
-Используйте checkpoint `{{checkpoint_id}}`, если доступен git-откат, или выполните ручной откат в step mode.
+После подтверждения: `executor_tool.py checkpoint-restore <repo> {{restore_to}}`. Без git откатитесь вручную.
 
 ## Как продолжить
 

@@ -1,9 +1,9 @@
-✅ Decomposition complete: roadmap + {{N}} stages.
+✅ Decomposition complete: roadmap + {{N}} parts.
 
 Created:
-  {{BASE_NAME}}-stg00-roadmap.md
-  {{BASE_NAME}}-stg01.md
+  {{BASE_NAME}}-roadmap.md
+  {{BASE_NAME}}-a.md
   ...
-  {{BASE_NAME}}-stg{{NN}}.md
+  {{BASE_NAME}}-{{LAST_ID}}.md
 
-The split is a self-contained result: stages are ready to hand off to agents.
+The split is a self-contained result. Next: `/plan-executor {{BASE_NAME}}-roadmap.md`.

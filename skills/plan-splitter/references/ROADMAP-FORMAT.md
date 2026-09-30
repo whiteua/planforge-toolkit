@@ -1,89 +1,69 @@
-# ROADMAP-FORMAT — формат roadmap-файла и правила параллельных групп
+# Roadmap Format
 
-## 1. Имя файла
+## 1. File name
 
-Строго `<base_name>-stg00-roadmap.md`. Префикс `stg00` означает «нулевая стадия» = карта.
+`<BASE>-roadmap.md`, next to the source plan.
 
-## 2. Обязательные секции
+## 2. Required sections
 
-1. `# Roadmap: <Название плана>` (или `# Roadmap:` в EN)
-2. Шапка-блок-цитата с метаданными: `Источник`, `Сгенерировано` (ISO-8601 UTC), `Стадий: N`.
-3. `## Обзор` (`## Overview`) — 2–3 предложения.
-4. `## Граф зависимостей` (`## Dependency graph`) — таблица + параллельные группы + Mermaid.
-5. `## Стадии` (`## Stages`) — список с ссылками на каждый stg-файл.
+1. `# Roadmap: <plan title>`
+2. A blockquote header: `Source`, `Generated` (ISO-8601 UTC), `Parts: N`.
+3. `## Overview` (`## Обзор`): 2–3 sentences.
+4. `## Dependency graph` (`## Граф зависимостей`): the table, the parallel groups, a Mermaid block.
+5. `## Stages` (`## Стадии`): one block per part with a link to its file.
 
-## 3. Таблица зависимостей
+## 3. Dependency table
 
-Обязательные колонки (в указанном порядке):
+Columns, in this order:
 
-| Стадия | Название | Зависит от | Параллельная группа | Вес |
+| Stage | Title | Depends on | Parallel group | Weight |
 
-- **Стадия**: `stgNN` (lowercase, двузначное число).
-- **Название**: краткий заголовок стадии (1–4 слова).
-- **Зависит от**: `—` или список через запятую (`stg01, stg02`).
-- **Параллельная группа**: буква (`A`, `B`, `C`, ...) или пустая, если стадия одиночная.
-- **Вес**: 🔴 heavy / 🟡 medium / 🟢 light. **Обязателен**.
+- **Stage**: the part id, lowercase letters (`a`, `b`, … `aa`). This is the machine-readable
+  contract: `plan-executor`, `plan-resolver` and `plan-iterative-revision` parse this column.
+- **Title**: 1–4 words.
+- **Depends on**: `—` or a comma-separated list of ids (`a, b`).
+- **Parallel group**: a capital letter (`A`, `B`, …); a lone part still gets its own group.
+- **Weight**: `🔴 heavy` / `🟡 medium` / `🟢 light`. Required.
 
-## 4. Параллельные группы
+Validators lower-case ids and accept space-separated dependencies, but the generated file uses
+the canonical form above. Any id that is not letters is an error.
 
-### Правила формирования
+## 4. Parallel groups
 
-- Группа A — всегда первая (стадии без зависимостей или с одинаковыми зависимостями).
-- Группы нумеруются буквами по топологическому порядку: A → B → C → ...
-- Стадии внутри одной группы **не могут** зависеть друг от друга. (Проверяется `validate-all`.)
-- Если стадия не имеет «соседей» по группе — указать её одиночную группу (например, `C`), не оставлять пустым.
+- Group `A` comes first: parts with no dependencies (or the same dependencies).
+- Groups follow topological order: A → B → C …
+- Parts in one group must not depend on each other (`validate-all` checks this).
+- Parts are parallel when they do not touch the same files, neither consumes the other's result,
+  and they need no coordination (e.g. both changing one DB schema).
+- Part Y depends on X when Y uses, extends or relies on decisions of X.
 
-### Когда стадии параллельны
+## 5. Mermaid diagram
 
-- Не читают/пишут одни и те же файлы.
-- Результат одной не является входом другой.
-- Не требуют координации (например, обе не меняют одну схему БД).
-
-### Когда стадии блокируют друг друга
-
-- Стадия B использует артефакт, создаваемый A.
-- Стадия B расширяет/модифицирует то, что создала A.
-- Стадия B нуждается в знаниях/решениях, принятых в A.
-
-## 5. Mermaid-диаграмма
-
-> ⚠️ **Проверяется автоматически.** `validate-roadmap` и `validate-all` проверяют:
-> (a) наличие блока `` ```mermaid ``; (b) наличие хотя бы одного ребра (`-->`).
-> Отсутствие = `valid: false`, агент обязан добавить диаграмму до прохождения VERIFY.
-
-В `## Граф зависимостей` обязательно присутствует Mermaid:
+Required inside `## Dependency graph`; `validate-roadmap` / `validate-all` check that a
+```` ```mermaid ```` block exists and has at least one edge (`-->`).
 
 ```mermaid
 graph LR
-    stg01 --> stg02
-    stg01 --> stg03
-    stg02 --> stg04
-    stg03 --> stg04
+    a --> b
+    a --> c
+    b --> d
+    c --> d
 ```
 
-Правила:
-- Направление `LR` (left-to-right) предпочтительно; `TB` допускается для длинных графов.
-- Каждая дуга соответствует `depends` в таблице.
-- Не должно быть циклов (`validate-all` проверяет автоматически).
+`LR` preferred; `TB` for long graphs. Every edge corresponds to a `Depends on` entry and vice
+versa. No cycles (`validate-all` checks).
 
-## 6. Гибридный формат: таблица + Mermaid
+## 6. Stages section
 
-Таблица — для машинного разбора (`validate-roadmap`, `validate-all`).
-Mermaid — для человеческого восприятия.
-
-Эти два представления **должны быть согласованы**: каждая дуга в Mermaid соответствует записи `depends` в таблице, и наоборот.
-
-## 7. Секция «Стадии»
-
-Для каждой стадии — блок:
+One block per part:
 
 ```markdown
-### stgNN: <Название>
-- **Файл**: [<base>-stgNN.md](./<base>-stgNN.md)
-- **Зависит от**: <список или «—»>
-- **Блокирует**: <список или «—»>
-- **Вес**: <🔴/🟡/🟢>
-- **Краткое содержание**: <1–2 предложения>
+### a: <Title>
+- **File**: [<BASE>-a.md](./<BASE>-a.md)
+- **Depends on**: <ids or —>
+- **Blocks**: <ids or —>
+- **Weight**: <🔴/🟡/🟢>
+- **Summary**: <1–2 sentences>
 ```
 
-Ссылка `Файл` должна указывать на реально существующий stg-файл (проверяется `validate-all`).
+The `File` link must point to an existing part file (`validate-all` checks).

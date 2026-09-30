@@ -1,16 +1,17 @@
 # Plan Document Reviewer Prompt Template
 
-Use this template when dispatching a plan document reviewer subagent.
+Use this template to dispatch a plan reviewer subagent on the **Deep** tier,
+after `plan_tool.py plan-check` exits `0` and the self-review is done.
 
-**Purpose:** Verify the plan is complete, matches the spec, and has proper task decomposition.
-
-**Dispatch after:** The complete plan is written.
+**Purpose:** Verify the plan matches the spec and can be built without getting stuck.
+Structure (header fields, task headings, task core per tier, placeholders,
+commit steps) is already checked by `plan-check`; do not re-check it.
 
 ```
-Task tool (general-purpose):
+Subagent (general-purpose):
   description: "Review plan document"
   prompt: |
-    You are a plan document reviewer. Verify this plan is complete and ready for implementation.
+    You are a plan document reviewer. Verify this plan is ready for implementation.
 
     **Plan to review:** [PLAN_FILE_PATH]
     **Spec for reference:** [SPEC_FILE_PATH]
@@ -19,13 +20,12 @@ Task tool (general-purpose):
 
     | Category | What to Look For |
     |----------|------------------|
-    | Completeness | TODOs, placeholders, incomplete tasks, missing steps |
-    | Spec Alignment | Plan covers spec requirements, no major scope creep |
-    | Task Decomposition | Tasks have clear boundaries, steps are actionable |
-    | Decision Constraints | Tasks with real approach forks include Constraints that choose the path and block likely drift |
-    | Task Sizing | Tasks fit the 10-minute / 100-lines-of-new-code limit; oversized tasks are split |
-    | Done-state | Every task has a verifiable done-state in any tier. Standard/Deep: full Preconditions + Postconditions (with scope guards when scope creep is likely). Quick: a single `Done when:` line is sufficient. |
-    | Failure Guidance | Likely environment/order/naming traps have concrete If-stuck symptom -> check guidance |
+    | Spec Alignment | Every spec requirement has a task; no major scope creep beyond the spec |
+    | Task Decomposition | Clear task boundaries; each postcondition is reachable by that task's own steps |
+    | Task Sizing | Tasks fit 10 minutes / 100 lines of new code; oversized tasks are split |
+    | Consistency | Names, types and signatures match across tasks |
+    | Decision Constraints | Tasks with real approach forks include Constraints that choose the path |
+    | Failure Guidance | Likely environment/order/naming traps have concrete If-stuck guidance |
     | Buildability | Could an engineer follow this plan without getting stuck? |
 
     ## Calibration
@@ -34,11 +34,10 @@ Task tool (general-purpose):
     An implementer building the wrong thing or getting stuck is an issue.
     Minor wording, stylistic preferences, and "nice to have" suggestions are not.
 
-    Approve unless there are serious gaps — missing requirements from the spec,
-    contradictory steps, placeholder content, or tasks so vague they can't be acted on.
-    A task with no verifiable done-state is a plan issue in any tier. On Standard/Deep that means missing Preconditions or Postconditions; on Quick it means a missing `Done when:` line. Do NOT flag a Quick task merely for lacking full Pre/Post blocks when a valid `Done when:` line is present (the plan's tier is recorded in its spec).
-    Constraints and If-stuck sections are optional; do not flag their absence unless a real
-    ambiguity or likely implementation failure would cause the implementer to get stuck.
+    Approve unless there are serious gaps: missing spec requirements,
+    contradictory steps, or tasks so vague they can't be acted on.
+    Constraints and If-stuck blocks are optional; flag their absence only when a
+    real ambiguity or likely failure would leave the implementer stuck.
 
     ## Output Format
 

@@ -1,9 +1,9 @@
-✅ Декомпозиция завершена: roadmap + {{N}} стадий.
+✅ Декомпозиция завершена: roadmap + {{N}} частей.
 
 Создано:
-  {{BASE_NAME}}-stg00-roadmap.md
-  {{BASE_NAME}}-stg01.md
+  {{BASE_NAME}}-roadmap.md
+  {{BASE_NAME}}-a.md
   ...
-  {{BASE_NAME}}-stg{{NN}}.md
+  {{BASE_NAME}}-{{LAST_ID}}.md
 
-Сплит — самодостаточный результат: стадии готовы к передаче агентам.
+Сплит — самодостаточный результат. Далее: `/plan-executor {{BASE_NAME}}-roadmap.md`.

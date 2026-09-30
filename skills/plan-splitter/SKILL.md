@@ -1,9 +1,10 @@
 ---
 name: plan-splitter
 description: |
-  Decompose a large markdown plan into self-contained stages, each executable in a single
-  agent pass. Produces a roadmap and per-stage files alongside the source plan without
-  modifying the original.
+  Use when an implementation plan is too large for one agent pass and must be decomposed into
+  self-contained parts (`<base>-a.md`, `<base>-b.md`, …) plus a dependency roadmap that
+  plan-executor runs in order. Never modifies the source plan; optionally verifies the parts
+  with plan-iterative-revision.
 allowed-tools:
   - Read
   - Grep
@@ -11,186 +12,114 @@ allowed-tools:
   - Edit
   - Write
   - Bash
+  - Agent
 ---
 
 # Plan Splitter
 
-Скилл декомпозиции большого плана на стадии. Каждая стадия — самодостаточный файл, который
-можно передать агенту независимо. Скилл создаёт roadmap + N stg-файлов рядом с исходным
-планом; **сам план не редактирует**.
+Decomposes one large plan into parts. Each part is a self-contained file an agent can execute
+without the original; a roadmap holds the dependency graph. The skill creates the roadmap and
+the part files next to the source plan and **never edits the plan itself**.
 
-## Arguments
+## Inputs
 
-Скилл принимает **один обязательный** позиционный аргумент, **один опциональный**
-позиционный аргумент и опциональные именованные аргументы:
+- `PLAN` (required): path to the plan, e.g. `docs/plans/plan01-impl.md`.
+- `verify`: `ask` (default) | `all` | `none` | a part list (`a,c`). Whether to run the deep
+  verification of step 8 and for which parts. Non-interactive runs treat `ask` as `none`.
+- `verify_depth`: `quick` | `standard` (default) | `deep`: the `preset` passed to
+  `plan-iterative-revision`.
+- `verify_mode`: `full-cycle` (default) | `audit-only`: whether verification may edit the parts.
 
-1. **Путь к файлу плана** (обязательный) — относительный или абсолютный,
-   напр. `docs/plans/plan01-modernization.md`.
-2. **Модель для ревизии** (опциональный) — имя модели для subagent-ревизии,
-   напр. `"Claude Opus 4 (copilot)"`. Если не указан — используется значение из `## Defaults`.
+Derived: `DIR` = the plan's directory; `BASE` = file name without `.md`;
+`LANG` = `TOOL detect-lang PLAN` (`ru` when more than 5% of letters are Cyrillic, else `en`).
 
-Опциональные именованные аргументы (для автономных вызовов; в интерактиве спрашиваются в рантайме):
-- `verify` = `ask` (дефолт) `| all | none` — запускать ли глубокую проверку стадий и для каких.
-- `verify_depth` = `quick | standard (дефолт) | deep` — глубина проверки (preset для `plan-iterative-revision`).
-- `verify_mode` = `full-cycle` (дефолт) `| audit-only` — правит стадии или только пишет review.
+## Tool
 
-Все остальные значения выводятся автоматически:
-- `dir`       = директория плана
-- `base_name` = имя файла плана без расширения
-- `lang`      = `ru` при `cyrillic_ratio > 0.05`, иначе `en`
-- `revision_model` = второй аргумент или дефолт из `## Defaults`
+`TOOL` = `python "<SKILL_DIR>/scripts/splitter_tool.py"`, `<SKILL_DIR>` being the directory of
+this file. Always call it by absolute path. Python ≥ 3.8, stdlib only. Step 8 also needs
+`plan-iterative-revision` installed next to this skill (`<SKILL_DIR>/../plan-iterative-revision/`);
+without it, stop after step 7 and say so.
 
-## Defaults
+## Naming
 
-| Parameter | Default | Override |
-|-----------|---------|---------|
-| revision_model | auto (текущая активная модель) | Второй аргумент при вызове; имя модели — fallback |
-| verify | ask | Аргумент `verify=all\|none` |
-| verify_depth | standard | Аргумент `verify_depth=quick\|deep` |
-| verify_mode | full-cycle | Аргумент `verify_mode=audit-only` |
+| Artifact | Name |
+|---|---|
+| Roadmap | `<BASE>-roadmap.md` |
+| Parts | `<BASE>-a.md`, `<BASE>-b.md`, … `<BASE>-z.md`, `<BASE>-aa.md`, … (`TOOL part-id N`) |
+| Verification snapshot / ledger | `<BASE>-verify-baseline.json`, `<BASE>-verify-ledger.json` |
+| Review trail per part (written by plan-iterative-revision) | `<BASE>-a-review-N.md`, `<BASE>-a-completion.md` |
 
-Для смены дефолтных параметров — изменить значение в этой таблице.
+Part ids in the roadmap table are the letters (`a`, `b`, …). plan-executor and plan-resolver
+parse the same ids.
 
-## Hard invariants (НЕ нарушать)
+## Hard invariants
 
-1. **Оригинальный план НЕ модифицируется.** Скилл только читает его и создаёт новые файлы.
-2. **Один уровень декомпозиции.** Стадии не дробятся рекурсивно. Если стадия слишком большая —
-   рекомендовать пользователю перезапустить `plan-splitter` на ней отдельно.
-3. **Write preflight** обязателен перед генерацией файлов. Если режим/инструменты не позволяют
-   создать файлы в `dir` — остановиться до генерации и сообщить пользователю.
-4. **Conflict handling.** Если `preflight` обнаружил существующие stg-файлы — спросить
-   пользователя: (а) перезаписать, (б) выбрать другой base/suffix, (в) отмена. Без явного
-   подтверждения — НЕ перезаписывать.
-5. **Максимум два раунда draft → feedback → redraft.** При повторном отклонении пользователем —
-   выход без генерации.
-6. **Все stg-файлы самодостаточны.** Каждый файл + roadmap — достаточно для агента, чтобы
-   понять, что делать. Без back-references «см. выше», «как в оригинале».
-7. **Нумерация** — строго `stg01`, `stg02`... (двузначная, с ведущим нулём до 99 стадий).
-8. **Roadmap** всегда имеет суффикс `-stg00-roadmap.md` (0-я «стадия» = карта).
-9. **Язык файлов** совпадает с языком исходного плана (`cyrillic_ratio > 0.05` → `ru`).
-   Порог 5% — конвенция экосистемы скиллов (см. `plan-iterative-revision`, invariant #9).
-10. После шага VERIFY изменены только разрешённые файлы: roadmap + stg-файлы,
-   review-артефакты `plan-iterative-revision`, `<base>-stg00-verify-baseline.json`
-   и `<base>-stg00-verify-ledger.json`; оригинал плана имеет тот же SHA-256,
-   что до запуска скилла.
-11. Проверяемые стадии нельзя объявлять готовыми, пока
-   `splitter_tool.py verify-status` не завершится с exit 0. `missing` stage
-   re-dispatch один раз, затем блок; `inconsistent` stage блокирует сразу.
+1. The source plan is never modified; its SHA-256 is the same after the run (`TOOL hash PLAN`).
+2. One level of decomposition: parts are not split recursively. A part that is still too large
+   gets a note recommending `plan-splitter <BASE>-<id>.md` by hand.
+3. Write preflight before generating files; if `DIR` is not writable, stop before analysis.
+4. Existing split artifacts for `BASE` are never overwritten without an explicit user choice
+   (overwrite / different base / abort).
+5. At most two rounds of draft → feedback → redraft; a second rejection ends the run without files.
+6. Every part is self-contained: no "see above", "as in the original", "previous section".
+7. All generated files are in the plan's language (`LANG`).
+8. After step 8 only these files may differ from the pre-run state: roadmap, parts, the two
+   verify JSONs, and the review/completion files of the verified parts.
+9. A verified part is "done" only when `TOOL verify-status` exits 0. `missing` → one re-dispatch,
+   then stop; `inconsistent` → stop immediately; never downgrade to a warning.
 
-## Prerequisites
-
-- Python ≥ 3.8 в PATH (для `scripts/splitter_tool.py`, без сторонних зависимостей).
-- `<SKILL_DIR>` — каталог, содержащий этот `SKILL.md`. Всегда использовать абсолютный путь
-  при вызове скрипта: `python "<SKILL_DIR>/scripts/splitter_tool.py" ...`.
-- Для шага 8 (deep verification) требуется скилл `plan-iterative-revision`,
-  установленный рядом: `<SKILL_DIR>/../plan-iterative-revision/`. Если его нет —
-  шаг 8 недоступен; сообщить пользователю и завершиться после шага 7.
-
-## Algorithm (high-level)
+## Algorithm
 
 ```
 1. BOOTSTRAP
-   - Прочитать план; вычислить dir, base_name.
-   - detect-lang → lang.
-   - preflight <dir> <base_name>:
-     * writable=false → стоп, сообщить пользователю.
-     * existing непустой → запомнить warning для шага 5.
+   LANG = TOOL detect-lang PLAN
+   P = TOOL preflight DIR BASE     # writable? existing split artifacts?
+   if not P.writable: stop and report
 
-2. GATE DECISION + ОТЧЁТ (см. references/GATE-DECISION.md)
-   - Оценить по 5 факторам и сообщить пользователю решение (головной отчёт).
-   - «Не разбивать» → вывести assets/gate-pass.<lang>.md, выход (это не ошибка).
-   - «Разбивать» → шаг 3.
+2. GATE DECISION (references/GATE-DECISION.md)
+   Score the 5 factors, tell the user the verdict.
+   "do not split" → print assets/gate-pass.<LANG>.md and exit (a normal outcome).
 
-3. ANALYSIS
-   - Эвристики границ стадий (references/STAGE-FORMAT.md).
-   - Граф зависимостей; parallel groups; веса 🔴/🟡/🟢.
-   - Подготовить структуру для каждой стадии.
+3. ANALYSIS (references/STAGE-FORMAT.md §4-5, references/ROADMAP-FORMAT.md)
+   Part boundaries, dependency graph, parallel groups, weights 🔴/🟡/🟢,
+   one row per part: id (a, b, …), title, depends, group, weight, summary.
 
 4. DRAFT & CONFIRM
-   - Показать пользователю таблицу разбиения.
-   - При отклонении: один retry → шаг 3 с feedback.
-   - При повторном отклонении: выход.
+   Show the split table; on rejection with feedback retry step 3 once; on a second
+   rejection exit without files. Never generate without explicit confirmation.
 
-5. CONFLICT CHECK + GENERATE FILES
-   - Если есть existing — спросить (overwrite/rename/abort).
-   - Записать <base>-stg00-roadmap.md (assets/roadmap-template.<lang>.md).
-   - Записать <base>-stg01.md ... stgN.md (assets/stage-template.<lang>.md).
-   - Имена файлов: `splitter_tool.py stage-name <base> <N>`.
+5. GENERATE
+   if P.existing: ask overwrite / other base / abort.
+   Write <BASE>-roadmap.md from assets/roadmap-template.<LANG>.md and one
+   <BASE>-<id>.md per part from assets/stage-template.<LANG>.md (names via TOOL stage-name).
 
-6. VERIFY (трёхуровневая)
-   - A: splitter_tool.py validate-all <dir> <base>
-   - B: автоматически входит в validate-all (coverage + original hash)
-   - C: агент перечитывает stg-файлы → self-sufficiency, контекст, handoff,
-        непротиворечивость с roadmap.
-    - validate-stage возвращает granularity_warning → если стадия > 15 задач,
-       поднять мягкое предупреждение (не блокирует; рекомендовать перезапуск splitter на ней).
-       Для получения этого предупреждения на уровне C агент запускает validate-stage per-file
-       дополнительно к validate-all.
-   - Дефекты → исправить, повторить (max 3 итерации).
-   - ОК → перейти к шагу 7.
+6. VERIFY (three levels, at most 3 rounds)
+   A/B: TOOL validate-all DIR BASE   # files, sections, DAG, depends, groups, task coverage,
+                                     # original hash; also run TOOL validate-stage per part
+                                     # for the granularity warning (> 15 tasks)
+   C:   re-read every part: self-sufficiency, context, handoff (outputs of X cover the
+        inputs of every Y that depends on X), consistency with the roadmap.
+   Fix defects and repeat; after 3 failed rounds exit with a warning, files kept.
 
 7. DONE NOTICE / VERIFY CHOICE
-    - Предложить глубокую проверку: вывести assets/verify-prompt.<lang>.md.
-    - Спросить scope (рантайм): all / подмножество stgNN / none.
-       * Неинтерактивный вызов: использовать аргумент verify (ask→считать none, если ответа нет).
-    - Если none → вывести assets/completion.<lang>.md и выйти.
-    - Если scope ≠ none → НЕ выводить финальное «готово» для проверяемых стадий до зелёного шага 8.
+   Print assets/verify-prompt.<LANG>.md; resolve scope from `verify` or ask.
+   scope = none → print assets/completion.<LANG>.md and exit.
+   Otherwise do not announce "done" for the selected parts before step 8 passes.
 
-8. GATED DEEP VERIFICATION (только при scope ≠ none; см. references/WORKFLOW.md)
-    - Записать baseline snapshot: `splitter_tool.py verify-baseline <dir> <base> --stages <selected>`
-      → `<base>-stg00-verify-baseline.json`.
-    - Инициализировать `<base>-stg00-verify-ledger.json` и после каждого `runSubagent`
-      делать read-modify-write/upsert `stages[stgNN]`.
-    - Для каждой выбранной стадии — ПАРАЛЛЕЛЬНО:
-       * runSubagent(plan-iterative-revision):
-             plan=<dir>/<base>-stgNN.md, interaction=autonomous,
-             preset=<глубина>, mode=<verify_mode: full-cycle по умолчанию>
-       * Subagent возвращает JSON: {result, iterations, remaining_issues}.
-    - После batch выполнить `splitter_tool.py verify-status <dir> <base> --baseline <baseline> --ledger <ledger> --validator <SKILL_DIR>/../plan-iterative-revision/scripts/next_review_index.py --stages <selected>`.
-    - `missing` → re-dispatch один раз и повторить gate; `inconsistent` → hard-stop;
-      exit 0 → вывести assets/verify-summary.<lang>.md и только затем completion/done.
+8. GATED DEEP VERIFICATION (references/DEEP-VERIFY.md)
+   TOOL verify-baseline DIR BASE --stages <scope>  > <BASE>-verify-baseline.json
+   Run plan-iterative-revision ONCE on <BASE>-roadmap.md (batch mode, autonomous,
+   preset=verify_depth, mode=verify_mode, parts=<scope>), sequentially per part.
+   TOOL verify-record DIR BASE --results <its batch JSON> --ledger <BASE>-verify-ledger.json --mode verify_mode
+   TOOL verify-status DIR BASE --baseline ... --ledger ... --validator <SKILL_DIR>/../plan-iterative-revision/scripts/next_review_index.py --stages <scope>
+   exit 0 → print assets/verify-summary.<LANG>.md, then completion.
+   missing → re-dispatch those parts once and repeat; still missing or any inconsistent → stop.
 ```
 
-Полный алгоритм со всеми деталями — `references/WORKFLOW.md`.
+## References
 
-## VERIFY — три уровня проверки
-
-### Уровень A: формальная (автоматизируемая)
-
-`python "<SKILL_DIR>/scripts/splitter_tool.py" validate-all <dir> <base_name>` проверяет:
-- Все stg-файлы из таблицы roadmap существуют на диске.
-- Каждый файл проходит `validate-stage` (обязательные секции).
-- Roadmap проходит `validate-roadmap`.
-- Граф — DAG (нет циклов).
-- Все `depends` указывают на реальные стадии.
-- Стадии в одной parallel group не зависят друг от друга.
-- `validate-stage` дополнительно отдаёт `granularity_warning` (мягкое; стадия > 15 задач).
-
-### Уровень B: cross-validation (автоматизируемая)
-
-Тот же `validate-all` дополнительно:
-- Сумма задач в stg-файлах ≥ числу задач в оригинале.
-- SHA-256 оригинала фиксируется; агент должен убедиться, что он не менялся.
-
-### Уровень C: содержательная (агент)
-
-Агент перечитывает каждый stg-файл и проверяет:
-- **Self-sufficiency**: нет back-references «см. выше», «как в оригинале», «предыдущий пункт».
-- **Контекст**: цель стадии понятна без чтения оригинала.
-- **Handoff**: «Выходные данные» stgX точно покрывают «Входные данные» stgY, где Y depends on X.
-- **Непротиворечивость**: информация в stg-файлах не конфликтует с roadmap (depends, group, weight).
-
-Если найдены дефекты — агент правит файлы и повторяет VERIFY (максимум 3 итерации, потом выход с warning).
-
-## Output
-
-При успехе — `assets/completion.<lang>.md` с подстановками. При gate-pass — `assets/gate-pass.<lang>.md`. При любом аварийном выходе — внятное сообщение пользователю с причиной и подсказкой действий.
-
-## See also
-
-- `references/WORKFLOW.md` — полный алгоритм со всеми деталями.
-- `references/GATE-DECISION.md` — критерии «разбивать / не разбивать».
-- `references/STAGE-FORMAT.md` — формат stg-файлов и правила деривации.
-- `references/ROADMAP-FORMAT.md` — формат roadmap-файла и parallel groups.
-- `scripts/splitter_tool.py` — CLI: preflight, stage-name, detect-lang, validate-*, verify-baseline, verify-status, hash.
-- Шаг 8 делегирует глубокую проверку через `runSubagent(plan-iterative-revision, interaction=autonomous, preset=<глубина>)`, но завершает её только через `verify-status` gate — см. `references/WORKFLOW.md`.
+- [references/GATE-DECISION.md](references/GATE-DECISION.md): split or not.
+- [references/STAGE-FORMAT.md](references/STAGE-FORMAT.md): part file format, boundary heuristics,
+  content rules.
+- [references/ROADMAP-FORMAT.md](references/ROADMAP-FORMAT.md): roadmap format, parallel groups.
+- [references/DEEP-VERIFY.md](references/DEEP-VERIFY.md): step 8 in detail (subagent prompt, ledger, gate).

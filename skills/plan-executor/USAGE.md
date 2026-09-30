@@ -1,6 +1,6 @@
 # plan-executor — Quick Reference
 
-Execute a ready plan or staged roadmap one unit at a time with ledger-backed progress tracking, gates, and checkpoints.
+Execute a ready plan or staged roadmap one unit at a time with ledger-backed progress, gates, retries, and rollback snapshots that never touch your branch history.
 
 ## How to Invoke
 
@@ -13,103 +13,95 @@ In VS Code Copilot chat, type:
 ### Usage Examples
 
 ```bash
-# Execute a single plan (with ### Task N: headings)
-/plan-executor docs/plans/plan01-feature.md
+# Execute a plan from plan-writing (### Task N: headings)
+/plan-executor docs/plans/plan01-impl.md
 
-# Execute a staged roadmap (processes stages in dependency order)
-/plan-executor docs/plans/plan01-feature-stg00-roadmap.md
+# Execute a staged roadmap (stages in dependency order)
+/plan-executor docs/plans/plan01-impl-roadmap.md
 
-# Plan in a custom directory
-/plan-executor .docs/.plans/refactor/plan-stg00-roadmap.md
+# A prose plan without task headings, as a single unit
+/plan-executor docs/plans/notes.md --whole
 ```
 
 ## Arguments
 
 | Argument | Required | Description |
 |---|---|---|
-| Plan/Roadmap path | **Yes** | Path to a plan `.md` or `-stg00-roadmap.md` file |
+| Plan/Roadmap path | **Yes** | Plan `.md` with task headings, or a `-roadmap.md` from plan-splitter |
+| `--whole` | No | Treat the plan as whole even if a roadmap exists; a plan without task headings becomes one unit |
 
 ## Input Types
 
 | Input | Detection | Behavior |
 |---|---|---|
-| Staged roadmap (`-stg00-roadmap.md`) | Has stage table + dependencies | Executes stages in dependency order |
-| Whole plan (with `### Task N:` headings) | Has explicit task headings | Executes tasks sequentially |
+| Staged roadmap (`-roadmap.md`) | Stage table + dependencies | Parts in dependency order; each part's text is its `<base>-<id>.md` (`a`, `b`, …) |
+| Whole plan (`### Task N:` headings) | Task headings outside code blocks | Tasks strictly in order; `Phase`/`Step` headings do not become units when `Task` headings exist |
 
 ## What Happens
 
 ```
-BOOTSTRAP:
-  detect-input → parse-roadmap/parse-tasks → ledger-init → checkpoint-detect
-      ↓
-EXECUTE LOOP (per unit):
-  ledger-next → recommend-strategy → scope-context → mark running → execute unit → gate → checkpoint → mark done
-      ↓
-FINALIZE:
-  All done → render progress → propose plan-resolver
+BOOTSTRAP:  ledger-init  → units, ledger, baseline snapshot
+LOOP:       unit-begin   → execute the unit → gate → unit-finish (pass: snapshot + done / fail: retry or stop)
+FINALIZE:   propose plan-resolver, offer to prune snapshots
 ```
 
-## Execution Flow Details
+Per unit the agent calls the tool twice and reads only that unit's section and files, not the whole plan.
 
-1. **ledger-next** — picks the next executable unit (respects dependencies)
-2. **recommend-strategy** — suggests isolation level and gate tier based on unit weight
-3. **scope-context** — returns file paths relevant to the unit
-4. **ledger-mark running** — claims the unit, increments attempt counter
-5. **Execute** — agent implements exactly one unit (stage or task)
-6. **Gate** — verify the unit is done (tests pass, artifacts exist)
-7. **Checkpoint** — git commit as a savepoint
-8. **Mark done** — `ledger-mark done`, render progress
+## Gates, Retries and Rollback
 
-## Gates and Retries
-
-- Each unit gets **3 attempts** (1 primary + 2 retries)
-- Identical failure signature → immediate STOP (no wasted retries)
-- Gate cannot pass silently if tests are missing → escalation, not fake success
+- A failed unit is retried before anything else runs; later tasks never run on top of a broken one
+- 3 attempts per unit (1 primary + 2 retries); the same error signature twice → immediate STOP
+- A gate cannot pass silently if tests are missing → escalation, not fake success
+- Snapshots are stored in hidden git refs `refs/plan-executor/<run>/<unit>`: no commits on your branch; the final commit is yours
+- Rollback (`checkpoint-restore`) restores files to the last good snapshot and removes files created after it — always after your confirmation
 
 ## Stop Conditions
 
 | Condition | Action |
 |---|---|
-| All units done (`all-done`) | Finalize → propose resolver |
-| 3 attempts exhausted on a unit | STOP with stop-report |
-| Stagnation (same error repeats) | STOP with stop-report |
-| All units blocked, no retryable | STOP with stop-report |
-| Rollback needed | Ask engineer for decision |
+| All units done | Finalize → propose resolver |
+| 3 attempts exhausted / same error twice | STOP with stop-report |
+| Plan has no task headings (no `--whole`) | STOP: add headings, run plan-splitter, or use `--whole` |
+| Uncommitted changes in the repo at start | Ask: commit/stash, or continue with them in the baseline |
+| Plan file changed since the ledger was created | STOP and ask: new run, or accept the changed plan |
 
 ## Output
 
 - `<exec_dir>/state.json` — ledger (source of truth for progress)
-- `<exec_dir>/progress.md` — human-readable progress report
+- `<exec_dir>/progress.md` — human-readable progress
 
-`exec_dir` is located **outside the project repository** (typically sibling to plan files, e.g., `.docs/.plans/<name>/.exec/`). This ensures git operations in the workdir never affect the ledger.
+`exec_dir` must be **outside the project repository** (for example a sibling directory of the repo) or git-ignored; the tool refuses otherwise.
 
 ## Prerequisites
 
-- Git available (for checkpoints; without git, auto-rollback is unavailable)
-- Plan/roadmap has been validated (ideally by iterative-revision)
-- Working codebase accessible
+- Git for snapshots and rollback (without git, rollback is manual)
+- Plan validated (ideally by `plan-iterative-revision`)
+- Python ≥ 3.8
 
 ## Checklist Before Invoking
 
 - [ ] Plan or roadmap exists and is finalized
-- [ ] Codebase is in a clean git state (no uncommitted work that could conflict)
-- [ ] Dependencies/environment ready for the first task
-- [ ] If staged: roadmap file points to existing stg-files
+- [ ] Repository is clean (or you accept that current changes go into the baseline)
+- [ ] Environment ready for the first task
+- [ ] If staged: roadmap points to existing `<base>-a.md`, `<base>-b.md`, … files
 
 ## Common Errors
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| "No units found" | Plan has no `### Task N:` headings | Check plan format; re-run plan-writing |
-| "Attempts exhausted" | Implementation failed 3 times | Read stop-report, fix manually, restart |
-| "Checkpoint failed" | Git state dirty or unavailable | Commit/stash current changes, retry |
-| "ledger-next: all-done" | All units already complete | Proceed to resolver |
+| `no-units` | No `### Task N:` headings | Re-run plan-writing, add headings, or use `--whole` |
+| `duplicate-unit-id` | Two headings with the same id | Renumber the plan |
+| `unknown-dependency` | Roadmap depends on a missing stage | Fix the roadmap table |
+| `dirty-worktree` | Uncommitted changes at start | Commit/stash, or allow them into the baseline |
+| `plan-drift` | Plan edited between sessions | New `exec_dir`, or accept the change |
+| `exec-dir-inside-workdir` | Ledger directory inside the repo | Move `exec_dir` outside or git-ignore it |
+| `exhausted` / `stagnated` | Unit failed 3 times / same error twice | Read the stop-report, fix manually, resume |
 
 ## Pipeline Position
 
 ```
-plan-brainstorming → plan-writing → plan-iterative-revision → plan-splitter → [YOU ARE HERE] → plan-resolver
+plan-brainstorming → plan-writing → plan-iterative-revision → [plan-splitter] → [YOU ARE HERE] → plan-resolver
 ```
 
-**Previous:** `plan-splitter` (produces staged roadmap) or `plan-writing` (for small plans)  
-**Next:** `plan-resolver` (audits implementation correctness)
+**Previous:** `plan-writing` (plan) or `plan-splitter` (staged roadmap)
+**Next:** `plan-resolver` (audit, or `auto` to audit and fix)

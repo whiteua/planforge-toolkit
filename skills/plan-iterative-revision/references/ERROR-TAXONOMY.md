@@ -1,147 +1,110 @@
-# ERROR TAXONOMY
+# Error Taxonomy
 
-10 классов ошибок для taxonomy sweep в Фазе А. Проходить **по одному классу за раз** —
-это даёт фокус и предсказуемость.
+The 10 issue classes for Phase A. Within a lens, check one class at a time: it keeps attention
+focused. Each class lists guiding questions.
 
-Для каждого класса: характерные вопросы и примеры красных флагов.
+## 1. logic
 
----
+Contradictions, circular dependencies, unreachable branches, incompatible preconditions.
 
-## 1. logic — Логические
+- Does a step rely on state that has not been created yet?
+- Do two requirements contradict each other ("always X" vs "sometimes not X")?
+- Are all branches and conditions reachable?
+- Are the invariants declared at the top of the plan respected?
 
-Противоречия, циклические зависимости, недостижимые ветки, несовместимые предусловия.
+## 2. code
 
-**Вопросы:**
-- Есть ли в плане шаги, которые ссылаются на ещё не созданное состояние?
-- Есть ли два требования, противоречащие друг другу (например, «всегда X» и «иногда не X»)?
-- Все ли ветки/условия достижимы? Нет ли мёртвых веток?
-- Соблюдены ли инварианты, объявленные в начале плана?
+Missing files, functions or types; wrong signatures; race conditions; resource leaks.
 
----
+- Do all mentioned files exist, and are all mentioned functions and classes found?
+- Do the described signatures match the real ones?
+- Is concurrency handled where state is shared?
+- Is resource handling described (connections, files, transactions, unsubscribes)?
 
-## 2. code — Программные
+## 3. math
 
-Несуществующие файлы/функции/типы, неверные сигнатуры, race conditions, ресурс-лики.
+Formulas, units, off-by-one, overflow, rounding, currency.
 
-**Вопросы:**
-- Все ли упомянутые файлы существуют (Read)?
-- Все ли упомянутые функции/классы найдены (Grep)?
-- Совпадают ли описанные сигнатуры с фактическими?
-- Учтены ли потоки/конкурентность в местах общего состояния?
-- Управление ресурсами (соединения, файлы, транзакции, отписки) описано?
+- Are all formulas in consistent units, with explicit conversions?
+- Is overflow or underflow possible?
+- Off-by-one in ranges, indexes, date boundaries?
+- Money rounding: mode (banker's or half-up) and precision fixed?
+- Are currency rates applied consistently?
 
----
+## 4. ops
 
-## 3. math — Математические
+Migrations, downtime, access rights, rollback, monitoring, secrets.
 
-Формулы, единицы, off-by-one, переполнения, округление, валюта.
+- Is there an explicit rollback for each destructive operation?
+- Is the downtime or zero-downtime approach stated?
+- Who has access (roles)? Least privilege?
+- Where are secrets stored? Can they leak into logs or the plan?
+- Is monitoring and alerting planned for the new functionality?
+- Are feature flags or gradual rollout described?
 
-**Вопросы:**
-- Все формулы определены в одних единицах? Конверсии явные?
-- Возможен ли overflow / underflow?
-- Off-by-one в диапазонах, индексах, datetime границах?
-- Округление денег: режим (banker's / half-up) и точность зафиксированы?
-- Валютные коэффициенты применяются единообразно?
+## 5. db
 
----
+Indexes, foreign keys, NOT NULL, column types, migrations, concurrency.
 
-## 4. ops — Админские / процессные
+- Is every new WHERE/JOIN condition covered by an index?
+- Are foreign keys defined, with consistent ON DELETE/UPDATE?
+- Is NULL semantics explicit for every new column?
+- Do column types fit the data (INT vs BIGINT, VARCHAR(N))?
+- Are migrations idempotent, with a rollback migration?
+- Are concurrent updates handled (optimistic or pessimistic locking)?
+- Are there unique indexes for business keys?
 
-Миграции, downtime, права доступа, rollback, мониторинг, секреты.
+## 6. contract
 
-**Вопросы:**
-- Есть ли явный rollback-план для каждой деструктивной операции?
-- Прописан ли downtime / zero-downtime подход?
-- Кто имеет доступ (роли)? Принцип наименьших привилегий?
-- Где хранятся секреты? Не утекают ли в логи / план?
-- Есть ли план мониторинга и алертинга на новый функционал?
-- Описаны ли feature flags, постепенная раскатка?
+API and integration mismatches: methods, paths, payloads, status codes.
 
----
+- Are method, path, query, body and response fully described?
+- Do they match the real routing in the code?
+- Is API versioning handled? Are breaking changes for existing clients marked?
+- External integrations: timeouts, retries, idempotency keys?
 
-## 5. db — Структура базы данных
+## 7. tests
 
-Индексы, FK, NOT NULL, типы колонок, миграции, конкурентность.
+Acceptance criteria, testability, coverage.
 
-**Вопросы:**
-- Каждое новое условие WHERE/JOIN покрыто индексом?
-- Foreign keys определены и согласованы с ON DELETE/UPDATE?
-- NULL-семантика явная для каждой новой колонки?
-- Типы колонок соответствуют размерности данных (INT vs BIGINT, VARCHAR(N))?
-- Миграции идемпотентны? Есть rollback-миграция?
-- Учтены ли concurrent updates (optimistic / pessimistic locking)?
-- Уникальные индексы для бизнес-ключей?
+- Does every feature have acceptance criteria, and are they measurable?
+- Are test types stated (unit, integration, e2e)?
+- Are edge cases listed explicitly?
+- Are performance criteria (if relevant) quantitative?
 
----
+## 8. security
 
-## 6. contract — Контрактные (API / интеграции)
+Authorization, input validation, injections, secrets, OWASP.
 
-Расхождение методов / путей / payload / status codes между планом и реализацией.
+- Does every new endpoint describe authentication and authorization?
+- Is input validation and sanitization described?
+- Are SQL, NoSQL and command injections excluded by parameterization?
+- Are secrets kept out of the plan and code (placeholders are fine)?
+- Are CSRF, XSS and SSRF handled where relevant?
+- Can logging leak PII or tokens?
+- Are rate limiting and brute-force protection mentioned where needed?
 
-**Вопросы:**
-- HTTP method, path, query, body, response — описаны полно?
-- Совпадают ли с реальным роутингом в коде (Grep по роутам)?
-- Версионирование API учтено?
-- Совместимость с существующими клиентами (breaking changes помечены)?
-- Внешние интеграции: тайм-ауты, retry, idempotency keys?
+## 9. perf
 
----
+N+1, missing pagination, uncontrolled joins, heavy work on the hot path.
 
-## 7. tests — Тесты и приёмка
+- Do lists have pagination or limits?
+- Any N+1 in loops over entities?
+- Is caching described where it is clearly needed?
+- Are expected data volumes and load estimated?
+- Any blocking I/O on hot paths?
 
-Критерии приёмки, тестируемость, покрытие.
+## 10. code-plan-mismatch
 
-**Вопросы:**
-- Для каждой фичи есть acceptance criteria?
-- Критерии измеримы (а не «должно работать хорошо»)?
-- Указаны типы тестов (unit / integration / e2e)?
-- Edge cases перечислены явно?
-- Performance-критерии (если применимо) количественны?
+The plan describes a state that does not exist, ignores what exists, or uses different names.
 
----
+- Do all mentioned names (classes, methods, tables, columns, endpoints) exist in the code?
+- If the plan describes "how it works today", does that match reality?
+- If the plan describes changes, are neighboring systems taken into account?
+- Are existing migrations and schema versions reflected in the plan's starting point?
 
-## 8. security — Безопасность
+## Legacy: unfulfilled-contract
 
-Авторизация, валидация ввода, инъекции, секреты, OWASP.
-
-**Вопросы:**
-- Каждый новый endpoint имеет описание AuthN / AuthZ?
-- Валидация и санитизация входов описаны?
-- SQL/NoSQL/командные инъекции исключены параметризацией?
-- Секреты не хранятся в плане / коде (placeholders ok)?
-- CSRF/XSS/SSRF учтены, где применимо?
-- Логирование не утекает PII / токены?
-- Rate limiting / brute-force protection упомянуты, где нужно?
-
----
-
-## 9. perf — Performance
-
-N+1, отсутствие пагинации, неконтролируемые джойны, тяжёлая загрузка в hot path.
-
-**Вопросы:**
-- Списки имеют пагинацию / лимиты?
-- Нет ли N+1 в циклах по сущностям?
-- Кэширование описано там, где оно очевидно нужно?
-- Ожидаемые объёмы данных и нагрузки оценены?
-- Нет ли блокирующих I/O в горячих путях?
-
----
-
-## 10. code-plan-mismatch — Согласованность с кодом
-
-План описывает несуществующее состояние, или игнорирует существующее, или имена расходятся.
-
-**Вопросы:**
-- Все упомянутые имена (классы, методы, таблицы, колонки, эндпоинты) существуют в коде?
-- Если план описывает «как сейчас работает» — это совпадает с фактом?
-- Если план описывает изменения — учтены ли существующие смежные системы?
-- Существующие миграции / версионы БД учтены в стартовой точке плана?
-
----
-
-## Special category: unfulfilled-contract
-
-Не часть проходов 1–10. Применяется только в Step 1 Фазы А (contract verification):
-если контракт из предыдущего ревью не был реализован в главном плане, создаётся issue
-этой категории с `severity = blocker`.
+Old reviews used this category for contracts that the plan had not applied. New audits keep the
+original category and use `carry` instead (see PHASE-A-AUDIT.md, Step 1), so that the fingerprint
+stays stable.

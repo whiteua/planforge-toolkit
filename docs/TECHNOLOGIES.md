@@ -13,8 +13,9 @@ This document maps the engineering techniques, methodologies, and prior art that
 | 2–3 alternatives with trade-offs | Trade Study (NASA, DoD); Architecture Decision Records (Michael Nygard, 2011) | Forces explicit comparison before commitment |
 | Adaptive depth (Quick / Standard / Deep) | Process Tailoring (ISO 12207:2008 §6.1); CMMI maturity levels (SEI, 2002) | Scales formality to project risk |
 | Uncertainty sweep | INCOSE Requirements Verification Checklist; Wiegers' requirements inspection (30+ quality criteria) | Systematic scan for incompleteness and ambiguity |
-| 8 mandatory spec sections | IEEE 830 SRS standard (1993) | Ensures structural completeness |
+| 8 mandatory spec sections | IEEE 830 SRS standard (1993) | Ensures structural completeness; checked deterministically by `brainstorm_tool.py spec-check` |
 | Visual companion | Miro/FigJam facilitation; EventStorming (Alberto Brandolini, 2013) | Real-time visual feedback during exploration |
+| Findings triage and traceability | Defect triage (IEEE 1044 anomaly classification); requirements traceability matrix | JSON review findings are validated by a CLI, verified against code, and each id is traced to a fix or to Out of Scope by a coverage gate |
 
 ---
 
@@ -25,7 +26,8 @@ This document maps the engineering techniques, methodologies, and prior art that
 | TDD cycle per task | Test-Driven Development (Kent Beck, 2002); Extreme Programming (1999) | Every plan step includes red → green → refactor |
 | Strict size limit (10 min / 100 lines) | PSP (Watts Humphrey, 1995); INVEST criteria — "Small" (Bill Wake, 2003); Pomodoro Technique | Recursive splitting when a step exceeds the limit |
 | Full code, no placeholders | Literate Programming (Donald Knuth, 1984); Jupyter Notebooks (Fernando Pérez, 2001) | Plan steps contain complete, executable code |
-| Spec Contract Preflight | Design by Contract (Bertrand Meyer, 1988); Type-system interface contracts | Plan generation validates against the spec before writing |
+| Spec Contract Preflight | Design by Contract (Bertrand Meyer, 1988); Type-system interface contracts | `brainstorm_tool.py spec-check` validates the spec before any plan is written |
+| Plan format contract check | Schema validation / linting (lint, Stephen Johnson, 1978) | `plan_tool.py plan-check` enforces the header, task headings, unique ids and task core that the executor and resolver parse |
 | "Read before modify" invariant | IDE refactoring tools (IntelliJ, Eclipse, ~2001) | Agent must read the target section before editing |
 | Exact line references | Unix patch/diff format (Larry Wall, 1975–1985) | Edits specify precise line ranges |
 | Self-review checklist | Author self-inspection (Wiegers, 1999) | Structured verification before handoff |
@@ -50,7 +52,9 @@ This document maps the engineering techniques, methodologies, and prior art that
 | `persisted = prev ∩ current` | SonarQube "Remaining Issues" metric | Identifies issues present in both iterations |
 | `reintroduced = (cumulative − prev) ∩ current` | SonarQube REOPENED status; Jira REOPENED workflow | Detects issues that were fixed but have returned |
 | Regression detection → hard stop | Flaky test detection (Google, 2020); SonarQube Quality Gate on reopened issues | Loop halts immediately when reintroduced ≠ ∅ |
-| Churn / stagnation detection | Deadlock detection (Dijkstra, 1965); Liveness analysis in model checking (Clarke, Emerson, Sifakis, 1980s) | Loop halts when no progress is made over a sliding window |
+| Churn / stagnation detection | Deadlock detection (Dijkstra, 1965); Liveness analysis in model checking (Clarke, Emerson, Sifakis, 1980s) | Loop halts when the issue set is unchanged or nothing is resolved over a sliding window |
+| Stuck-issue escalation | Starvation detection in schedulers; SLA breach escalation in ITSM | A fingerprint present in 3 consecutive audits stops the loop for a manual decision |
+| Single gate authority | Policy decision point (XACML, 2003); Quality Gates (SonarQube) | One `record` call evaluates every gate over the current run's history; the agent only executes the action |
 | Fixed-point convergence | Banach fixed-point theorem (1922); Fixed-point iteration in numerical analysis | Loop terminates when issue set reaches ∅ |
 
 ### Two-phase architecture
@@ -58,13 +62,13 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Technique | Origin | How it's applied |
 |---|---|---|
 | Phase A (audit) reads only; Phase B (implement) writes only | Fagan Inspection (IBM, 1976); Separation of Duties (SOX, PCI-DSS) | Prevents the agent from silently masking issues it introduced |
-| Immutable review files | Audit trail / Event log (SOX, PCI-DSS, Basel III); Git append-only history | Each iteration produces a numbered, never-overwritten review artifact |
+| Immutable review files | Audit trail / Event log (SOX, PCI-DSS, Basel III); Git append-only history | Each iteration produces a numbered, never-overwritten review artifact, rendered and validated by the tool from the agent's JSON findings |
 
 ### Error taxonomy
 
 | Technique | Origin | How it's applied |
 |---|---|---|
-| 10-class taxonomy with per-class sweep | CWE (MITRE, ~2006); OWASP Top 10 (~2003); IEEE 1044 (1993) | Agent re-reads the plan once per class to prevent attention scattering |
+| 10-class taxonomy with per-class sweep | CWE (MITRE, ~2006); OWASP Top 10 (~2003); IEEE 1044 (1993) | Agent reads the plan once and checks one class at a time to prevent attention scattering |
 
 ---
 
@@ -89,10 +93,11 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Immutable plan + separate state ledger | Terraform plan/apply + tfstate (HashiCorp, 2014); Flyway schema_history (2006); Liquibase DATABASECHANGELOG | Plan file is never modified; progress lives in a ledger |
 | State managed only through CLI | Terraform CLI-only state mutation; Airflow metadata DB (2015) | Prevents manual ledger corruption |
 | "No tests → escalation" gate | CI coverage gates (JaCoCo, Cobertura); SonarQube Quality Gate (~2008); Fail-fast (Google SRE Book, 2016) | Execution halts if test evidence is missing |
-| Checkpoint / restore | Database savepoints (SQL standard, ~1992); VM snapshots (VMware, ~2001); Git tags on green builds | Agent can roll back to last known-good state |
+| Checkpoint / restore | Database savepoints (SQL standard, ~1992); VM snapshots (VMware, ~2001); `git stash create` / hidden refs (Git plumbing) | Per-unit snapshots in `refs/plan-executor/<run>/<unit>` via a temporary index and `commit-tree`; restore returns files to the last good snapshot without touching the branch, HEAD or index |
 | Adaptive verification levels (🟢/🟡/🔴) | Risk-based testing (ISTQB, ~2000s); Deployment pipelines with canary stages (Jez Humble, 2010) | Verification depth scales with assessed risk |
 | Destructive operation confirmation | Terraform plan output with confirmation prompt (2014) | Irreversible actions require explicit approval |
-| Multi-session parallelism | Make -j (GNU Make, ~1988); Airflow parallel tasks (2015) | Independent tasks can be distributed across sessions |
+| Retry-first ordering with stagnation stop | Circuit breaker (Nygard, *Release It!*, 2007); bounded retry with backoff | A failed unit is retried before anything else runs; 3 attempts or the same error signature twice stops the run |
+| Drift detection on resume | Terraform state refresh / plan drift (HashiCorp); lockfile hashes (npm, Cargo) | The ledger stores the plan's SHA-256; a changed plan stops the run until the engineer decides |
 | Stop report on failure | CI/CD failure notifications (Jenkins, GitHub Actions, GitLab CI) | Structured report explains why execution halted |
 
 ---
@@ -101,7 +106,8 @@ This document maps the engineering techniques, methodologies, and prior art that
 
 | Technique | Origin | How it's applied |
 |---|---|---|
-| Read-only audit invariant | Financial audit (centuries); Separation of Duties (SOX, PCI-DSS, ISO 27001); Security audit / penetration testing (OWASP) | Resolver never modifies the plan or codebase |
+| Read-only audit invariant | Financial audit (centuries); Separation of Duties (SOX, PCI-DSS, ISO 27001); Security audit / penetration testing (OWASP) | An audit pass never modifies the plan or codebase |
+| Separated fix → re-audit loop | Separation of Duties (maker–checker); PDCA cycle (Deming, 1950s); bounded retry / circuit breaker | `fix`/`auto` repair code in a separate phase under SHA-256 protection of the plan and reports; only an independent re-audit closes an issue; the loop stops on final, cycle limit (default 2), stall, or issues needing a user decision |
 | SHA-256 workspace snapshot | WORM storage (SEC Rule 17a-4, ~1990s); Reproducible Builds (Debian, ~2013); in-toto / SLSA (Google/NYU, ~2020) | Cryptographic proof that nothing changed during audit |
 | Multi-pass with memory | Regression testing with known-bug suites; SonarQube historical analysis (~2008) | Each pass remembers previously found issues |
 | Formal sign-off | FAT — Factory Acceptance Test; UAT — User Acceptance Testing (ISTQB); DO-178C certification (RTCA, 2012) | Final report serves as a verifiable completion artifact |

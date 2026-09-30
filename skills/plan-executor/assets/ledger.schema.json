@@ -2,30 +2,156 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "plan-executor ledger",
   "type": "object",
-  "required": ["version", "plan_path", "input_type", "created_at", "units"],
+  "required": [
+    "version",
+    "plan_path",
+    "input_type",
+    "created_at",
+    "units"
+  ],
   "properties": {
-    "version": {"type": "integer", "const": 1},
-    "plan_path": {"type": "string"},
-    "input_type": {"type": "string", "enum": ["staged", "whole"]},
-    "created_at": {"type": "string"},
+    "version": {
+      "type": "integer",
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "plan_path": {
+      "type": "string"
+    },
+    "input_type": {
+      "type": "string",
+      "enum": [
+        "staged",
+        "whole"
+      ]
+    },
+    "created_at": {
+      "type": "string"
+    },
     "units": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "title", "weight", "status", "attempts", "depends", "parallel_group", "last_error", "checkpoint_id"],
+        "required": [
+          "id",
+          "title",
+          "weight",
+          "status",
+          "attempts",
+          "depends",
+          "parallel_group",
+          "last_error",
+          "checkpoint_id"
+        ],
         "properties": {
-          "id": {"type": "string"},
-          "title": {"type": "string"},
-          "weight": {"type": "string", "enum": ["green", "yellow", "red"]},
-          "status": {"type": "string", "enum": ["pending", "running", "done", "failed"]},
-          "attempts": {"type": "integer", "minimum": 0},
-          "depends": {"type": "array", "items": {"type": "string"}},
-          "parallel_group": {"type": ["string", "null"]},
-          "last_error": {"type": ["string", "null"]},
-          "previous_error": {"type": ["string", "null"]},
-          "checkpoint_id": {"type": ["string", "null"]}
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "weight": {
+            "type": "string",
+            "enum": [
+              "green",
+              "yellow",
+              "red"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "done",
+              "failed"
+            ]
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "depends": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "parallel_group": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "checkpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "line_start": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "line_end": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          }
         }
-      }
+      },
+      "minItems": 1
+    },
+    "source_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "SHA-256 of the plan or roadmap the units came from; plan-drift check"
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Snapshot namespace: refs/plan-executor/<run_id>/<unit>"
+    },
+    "workdir": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "baseline_checkpoint": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   }
 }

@@ -1,7 +1,7 @@
-# Stage {{NN}}: {{TITLE}}
+# Stage {{ID}}: {{TITLE}}
 
 > Source: [{{BASE_NAME}}.md](./{{BASE_NAME}}.md)
-> Roadmap: [{{BASE_NAME}}-stg00-roadmap.md](./{{BASE_NAME}}-stg00-roadmap.md)
+> Roadmap: [{{BASE_NAME}}-roadmap.md](./{{BASE_NAME}}-roadmap.md)
 > Depends on: {{DEPENDS_ON_OR_DASH}}
 > Blocks: {{BLOCKS_OR_DASH}}
 > Weight: {{WEIGHT}}
@@ -13,8 +13,8 @@
 ## Inputs
 
 {{INPUTS:
-- If depends = "—" → "Original plan: [link]. No specific inputs."
-- If depends = stgXX → list concrete artifacts/state handed off from stgXX}}
+- no dependencies → "Original plan: [link]. No specific inputs."
+- depends on X → the concrete artifacts/state handed off by part X}}
 
 ## Tasks
 
@@ -29,7 +29,7 @@
 
 ## Outputs (handoff)
 
-{{HANDOFF: what this stage passes to downstream stages — artifacts, state, context}}
+{{HANDOFF: what this part passes to downstream parts — artifacts, state, context}}
 
 ## Notes
 

@@ -66,13 +66,38 @@ None.
 """
 
 
+ROADMAP = """# Roadmap: plan
+
+## Overview
+Two parts.
+
+## Dependency graph
+
+| Stage | Title | Depends on | Parallel group | Weight |
+|---|---|---|---|---|
+| a | First | — | A | 🟢 light |
+| b | Second | a | B | 🟢 light |
+
+```mermaid
+graph LR
+    a --> b
+```
+
+## Stages
+
+### a: First
+### b: Second
+"""
+
+
 def make_stage_dir(directory: Path, base: str = "plan") -> None:
-    write(directory / f"{base}-stg01.md", stage_text("Stage 01"))
-    write(directory / f"{base}-stg02.md", stage_text("Stage 02"))
+    write(directory / f"{base}-roadmap.md", ROADMAP)
+    write(directory / f"{base}-a.md", stage_text("Stage a"))
+    write(directory / f"{base}-b.md", stage_text("Stage b"))
 
 
 def baseline_for(directory: Path, base: str, stages: str = "all") -> Path:
-    baseline_path = directory / f"{base}-stg00-verify-baseline.json"
+    baseline_path = directory / f"{base}-verify-baseline.json"
     process = run_tool("verify-baseline", str(directory), base, "--stages", stages)
     if process.returncode != 0:
         raise AssertionError(process.stdout + process.stderr)
@@ -163,7 +188,7 @@ def ledger_data(base: str, stage: str, result: str, remaining_issues: int = 0, v
     }
 
 
-def run_status(directory: Path, base: str, baseline_path: Path, ledger_path: Path, stages: str = "stg01") -> subprocess.CompletedProcess[str]:
+def run_status(directory: Path, base: str, baseline_path: Path, ledger_path: Path, stages: str = "a") -> subprocess.CompletedProcess[str]:
     return run_tool(
         "verify-status", str(directory), base,
         "--baseline", str(baseline_path),
@@ -179,15 +204,15 @@ class VerifyBaselineTests(unittest.TestCase):
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            write(directory / f"{base}-stg01-review-1.md", "# existing review\n")
+            write(directory / f"{base}-a-review-1.md", "# existing review\n")
 
             process = run_tool("verify-baseline", str(directory), base, "--stages", "all")
 
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
             data = read_json(process)
-            self.assertEqual(data["stages"]["stg01"]["stg_sha"], sha256(directory / f"{base}-stg01.md"))
-            self.assertEqual(data["stages"]["stg01"]["review_files"], [f"{base}-stg01-review-1.md"])
-            self.assertEqual(data["stages"]["stg02"]["review_files"], [])
+            self.assertEqual(data["stages"]["a"]["stg_sha"], sha256(directory / f"{base}-a.md"))
+            self.assertEqual(data["stages"]["a"]["review_files"], [f"{base}-a-review-1.md"])
+            self.assertEqual(data["stages"]["b"]["review_files"], [])
 
 
 class VerifyStatusBasicTests(unittest.TestCase):
@@ -196,22 +221,22 @@ class VerifyStatusBasicTests(unittest.TestCase):
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write_json(ledger_path, ledger_data(base, "stg01", "clean"))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write_json(ledger_path, ledger_data(base, "a", "clean"))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-            self.assertEqual(read_json(process)["stages"]["stg01"]["verdict"], "satisfied")
+            self.assertEqual(read_json(process)["stages"]["a"]["verdict"], "satisfied")
 
     def test_missing_ledger_entry_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
             write_json(ledger_path, {
                 "base_name": base,
                 "verify_mode": "full-cycle",
@@ -221,7 +246,7 @@ class VerifyStatusBasicTests(unittest.TestCase):
             process = run_status(directory, base, baseline_path, ledger_path)
 
             self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
-            self.assertEqual(read_json(process)["stages"]["stg01"]["verdict"], "missing")
+            self.assertEqual(read_json(process)["stages"]["a"]["verdict"], "missing")
 
 
 class VerifyStatusConvergedTests(unittest.TestCase):
@@ -230,107 +255,107 @@ class VerifyStatusConvergedTests(unittest.TestCase):
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write(directory / f"{base}-stg01-review-1.md", valid_review_text(f"{base}-stg01"))
-            write(directory / f"{base}-stg01.md", stage_text("Stage 01") + "\nImplemented fix.\n")
-            write_json(ledger_path, ledger_data(base, "stg01", "converged"))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write(directory / f"{base}-a-review-1.md", valid_review_text(f"{base}-a"))
+            write(directory / f"{base}-a.md", stage_text("Stage a") + "\nImplemented fix.\n")
+            write_json(ledger_path, ledger_data(base, "a", "converged"))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             data = read_json(process)
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-            self.assertTrue(data["stages"]["stg01"]["reviews_validated"])
-            self.assertEqual(data["stages"]["stg01"]["verdict"], "satisfied")
+            self.assertTrue(data["stages"]["a"]["reviews_validated"])
+            self.assertEqual(data["stages"]["a"]["verdict"], "satisfied")
 
     def test_converged_without_file_inconsistent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write(directory / f"{base}-stg01.md", stage_text("Stage 01") + "\nImplemented fix.\n")
-            write_json(ledger_path, ledger_data(base, "stg01", "converged"))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write(directory / f"{base}-a.md", stage_text("Stage a") + "\nImplemented fix.\n")
+            write_json(ledger_path, ledger_data(base, "a", "converged"))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             data = read_json(process)
             self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
-            self.assertFalse(data["stages"]["stg01"]["reviews_validated"])
-            self.assertEqual(data["stages"]["stg01"]["verdict"], "inconsistent")
+            self.assertFalse(data["stages"]["a"]["reviews_validated"])
+            self.assertEqual(data["stages"]["a"]["verdict"], "inconsistent")
 
     def test_converged_stub_review_inconsistent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write(directory / f"{base}-stg01-review-1.md", "# placeholder\n")
-            write(directory / f"{base}-stg01.md", stage_text("Stage 01") + "\nImplemented fix.\n")
-            write_json(ledger_path, ledger_data(base, "stg01", "converged"))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write(directory / f"{base}-a-review-1.md", "# placeholder\n")
+            write(directory / f"{base}-a.md", stage_text("Stage a") + "\nImplemented fix.\n")
+            write_json(ledger_path, ledger_data(base, "a", "converged"))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             data = read_json(process)
             self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
-            self.assertFalse(data["stages"]["stg01"]["reviews_validated"])
-            self.assertEqual(data["stages"]["stg01"]["verdict"], "inconsistent")
+            self.assertFalse(data["stages"]["a"]["reviews_validated"])
+            self.assertEqual(data["stages"]["a"]["verdict"], "inconsistent")
 
     def test_converged_wrong_fingerprint_inconsistent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write(directory / f"{base}-stg01-review-1.md", valid_review_text(f"{base}-stg01", wrong_fingerprint=True))
-            write(directory / f"{base}-stg01.md", stage_text("Stage 01") + "\nImplemented fix.\n")
-            write_json(ledger_path, ledger_data(base, "stg01", "converged"))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write(directory / f"{base}-a-review-1.md", valid_review_text(f"{base}-a", wrong_fingerprint=True))
+            write(directory / f"{base}-a.md", stage_text("Stage a") + "\nImplemented fix.\n")
+            write_json(ledger_path, ledger_data(base, "a", "converged"))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             data = read_json(process)
             self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
-            self.assertFalse(data["stages"]["stg01"]["reviews_validated"])
-            self.assertEqual(data["stages"]["stg01"]["verdict"], "inconsistent")
+            self.assertFalse(data["stages"]["a"]["reviews_validated"])
+            self.assertEqual(data["stages"]["a"]["verdict"], "inconsistent")
 
     def test_converged_pragmatic_remaining_issues_warns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write(directory / f"{base}-stg01-review-1.md", valid_review_text(f"{base}-stg01"))
-            write_json(ledger_path, ledger_data(base, "stg01", "converged", remaining_issues=2))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write(directory / f"{base}-a-review-1.md", valid_review_text(f"{base}-a"))
+            write_json(ledger_path, ledger_data(base, "a", "converged", remaining_issues=2))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             data = read_json(process)
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-            self.assertTrue(data["stages"]["stg01"]["reviews_validated"])
-            self.assertFalse(data["stages"]["stg01"]["stg_sha_changed"])
-            self.assertEqual(data["stages"]["stg01"]["verdict"], "satisfied_with_warning")
+            self.assertTrue(data["stages"]["a"]["reviews_validated"])
+            self.assertFalse(data["stages"]["a"]["stg_sha_changed"])
+            self.assertEqual(data["stages"]["a"]["verdict"], "satisfied_with_warning")
 
     def test_converged_audit_only_no_change_warns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write(directory / f"{base}-stg01-review-1.md", valid_review_text(f"{base}-stg01"))
-            write_json(ledger_path, ledger_data(base, "stg01", "converged", verify_mode="audit-only"))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write(directory / f"{base}-a-review-1.md", valid_review_text(f"{base}-a"))
+            write_json(ledger_path, ledger_data(base, "a", "converged", verify_mode="audit-only"))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             data = read_json(process)
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-            self.assertTrue(data["stages"]["stg01"]["reviews_validated"])
-            self.assertFalse(data["stages"]["stg01"]["stg_sha_changed"])
-            self.assertEqual(data["stages"]["stg01"]["verdict"], "satisfied_with_warning")
+            self.assertTrue(data["stages"]["a"]["reviews_validated"])
+            self.assertFalse(data["stages"]["a"]["stg_sha_changed"])
+            self.assertEqual(data["stages"]["a"]["verdict"], "satisfied_with_warning")
 
 
 class VerifyStatusHonestFailTests(unittest.TestCase):
@@ -339,50 +364,106 @@ class VerifyStatusHonestFailTests(unittest.TestCase):
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write(directory / f"{base}-stg01-review-1.md", valid_review_text(f"{base}-stg01"))
-            write_json(ledger_path, ledger_data(base, "stg01", "limit", remaining_issues=2))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write(directory / f"{base}-a-review-1.md", valid_review_text(f"{base}-a"))
+            write_json(ledger_path, ledger_data(base, "a", "limit", remaining_issues=2))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             data = read_json(process)
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-            self.assertTrue(data["stages"]["stg01"]["reviews_validated"])
-            self.assertEqual(data["stages"]["stg01"]["verdict"], "satisfied_with_warning")
+            self.assertTrue(data["stages"]["a"]["reviews_validated"])
+            self.assertEqual(data["stages"]["a"]["verdict"], "satisfied_with_warning")
 
     def test_limit_without_review_inconsistent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write_json(ledger_path, ledger_data(base, "stg01", "limit", remaining_issues=2))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write_json(ledger_path, ledger_data(base, "a", "limit", remaining_issues=2))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             data = read_json(process)
             self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
-            self.assertFalse(data["stages"]["stg01"]["reviews_validated"])
-            self.assertEqual(data["stages"]["stg01"]["verdict"], "inconsistent")
+            self.assertFalse(data["stages"]["a"]["reviews_validated"])
+            self.assertEqual(data["stages"]["a"]["verdict"], "inconsistent")
 
     def test_escalated_with_final_review_warns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             base = "plan"
             make_stage_dir(directory, base)
-            baseline_path = baseline_for(directory, base, "stg01")
-            ledger_path = directory / f"{base}-stg00-verify-ledger.json"
-            write(directory / f"{base}-stg01-review-1.md", valid_review_text(f"{base}-stg01"))
-            write_json(ledger_path, ledger_data(base, "stg01", "escalated", remaining_issues=3))
+            baseline_path = baseline_for(directory, base, "a")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            write(directory / f"{base}-a-review-1.md", valid_review_text(f"{base}-a"))
+            write_json(ledger_path, ledger_data(base, "a", "escalated", remaining_issues=3))
 
             process = run_status(directory, base, baseline_path, ledger_path)
 
             data = read_json(process)
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-            self.assertTrue(data["stages"]["stg01"]["reviews_validated"])
-            self.assertEqual(data["stages"]["stg01"]["verdict"], "satisfied_with_warning")
+            self.assertTrue(data["stages"]["a"]["reviews_validated"])
+            self.assertEqual(data["stages"]["a"]["verdict"], "satisfied_with_warning")
+
+
+class VerifyRecordTests(unittest.TestCase):
+    def test_record_writes_ledger_from_batch_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            base = "plan"
+            make_stage_dir(directory, base)
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            results = {"parts": {"a": {"result": "clean", "iterations": 0, "remaining_issues": 0},
+                                 "B": {"result": "bogus", "iterations": 1, "remaining_issues": 2}}}
+            process = subprocess.run(
+                [sys.executable, str(TOOL), "verify-record", str(directory), base,
+                 "--results", "-", "--ledger", str(ledger_path), "--mode", "audit-only"],
+                text=True, capture_output=True, encoding="utf-8", input=json.dumps(results),
+            )
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+            self.assertEqual(ledger["verify_mode"], "audit-only")
+            self.assertEqual(ledger["stages"]["a"]["result"], "clean")
+            self.assertEqual(ledger["stages"]["a"]["attempts"], 1)
+            self.assertIsNone(ledger["stages"]["b"]["result"])
+            self.assertIn("invalid result", ledger["stages"]["b"]["error"])
+            # Second record (re-dispatch) increments attempts and keeps the other entry.
+            results = {"parts": {"b": {"result": "converged", "iterations": 1, "remaining_issues": 0}}}
+            process = subprocess.run(
+                [sys.executable, str(TOOL), "verify-record", str(directory), base,
+                 "--results", "-", "--ledger", str(ledger_path)],
+                text=True, capture_output=True, encoding="utf-8", input=json.dumps(results),
+            )
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+            self.assertEqual(ledger["stages"]["b"]["attempts"], 2)
+            self.assertEqual(ledger["stages"]["a"]["result"], "clean")
+
+    def test_baseline_all_follows_roadmap_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            make_stage_dir(directory, "plan")
+            write(directory / "plan-db.md", "# not a part\n")
+            data = read_json(run_tool("verify-baseline", str(directory), "plan", "--stages", "all"))
+            self.assertEqual(list(data["stages"]), ["a", "b"])
+
+    def test_status_accepts_upper_and_space_separated_stage_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            base = "plan"
+            make_stage_dir(directory, base)
+            baseline_path = baseline_for(directory, base, "all")
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            ledger = ledger_data(base, "a", "clean")
+            ledger["stages"]["b"] = dict(ledger["stages"]["a"])
+            write_json(ledger_path, ledger)
+            process = run_status(directory, base, baseline_path, ledger_path, stages="A b")
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            self.assertEqual(set(read_json(process)["stages"]), {"a", "b"})
 
 
 if __name__ == "__main__":

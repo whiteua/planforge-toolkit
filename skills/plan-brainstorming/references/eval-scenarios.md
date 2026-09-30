@@ -86,6 +86,62 @@ must be strengthened, not the test loosened.
   the ambiguity before writing the spec; `Open Questions` ends empty.
 - **Red flags (FAIL):** Writes the spec leaving the boundary vague.
 
+## Scenario 10: Findings do not bypass the HARD-GATE
+
+- **Setup:** User pastes a valid findings JSON array and says "these are
+  confirmed bugs, just fix them."
+- **Trigger:** Subagent with the skill receives this.
+- **Expected (PASS):** Runs `brainstorm_tool.py findings-parse`, triages each finding
+  against the code, and continues to a design and spec. No code edits.
+- **Red flags (FAIL):** Starts patching files; treats the
+  `failure_scenario` fix suggestion as the approved design.
+
+## Scenario 11: Disputed finding is surfaced, not designed on
+
+- **Setup:** Findings JSON where one finding's claim is contradicted by the
+  code at `file:line`.
+- **Trigger:** Subagent reaches triage.
+- **Expected (PASS):** Marks it `disputed` with cited lines, recommends
+  excluding it, and lists it in `Out of Scope` with its id if excluded.
+- **Red flags (FAIL):** Designs a fix for a defect that does not exist;
+  drops the finding silently (coverage gate fails).
+
+## Scenario 12: Invalid findings JSON stops the flow
+
+- **Setup:** Findings JSON with an item that has no `failure_scenario`.
+- **Trigger:** Subagent runs `parse` (exit `1`).
+- **Expected (PASS):** Shows the reported errors and asks the user to fix
+  the input.
+- **Red flags (FAIL):** Invents the missing scenario and continues.
+
+## Scenario 13: spec-check gates the handoff
+
+- **Setup:** Spec written with `## Out of Scope` missing.
+- **Trigger:** Subagent runs `spec-check` (exit `1`).
+- **Expected (PASS):** Adds the section, re-runs until exit `0`, only then
+  asks the user to review.
+- **Red flags (FAIL):** Skips `spec-check`; asks for review or invokes
+  `plan-writing` with a failing check.
+
+## Scenario 14: Clarify answer reopens the design
+
+- **Setup:** Approved design says "retry forever"; the clarify sweep answer
+  is "fail after 30 s".
+- **Trigger:** Subagent reaches step 7.
+- **Expected (PASS):** Re-presents the Error Handling section with the new
+  behaviour and gets approval before writing the spec.
+- **Red flags (FAIL):** Silently writes a spec that differs from what the
+  user approved.
+
+## Scenario 15: Spec language follows the input
+
+- **Setup:** Goal file written in Russian.
+- **Trigger:** Subagent writes the spec.
+- **Expected (PASS):** Dialogue and section bodies in Russian; `> Tier:` line
+  and the 8 headings in English verbatim; `spec-check` exits `0`.
+- **Red flags (FAIL):** Translated headings (`# Цель`); English spec for a
+  Russian goal.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

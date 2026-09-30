@@ -65,9 +65,9 @@ Each skill is an independent module with a well-defined input, output, and invar
            │
     ┌──────▼──────┐        ┌─────────────────────────┐
     │ large plan? │──yes──►│      plan-splitter       │
-    └──────┬──────┘        │  Plan → stg00-roadmap.md │
+    └──────┬──────┘        │  Plan → <base>-roadmap.md│
            │ no            └──────────┬──────────────┘
-           │                         │ stgNN.md
+           │                         │ <base>-a.md, -b.md…
            └─────────────┬───────────┘
                          │
 ┌────────────────────────▼────────────────────────────┐
@@ -94,7 +94,10 @@ plan-iterative-revision  — use at any stage to clean up a plan before executio
 **Invoke:**
 ```
 /plan-brainstorming <goal-file-or-inline-description>
+/plan-brainstorming <findings.json>   # JSON list of code-review findings
 ```
+
+With a findings JSON (`file`, `line`, `summary`, `failure_scenario` per item), the skill validates the list, checks each finding against the code, and writes a fix spec. The spec traces every finding id to a fix or to Out of Scope.
 
 **Process:**
 1. Explores project context (files, docs, commits)
@@ -103,9 +106,11 @@ plan-iterative-revision  — use at any stage to clean up a plan before executio
 4. Asks clarifying questions one at a time
 5. Proposes 2–3 approaches with trade-offs
 6. Presents design section by section, asks for approval
-7. Runs ambiguity sweep — closes all open questions
-8. Writes the spec file and runs self-review
-9. Hands off to `plan-writing`
+7. Runs ambiguity sweep — closes all open questions (re-presents a design section if an answer changes it)
+8. Writes the spec file, checks the contract with `brainstorm_tool.py spec-check`, runs self-review
+9. Hands off to `plan-writing` after you approve the spec (the spec is not committed automatically)
+
+The dialogue and the spec body follow the language of your input; section headings stay in English.
 
 **Output:** `*-spec.md` in the same directory as the goal file.
 
@@ -130,18 +135,16 @@ plan-iterative-revision  — use at any stage to clean up a plan before executio
 /plan-writing <spec-path>
 ```
 
-**Prerequisites:** The spec must pass a 4-point contract check before the skill proceeds:
-1. Spec file exists.
-2. All 8 required headings are present.
-3. No required section is empty.
-4. `## Open Questions` is empty (or `(none)`).
+**Prerequisites:** The spec must pass `plan-brainstorming`'s `brainstorm_tool.py spec-check` before the skill proceeds: all 8 required headings in order, no empty section, `## Open Questions` empty (or `(none)`).
 
-**Output:** `*-impl.md` in the same directory as the spec.
+**Output:** `<X>-impl.md` next to `<X>-spec.md`. The header carries `**Spec:**` and `**Tier:**`; tasks use `### Task N: <title>` headings, the format `plan-executor` and `plan-resolver` parse. `scripts/plan_tool.py plan-check` verifies that contract before handoff.
 
 Each task in the plan specifies:
 - Files to touch
 - Exact steps (2–5 min each)
 - How to test / verify done-state
+
+Plans contain no `git commit` steps; committing the result is up to you. An optional `### Task N: Checkpoint — …` task smoke-tests a group of tasks (Standard/Deep).
 
 ---
 
@@ -160,14 +163,14 @@ Each task in the plan specifies:
 
 | File | Purpose |
 |---|---|
-| `<base>-stg00-roadmap.md` | Stage map with dependencies and parallel groups |
-| `<base>-stg01.md` … `<base>-stgNN.md` | Self-contained stage files |
+| `<base>-roadmap.md` | Part map with dependencies and parallel groups |
+| `<base>-a.md`, `<base>-b.md`, … | Self-contained part files (letters continue with `aa`, `ab`, …) |
 
 ---
 
 ### plan-executor
 
-**Purpose:** Execute a ready plan or staged roadmap one unit at a time with ledger-backed progress tracking, gates, and checkpoints.
+**Purpose:** Execute a ready plan or staged roadmap one unit at a time with ledger-backed progress tracking, gates, and rollback snapshots.
 
 **Invoke:**
 ```
@@ -178,18 +181,19 @@ Each task in the plan specifies:
 
 | Input | Detection | Behavior |
 |---|---|---|
-| Staged roadmap (`-stg00-roadmap.md`) | Has stage table + dependencies | Executes stages in dependency order |
-| Whole plan (with `### Task N:` headings) | Has explicit task headings | Executes tasks sequentially |
+| Staged roadmap (`-roadmap.md`) | Has part table + dependencies | Executes parts in dependency order |
+| Whole plan (with `### Task N:` headings) | Task headings outside code blocks | Executes tasks strictly in order; a failed task is retried before anything else |
 
 **Phases:**
-1. **BOOTSTRAP** — detect input, parse units, initialize ledger, detect checkpoints
-2. **EXECUTE LOOP** — claim unit → execute → gate → checkpoint → mark done
-3. **FINALIZE** — propose `plan-resolver` options
+1. **BOOTSTRAP** — `ledger-init`: parse units, create or resume the ledger (stops on a dirty repo or a changed plan), baseline snapshot
+2. **LOOP** — `unit-begin` (unit text + files) → execute → gate → `unit-finish` (snapshot + done, or retry/stop)
+3. **FINALIZE** — propose `plan-resolver` (audit, or `auto` to audit and fix)
 
 **Invariants:**
 - Never edits source plan or stage files.
 - Progress lives only in `state.json`.
-- Destructive operations require explicit engineer confirmation.
+- Nothing is committed to your branch: snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`; the final commit is yours.
+- Destructive operations (restore) require explicit engineer confirmation.
 - A gate cannot pass silently when checks are absent.
 
 **Prerequisites:** Python ≥ 3.8 in PATH.
@@ -211,7 +215,7 @@ Each task in the plan specifies:
 |---|---|---|---|
 | `quick` | 1 | grep-level | 3 |
 | `standard` | 2 | read-level | 5 |
-| `deep` | 3 + red-team L4 | explore | 7 |
+| `deep` | 4 (incl. red-team L4) | explore | 7 |
 
 **Modes:**
 - `full-cycle` (default) — audit → fix → repeat
@@ -219,26 +223,32 @@ Each task in the plan specifies:
 
 **Stop conditions:**
 - No issues found → "Plan is clean"
-- Max iterations reached → asks: continue / stop
-- Stagnation (same issues repeat) → auto-stop
+- Max iterations reached → asks: +3 / +5 / stop (autonomous runs stop with `limit`)
+- Same issue set as the previous audit, or nothing resolved for 2 audits → stagnation
+- A previously resolved issue comes back, or one issue survives 3 audits → escalation
 - Only nits remain (`pragmatic` policy) → stop
+
+Stop decisions use only the reviews of the current run.
 
 **Output:** `<plan-basename>-review-N.md` per iteration; `<plan-basename>-completion.md` on convergence.
 
-**Prerequisites:** Python ≥ 3.8 in PATH. File write tools must be available.
+**Prerequisites:** Python ≥ 3.8 in PATH. The plan's directory must be writable.
 
 ---
 
 ### plan-resolver
 
-**Purpose:** Audit how well a plan was implemented in code. Produces a structured report — never modifies code or the plan.
+**Purpose:** Audit how well a plan was implemented in code. Produces a structured report. Optional `fix`/`next`/`auto` modes repair the code from the report and re-audit; the plan is never modified.
 
 **Invoke:**
 ```
-/plan-resolver <plan-path> [previous-report-1] [previous-report-2] ...
+/plan-resolver <plan-path> [previous-report-1] [previous-report-2] ...   # audit
+/plan-resolver [plan-path] fix     # fix the latest open report's issues, then re-audit once
+/plan-resolver [plan-path] next    # same as fix; use after auto stops
+/plan-resolver <plan-path> auto [limit]   # audit → fix → audit until final, max 2 fix cycles by default
 ```
 
-Always provide the full list of previous reports for delta analysis.
+In audit mode, always provide the full list of previous reports for delta analysis. `fix`/`next`/`auto` discover the reports next to the plan. The fix phase records each outcome (`applied` / `needs-user` / `skipped`) in the report's "Fix Log" section; only the following audit can mark an issue `✅ fixed`. Code changes are left uncommitted.
 
 **Report types:**
 
@@ -256,7 +266,7 @@ Always provide the full list of previous reports for delta analysis.
 | ❌ | Not implemented or critically wrong |
 | N/A | Not applicable |
 
-**Invariants:** The resolver never edits code, the plan, or previous reports. It never creates multiple reports per invocation.
+**Invariants:** The resolver never edits the plan. An audit pass never edits code or previous reports and creates exactly one report. The fix phase edits code only; previous reports change only through the Fix Log (`mark-fix`).
 
 **Prerequisites:** Python ≥ 3.8 in PATH.
 
@@ -466,9 +476,9 @@ done
 /plan-brainstorming  ...
 /plan-writing        ...  → plan01-impl.md
 /plan-splitter docs/plans/plan01-impl.md
-  → saves: plan01-stg00-roadmap.md, plan01-stg01.md … plan01-stg05.md
+  → saves: plan01-impl-roadmap.md, plan01-impl-a.md … plan01-impl-e.md
 
-/plan-executor docs/plans/plan01-stg00-roadmap.md
+/plan-executor docs/plans/plan01-impl-roadmap.md
 /plan-resolver docs/plans/plan01-impl.md
 ```
 
@@ -490,8 +500,8 @@ done
 |---|---|---|
 | `<base>-spec.md` | `plan-brainstorming` | Design spec |
 | `<base>-impl.md` | `plan-writing` | Implementation plan |
-| `<base>-stg00-roadmap.md` | `plan-splitter` | Stage roadmap |
-| `<base>-stgNN.md` | `plan-splitter` | Individual stage |
+| `<base>-roadmap.md` | `plan-splitter` | Part roadmap |
+| `<base>-a.md`, `<base>-b.md`, … | `plan-splitter` | Individual part |
 | `<base>-review-N.md` | `plan-iterative-revision` | Audit review (per iteration) |
 | `<base>-completion.md` | `plan-iterative-revision` | Convergence notice |
 | `<base>-report-N.md` | `plan-resolver` | Implementation audit report |
@@ -506,6 +516,6 @@ done
 | `plan-writing` fails spec contract check | Spec is incomplete | Re-run `plan-brainstorming` to close open sections |
 | `plan-splitter` says "don't split" | Plan is small enough | Proceed directly to `plan-executor` |
 | `plan-executor` gate fails silently | No tests exist | Write at least a smoke test; executor will escalate |
-| `plan-iterative-revision` cannot create review file | Write tools disabled | Enable file write mode in your agent |
+| `plan-iterative-revision` cannot create review file | Plan directory not writable, or no shell/Python for the helper script | Check directory permissions; enable shell commands and Python in your agent |
 | `plan-resolver` reports stagnation | Same issues repeat | Review the stagnated issues manually; update the plan |
 | `plan-writing` cannot find contract files | `plan-brainstorming` not installed in same directory | Install both skills side-by-side |

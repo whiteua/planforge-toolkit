@@ -1,37 +1,31 @@
-# GATE-DECISION — критерии «разбивать / не разбивать»
+# Gate Decision: split or not
 
-Перед декомпозицией скилл выполняет gate decision: стоит ли вообще разбивать план или он уже компактен.
+Before decomposing, decide whether the plan needs splitting at all.
 
-## Факторы оценки
+## Factors
 
-| Фактор | Индикатор «разбивать» | Индикатор «не разбивать» |
-|--------|----------------------|--------------------------|
-| Количество задач | > 15–20 конкретных шагов | ≤ 10 шагов |
-| Доменная сложность | Затрагивает > 3 несвязанных модулей/слоёв | Один модуль, линейный поток |
-| Зависимости | Есть группы задач, блокирующих друг друга | Линейная цепочка без ветвления |
-| Объём контекста | План не помещается в один проход агента | Агент может выполнить за одну сессию |
-| Параллелизм | Есть задачи, выполнимые параллельно | Нет смысла распараллеливать |
+| Factor | Points to "split" | Points to "keep" |
+|---|---|---|
+| Task count | > 15–20 concrete steps | ≤ 10 steps |
+| Domain spread | > 3 unrelated modules or layers | one module, linear flow |
+| Dependencies | groups of tasks that block each other | a linear chain |
+| Context size | does not fit one agent pass | doable in one session |
+| Parallelism | tasks that could run in parallel | nothing to parallelize |
 
-## Правило принятия решения
+## Rule
 
-Решение **«разбивать»**, если выполнено любое из условий:
-- ≥ 2 факторов из таблицы указывают «разбивать»;
-- хотя бы один фактор однозначно блокирует выполнение «в один проход» (объём контекста или доменная сложность).
+Split when **either** ≥ 2 factors point to "split", **or** one factor alone blocks a single pass
+(context size or domain spread). Otherwise keep. In borderline cases prefer "keep": the user
+can re-run the skill if the plan really needs it.
 
-Иначе — **«не разбивать»**.
+The same threshold ("more than 15–20 tasks or several modules") is what `plan-writing`
+suggests at hand-off.
 
-## Действие при «не разбивать»
+## Outcomes
 
-Это головной, видимый пользователю отчёт скилла (не служебный шаг и не ошибка):
-вывести содержимое `assets/gate-pass.<lang>.md` с подстановкой `{{PLAN_PATH}}` и выйти.
-Никаких файлов не создаётся.
+- **Keep**: print `assets/gate-pass.<LANG>.md` with `{{PLAN_PATH}}` filled in and exit. This is
+  the skill's visible result, not an error; no files are created.
+- **Split**: continue with step 3 (analysis).
 
-## Действие при «разбивать»
-
-Перейти к шагу 3 (ANALYSIS) основного workflow.
-
-## Замечания
-
-- Gate decision — субъективная оценка агента. Не существует жёсткого порога «делить при N задач».
-- В пограничных случаях (между «компактно» и «средне») предпочесть **gate-pass**: если план реально нуждается в разбиении, пользователь перезапустит скилл.
-- Если план уже состоит из нескольких стадий (есть `## Стадия 1`, `## Стадия 2`...) — это сигнал «разбивать», но переиспользовать существующие границы.
+A plan that already has explicit stages (`## Stage 1`, `## Stage 2`, …) is a "split" signal;
+reuse its boundaries.

@@ -7,7 +7,7 @@ Probes — дополнительные проверки, которые мож�
 - `python -m unittest ...`, если тесты не пишут snapshots/generated files.
 - `pytest ...`, если конфигурация не создаёт/не обновляет артефакты в workspace.
 - `npm test -- --runInBand` или аналогичный read-only test command, если он уже есть в проекте.
-- `npm run build`, `go test`, `cargo test`, `dotnet test` только если команда не меняет tracked/source files.
+- `go test`, `cargo test`, `dotnet test` только если команда не меняет tracked/source files.
 - Static commands: `python -m py_compile`, `tsc --noEmit`, `eslint` без `--fix`.
 
 ## Forbidden

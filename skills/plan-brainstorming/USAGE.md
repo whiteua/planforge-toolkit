@@ -18,6 +18,9 @@ In VS Code Copilot chat, type:
 
 # Without a file — just describe the idea after the command
 /plan-brainstorming I want to add WebSocket support to the notification system
+
+# With a JSON list of code-review findings (file or pasted inline)
+/plan-brainstorming .docs/reviews/review01.json
 ```
 
 You can also simply describe your idea in chat and mention "brainstorming" / "design" / "spec".
@@ -27,17 +30,30 @@ You can also simply describe your idea in chat and mention "brainstorming" / "de
 | Argument | Required | Description |
 |---|---|---|
 | Goal file path | Optional | Path to a `.md` file describing the idea. If omitted, describe the idea inline after the command. |
+| Findings JSON | Optional | Path to a `.json` file (or inline JSON) with an array of findings: `file`, `line` (optional), `summary`, `failure_scenario`. Switches to findings mode. |
+
+### Findings mode
+
+The input is a list of defects instead of an idea. The agent:
+
+1. Validates the JSON with `scripts/brainstorm_tool.py findings-parse` and assigns ids `F1`..`Fn`.
+2. Checks every finding against the code: `confirmed`, `partial`, `disputed`, or `stale` (more than 10 findings: split across subagents when the host supports them).
+3. Asks which findings go into this spec, then runs the normal flow.
+4. Writes a `### Findings Traceability` table under `## Components`. Excluded findings go to `## Out of Scope`.
+5. Runs `brainstorm_tool.py findings-coverage` so that no finding id is lost.
+
+Spec path: `review01.json` → `review01-spec.md` next to it. With inline JSON the agent asks for the path.
 
 ## Process (what happens)
 
-1. Agent explores your project context (files, docs, commits)
+1. Agent explores your project context (files, docs, commits); in findings mode it validates and triages the findings
 2. Offers Visual Companion if visual questions are expected (you can decline)
 3. Proposes a **depth tier** (Quick / Standard / Deep) — you confirm or adjust
 4. Asks clarifying questions **one at a time** (prefer multiple-choice)
 5. Proposes 2–3 approaches with trade-offs and a recommendation
 6. Presents design section by section, asks for approval after each
-7. Runs ambiguity sweep — closes all open questions
-8. Writes the spec file and runs self-review
+7. Runs ambiguity sweep — closes all open questions; if an answer changes the design, re-presents that section
+8. Writes the spec file, checks it with `brainstorm_tool.py spec-check`, runs self-review (Deep: plus a reviewer subagent)
 9. Asks you to review the written spec
 10. On approval → invokes `plan-writing`
 
@@ -51,7 +67,9 @@ You can also simply describe your idea in chat and mention "brainstorming" / "de
 
 ## Output
 
-A spec file saved to `<dir>/<plan-root>-spec.md` next to the plan/goal file (or user-specified path).
+A spec file saved to `<dir>/<plan-root>-spec.md` next to the goal file (or user-specified path). The skill does not commit it.
+
+Language: the dialogue and the spec body follow the language of your input (a Russian goal gives a Russian spec). The `> Tier:` line and the section headings stay in English.
 
 Required sections: Goal, Architecture, Components, Data Flow, Error Handling, Testing Strategy, Out of Scope, Open Questions.
 
@@ -68,8 +86,10 @@ Required sections: Goal, Architecture, Components, Data Flow, Error Handling, Te
 | Symptom | Cause | Fix |
 |---|---|---|
 | Spec not written | Design not approved yet | Approve each section when asked |
-| plan-writing not invoked | Open Questions remain | Answer all ambiguity questions |
+| plan-writing not invoked | Open Questions remain or `spec-check` fails | Answer all ambiguity questions; the agent fixes the spec structure |
 | Visual Companion not working | Browser tools unavailable | Decline the companion; proceed text-only |
+| Mockup files appear in the repo | Companion sessions persist in `.planforge/brainstorm/` | Add `.planforge/` to `.gitignore` |
+| Findings mode stops right away | `brainstorm_tool.py findings-parse` reported errors (missing field, bad `line`, invalid JSON) | Fix the listed items in the JSON and re-run |
 
 ## Pipeline Position
 

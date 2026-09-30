@@ -9,9 +9,10 @@ Turn ideas into approved designs and specs through collaborative dialogue:
 understand the project context, ask questions one at a time, present the
 design, get approval, write the spec, hand off to `plan-writing`.
 
-Vocabulary (spec, plan, task, step, tier) and handoff rules:
-`references/plan-lifecycle.md`. Spec structure: `references/spec-contract.md`.
-Read them when you reach step 8, not before.
+References are read at the step that needs them: `references/depth-tiers.md` at step 2,
+`references/clarify-checklist.md` at step 7, `references/spec-contract.md` (spec structure,
+naming, hand-off) at step 6 before presenting the design, `references/findings-input.md`
+before step 1 in findings mode.
 
 <HARD-GATE>
 Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.
@@ -52,14 +53,14 @@ Exit codes: `0` ok, `1` check failed, `2` bad input or I/O error.
 
 ## Checklist
 
-Complete these steps in order. On Standard and Deep, track each step as a
-task. On Quick, one task for the whole checklist is enough.
+Complete these steps in order. On Standard and Deep, keep them as todo items; on Quick, one
+item for the whole checklist is enough.
 
-1. **Explore project context** — files, docs, recent commits. Findings mode: parse and triage the findings (`references/findings-input.md` Steps A-B).
-2. **Offer the visual companion** — only if visual questions are ahead. Its own message (see Visual Companion).
-3. **Determine depth tier** — auto-classify Quick/Standard/Deep, state it, let the user confirm or adjust (`references/depth-tiers.md`).
-4. **Ask clarifying questions** — purpose, constraints, success criteria (see Asking Questions).
-5. **Propose 2-3 approaches** — with trade-offs; lead with your recommendation and why.
+1. **Explore project context** — files, docs, recent commits. Restate the request in one sentence: this is the fidelity anchor for step 9. Findings mode: parse and triage the findings (`references/findings-input.md` Steps A-B).
+2. **Determine depth tier** — auto-classify Quick/Standard/Deep, state it, let the user confirm or adjust (`references/depth-tiers.md`). Findings mode: show the triage table in the same message.
+3. **Offer the visual companion** — only when the questions ahead are visual (layouts, flows, comparisons). Its own message (see Visual Companion); skip it otherwise.
+4. **Ask clarifying questions** — purpose, constraints, success criteria (see Asking Questions). Findings mode: first the scope question (`references/findings-input.md` Step C).
+5. **Propose approaches** — Standard/Deep: 2-3 with trade-offs, lead with your recommendation and why. Quick: one approach, unless a real fork exists.
 6. **Present the design** — in sections scaled to the tier; get approval after each section.
 7. **Close underspecified areas** — ambiguity sweep (`references/clarify-checklist.md`) until `Open Questions` can be `(none)`. If an answer changes the approved design, re-present the affected section and get approval again.
 8. **Write the spec** — see Writing the Spec. Run `spec-check` (and `findings-coverage` in findings mode) until both exit `0`.
@@ -72,7 +73,7 @@ The terminal state is invoking `plan-writing`. Do not invoke any other skill aft
 
 - Assess scope first. If the request covers several independent subsystems (e.g. "a platform with chat, file storage, billing, and analytics"), say so immediately and help decompose it: the pieces, how they relate, the build order. Then brainstorm the first sub-project. Each sub-project gets its own spec → plan → implementation cycle.
 - **Investigate before asking.** If the code, docs, or commits answer a question, find the answer yourself.
-- **Verify claims about existing code.** When the user describes how code behaves, check it. If the code disagrees, surface the contradiction before designing on it.
+- **Verify claims about existing code.** When the user describes how code behaves, check it. If the code disagrees, surface the contradiction before designing on it. What you verified goes into the spec as `path:line` citations in Architecture and Components, so `plan-writing` does not rediscover it.
 - Follow existing patterns. Include targeted improvements where existing code blocks the work (a file doing too much, tangled boundaries), but no unrelated refactoring.
 
 ## Asking Questions
@@ -99,7 +100,7 @@ The terminal state is invoking `plan-writing`. Do not invoke any other skill aft
   - No source file (inline idea or inline findings): ask for the path and recommend a default.
   - User preferences for the location override this default.
 - First line: `> Tier: <Quick|Standard|Deep>` with the confirmed tier. `plan-writing` inherits it.
-- Structure: exactly the 8 headings of `references/spec-contract.md`, in order. `Open Questions` is `(none)`.
+- Structure: exactly the 8 headings of `references/spec-contract.md`, in order; `# Goal` is the only H1. `Open Questions` is `(none)`.
 - Short sentences, concrete nouns.
 - Do not commit the spec. Leave version control to the user.
 
@@ -107,9 +108,10 @@ The terminal state is invoking `plan-writing`. Do not invoke any other skill aft
 
 `spec-check` covers structure and placeholder markers. Then read the spec with fresh eyes:
 
-1. **Consistency** — no sections contradict each other; the architecture matches the components.
-2. **Scope** — one implementation plan's worth, or does it need decomposition?
-3. **Ambiguity** — a requirement with two readings gets one, made explicit.
+1. **Fidelity** — compare `# Goal` and `## Out of Scope` with the one-sentence restatement from step 1. Anything the user asked for that is now out of scope, or anything added that they did not ask for, is drift: name it and ask before proceeding.
+2. **Consistency** — no sections contradict each other; the architecture matches the components.
+3. **Scope** — one implementation plan's worth, or does it need decomposition?
+4. **Ambiguity** — a requirement with two readings gets one, made explicit.
 
 Fix issues inline. On the Deep tier, if the host supports subagents, also dispatch a reviewer with `spec-document-reviewer-prompt.md` and fix what it reports.
 

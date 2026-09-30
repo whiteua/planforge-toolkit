@@ -133,8 +133,25 @@ class PlanCheckTest(unittest.TestCase):
                 fh.write("a\nb\nc\n")
             result = self.check(VALID, root)
         self.assertTrue(result["ok"])
-        self.assertEqual(len(result["warnings"]), 2)  # cli.py:4-6 beyond 3 lines; README.md missing
-        self.assertTrue(any("beyond end of cli.py" in w for w in result["warnings"]))
+        self.assertTrue(any("beyond end of cli.py" in w for w in result["warnings"]), result["warnings"])
+        self.assertTrue(any("Modify target not found under root: README.md" in w for w in result["warnings"]), result["warnings"])
+
+    def test_root_checks_create_test_and_referenced_paths(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            for name in ("README.md", "cli.py"):
+                with open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                    fh.write("x\n" * 5)
+            text = VALID.replace("- Modify: `README.md`\n", "- Create: `README.md`\n- Test: `tests/test_new.py`\n", 1)
+            text = text.replace("- [ ] **Step 1: Add the example**", "- [ ] **Step 1: Add the example** (see `docs/missing/notes.md`)", 1)
+            warnings = self.check(text, root)["warnings"]
+            self.assertTrue(any("Create target already exists" in w for w in warnings), warnings)
+            self.assertTrue(any("Test target not found" in w for w in warnings), warnings)
+            self.assertTrue(any("referenced path not found under root: docs/missing/notes.md" in w for w in warnings), warnings)
+            # A file created earlier in the plan is not reported as missing later.
+            text = VALID.replace("- Modify: `README.md`\n", "- Create: `docs/new.md`\n- Test: `docs/new.md`\n", 1)
+            warnings = self.check(text, root)["warnings"]
+            self.assertFalse(any("docs/new.md" in w for w in warnings), warnings)
 
     def test_code_size_warning(self):
         big = "\n".join(f"x{i} = {i}" for i in range(120))

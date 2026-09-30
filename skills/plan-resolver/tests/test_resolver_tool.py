@@ -67,7 +67,7 @@ language: ru
 
 ## Основные стадии плана
 
-- ✅ 1. Подготовка
+- ✅ 1. Подготовка evidence_anchor: src/app.py#L1-L3
 
 ## Список ошибок
 
@@ -81,7 +81,7 @@ language: ru
 
 def report_with_closed_task(final: bool, task_line: str) -> str:
     base = valid_report(final=final)
-    return base.replace("- ✅ 1. Подготовка", "- ✅ 1. Phase\n  " + task_line)
+    return base.replace("- ✅ 1. Подготовка evidence_anchor: src/app.py#L1-L3", "- ✅ 1. Phase\n  " + task_line)
 
 
 class BootstrapTests(unittest.TestCase):
@@ -303,6 +303,48 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, data)
             self.assertEqual(data["consecutive"], 5)
             self.assertTrue(data["ask_required"])
+
+
+class AnchorVerificationTests(unittest.TestCase):
+    def _root(self, tmp: str) -> Path:
+        root = Path(tmp)
+        write(root / "src" / "app.py", "\n".join(f"line {i}" for i in range(1, 21)) + "\n")
+        return root
+
+    def test_valid_anchor_passes_with_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            report = root / "main-plan-report-2-final.md"
+            write(report, report_with_closed_task(True, "- ✅ 1.1 Done evidence_anchor: src/app.py#L10-L20"))
+            process = run_tool("validate-report", str(report), "--root", str(root))
+            self.assertEqual(process.returncode, 0, read_json(process))
+
+    def test_missing_file_and_out_of_range_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            report = root / "main-plan-report-1.md"
+            write(report, report_with_closed_task(False, "- ✅ 1.1 Done evidence_anchor: src/nope.py#L1-L2"))
+            data = read_json(run_tool("validate-report", str(report), "--root", str(root)))
+            self.assertFalse(data["valid"])
+            self.assertTrue(any("anchor file not found" in e for e in data["errors"]), data)
+            write(report, report_with_closed_task(False, "- ✅ 1.1 Done evidence_anchor: src/app.py#L15-L99"))
+            data = read_json(run_tool("validate-report", str(report), "--root", str(root)))
+            self.assertTrue(any("beyond end of file" in e for e in data["errors"]), data)
+
+    def test_issue_evidence_is_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            report = root / "main-plan-report-1.md"
+            write(report, issues_report([("⭕️ not-fixed", "high", "Bug A")]).replace("**evidence**: src/app.py#L1-L3", "**evidence**: src/ghost.py#L1-L3"))
+            data = read_json(run_tool("validate-report", str(report), "--root", str(root)))
+            self.assertTrue(any("issue 1: anchor file not found" in e for e in data["errors"]), data)
+
+    def test_closed_leaf_phase_needs_anchor_in_final(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-2-final.md"
+            write(report, valid_report(final=True).replace(" evidence_anchor: src/app.py#L1-L3", ""))
+            data = read_json(run_tool("validate-report", str(report)))
+            self.assertTrue(any("task '1' with ✅ is missing an evidence anchor" in e for e in data["errors"]), data)
 
 
 class ValidateQualityGateTests(unittest.TestCase):
@@ -726,6 +768,23 @@ def issues_report(issues: list, n: int = 1, extra: str = "") -> str:
     return valid_report().replace(valid_report().split("## Список ошибок\n\n", 1)[1].split("\n\n## Задача", 1)[0], body).replace(
         "# Отчет о выполнении плана 1", f"# Отчет о выполнении плана {n}"
     ) + extra
+
+
+class SnapshotDiffTests(unittest.TestCase):
+    def test_lists_added_removed_modified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+            root = Path(tmp)
+            write(root / "a.py", "a")
+            write(root / "b.py", "b")
+            before = Path(outside) / "before.json"
+            after = Path(outside) / "after.json"
+            self.assertEqual(run_tool("fingerprint-workspace", str(root), str(before)).returncode, 0)
+            write(root / "a.py", "a2")
+            (root / "b.py").unlink()
+            write(root / "c.py", "c")
+            self.assertEqual(run_tool("fingerprint-workspace", str(root), str(after)).returncode, 0)
+            data = read_json(run_tool("snapshot-diff", str(before), str(after)))
+            self.assertEqual((data["added"], data["removed"], data["modified"]), (["c.py"], ["b.py"], ["a.py"]))
 
 
 class MarkFixLineEndings(unittest.TestCase):

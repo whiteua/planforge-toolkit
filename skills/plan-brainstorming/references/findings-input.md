@@ -5,8 +5,6 @@ instead of a free-form idea. The goal is the same: an approved spec that
 satisfies `spec-contract.md`. The findings are the problem statement, not
 the design.
 
-Read together with `spec-contract.md`, `depth-tiers.md` and
-`clarify-checklist.md`.
 
 ## Input Format
 
@@ -61,9 +59,9 @@ group (`by_file` from Step A) to one subagent. Each subagent returns only
 the table; subagents never edit code.
 
 Show a compact triage table (id, `file:line`, one-line summary, verdict,
-root-cause group) in the message where you state the depth tier.
+root-cause group) in the message where you state the depth tier (checklist step 2).
 
-## Step C: Scope
+## Step C: Scope (checklist step 4, first question)
 
 Ask one question: which findings go into this spec? Use a multi-select
 option when the interactive channel supports it. Recommend all `confirmed`
@@ -116,9 +114,9 @@ Right after `spec-check` passes, run:
 python "<SKILL_DIR>/scripts/brainstorm_tool.py" findings-coverage <findings.json|-> <spec-path>
 ```
 
-Exit `1` lists `missing` ids (not mentioned anywhere) and `unknown` ids
-(mentioned but not in the input). Fix the spec and re-run until it exits
-`0`. The coverage check proves each id is mentioned. Whether it sits in the
+Exit `1` lists `missing` ids (not mentioned anywhere). `unknown` ids (an
+`F<n>` token that is not a finding, e.g. a lint code) are only a warning.
+Fix the spec and re-run until it exits `0`. The coverage check proves each id is mentioned. Whether it sits in the
 right section is checked in the self-review.
 
 ## Spec Path
@@ -136,10 +134,3 @@ right section is checked in the self-review.
   Each spec lists the other specs' finding ids in `Out of Scope` with a
   pointer to the spec that covers them, so `findings-coverage` passes for
   every spec.
-
-## Related Files
-
-- `../SKILL.md` - Input Modes section and checklist.
-- `spec-contract.md` - the 8 mandatory sections.
-- `depth-tiers.md` - tier heuristic.
-- `clarify-checklist.md` - ambiguity sweep, still run in full.

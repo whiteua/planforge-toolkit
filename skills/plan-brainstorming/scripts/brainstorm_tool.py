@@ -194,7 +194,7 @@ def check_spec(text: str) -> Dict[str, Any]:
         if line in SPEC_HEADINGS:
             positions.setdefault(line, []).append(number)
         elif re.match(r"^#{1,2}\s", line):
-            warnings.append(f"line {number}: extra top-level heading '{line}' (not part of the contract)")
+            warnings.append(f"line {number}: extra top-level heading '{line}' (not part of the contract; '# Goal' is the only H1)")
         if PLACEHOLDER_RE.search(line):
             warnings.append(f"line {number}: placeholder marker: {line.strip()}")
 

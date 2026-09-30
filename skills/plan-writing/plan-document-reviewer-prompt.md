@@ -21,6 +21,7 @@ Subagent (general-purpose):
     | Category | What to Look For |
     |----------|------------------|
     | Spec Alignment | Every spec requirement has a task; no major scope creep beyond the spec |
+    | Codebase Grounding | Files, symbols and commands the plan relies on exist in the repository at the cited `path:line`; `Create:` targets are new; open the cited files to check, do not trust the plan |
     | Task Decomposition | Clear task boundaries; each postcondition is reachable by that task's own steps |
     | Task Sizing | Tasks fit 10 minutes / 100 lines of new code; oversized tasks are split |
     | Consistency | Names, types and signatures match across tasks |
@@ -35,7 +36,8 @@ Subagent (general-purpose):
     Minor wording, stylistic preferences, and "nice to have" suggestions are not.
 
     Approve unless there are serious gaps: missing spec requirements,
-    contradictory steps, or tasks so vague they can't be acted on.
+    contradictory steps, tasks so vague they can't be acted on, or steps that
+    depend on code that is not there.
     Constraints and If-stuck blocks are optional; flag their absence only when a
     real ambiguity or likely failure would leave the implementer stuck.
 

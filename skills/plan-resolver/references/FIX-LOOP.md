@@ -1,99 +1,95 @@
 # Fix Loop
 
-Режимы `fix`, `next` и `auto` добавляют к аудиту фазу FIX: исправление **кода** по открытому
-отчёту. Аудит при этом остаётся прежним read-only проходом из [WORKFLOW.md](WORKFLOW.md) —
-FIX и AUDIT никогда не смешиваются в одной фазе.
+`fix`, `next` and `auto` add a FIX phase: repairing the **code** from an open report. AUDIT stays
+the read-only pass of [WORKFLOW.md](WORKFLOW.md); FIX and AUDIT never mix in one phase.
 
 ## Modes
 
-| Команда | Поведение |
+| Command | Behaviour |
 |---|---|
-| `<plan> fix` | Один цикл: FIX по последнему открытому отчёту → AUDIT → стоп |
-| `<plan> next` | Алиас `fix`; подсказывается после остановки `auto` |
-| `<plan> auto [limit]` | AUDIT (если открытого отчёта ещё нет) → до `limit` циклов FIX → AUDIT; `limit` по умолчанию `2` |
+| `<plan> fix` | one cycle: FIX from the last open report → AUDIT → stop |
+| `<plan> next` | alias of `fix`, suggested after `auto` stops |
+| `<plan> auto [limit]` | AUDIT (when no open report exists) → up to `limit` cycles of FIX → AUDIT; default `2` |
 
-`<plan>` можно опустить в `fix`/`next`: взять мастер-план из текущего диалога, иначе вызвать
-`discover <workspace-root>` без плана. Exit `0` — единственный кандидат, его и использовать;
-exit `1` — кандидатов нет или несколько: показать список и спросить пользователя.
+`<plan>` may be omitted for `fix`/`next`: use the plan of the conversation, else
+`discover <workspace-root>` without a plan. Exit `0`: the single candidate; exit `1`: none or
+several (`candidates`, plus `skipped` directories with an open report but no unique plan file):
+show them and ask.
 
 ## Start
 
 1. `discover <workspace-root> <plan>` → `plans_list`, `last_report`, `state`.
-2. `state == closed` → сообщить, что план уже закрыт, ничего не писать.
-3. `state == none`:
-   - `fix`/`next` → выполнить обычный AUDIT (report-1) и остановиться: исправлять пока нечего;
-   - `auto` → выполнить AUDIT; если результат `-final`, завершить.
-4. `state == open` → перейти к циклу.
+2. `closed` → say the plan is closed, write nothing.
+3. `none` → `fix`/`next`: run a normal AUDIT (report 1) and stop, nothing to fix yet;
+   `auto`: run AUDIT; if it is `-final`, finish.
+4. `open` → the cycle.
 
 ## Cycle
 
 ```text
 cycle = 1
 loop:
-  FIX(LAST_REPORT)                     # раздел FIX ниже
-  if ни одна ошибка не получила applied → стоп, action = ask-user
-  discover <workspace-root> <plan>      # plans_list уже включает LAST_REPORT
-  AUDIT(plans_list)                     # стандартный subsequent-проход → NEW_REPORT
+  issues = open-issues LAST_REPORT
+  if issues.blocked_by_drift: stop, action = ask-user   # the last audit was invalidated by workspace drift
+  FIX(LAST_REPORT)
+  if no issue got `applied`: stop, action = ask-user
+  discover <workspace-root> <plan>
+  AUDIT(plans_list)                        # subsequent pass → NEW_REPORT
   cycle-check LAST_REPORT NEW_REPORT cycle limit
-  action == continue → LAST_REPORT = NEW_REPORT; cycle += 1; loop
-  иначе → стоп, human gate
+  continue → LAST_REPORT = NEW_REPORT; cycle += 1; loop
+  otherwise → stop, human gate
 ```
 
-Для `fix`/`next` передавать `cycle=1 limit=1`: любой `action`, кроме `complete`, означает
-«остановиться и предложить `next`».
+`fix`/`next` pass `cycle=1 limit=1`: any action but `complete` means stop and suggest `next`.
 
-## FIX Phase
+## FIX phase
 
-1. `open-issues <LAST_REPORT>` → `fix_order` (critical → low) и компактные поля ошибок.
-   Сам отчёт повторно целиком не читать — JSON достаточно.
-2. `protect <tmp-json> <plan> <all reports>` — путь создаётся так же, как для fingerprint
-   (`tempfile.mkstemp`, вне workspace).
-3. Для каждой ошибки по `fix_order`:
-   - прочитать код по `evidence` и связанные задачи плана (`linked_items`);
-   - внести минимальное исправление, закрывающее контракт плана; не рефакторить соседний код;
-   - если есть готовый read-only probe из [PROBES.md](PROBES.md) для затронутой области —
-     запустить его;
-   - запомнить итог: `applied` (изменения внесены, список файлов), `needs-user` (нужно решение
-     пользователя) или `skipped` (исправление невозможно/небезопасно, причина в note).
-4. `assert-protected <tmp-json>`. Exit `1` → откатить собственные правки в защищённых файлах,
-   если это возможно, отметить затронутые ошибки `needs-user` и остановиться.
-5. Для каждой ошибки: `mark-fix <LAST_REPORT> <id> <state> [--files ...] [--note ...]`.
-   Это единственный допустимый способ изменить прошлый отчёт: команда трогает только секцию
-   `## Журнал исправлений` / `## Fix Log`.
+1. `open-issues <LAST_REPORT>` → `fix_order` (critical → low) and compact issue fields; the JSON is
+   enough, do not re-read the whole report.
+2. `protect <tmp-json> <plan> <all reports>` and `fingerprint-workspace <workspace-root> <fix-start-json>`
+   (temp paths outside the workspace).
+3. For each issue in `fix_order`: read the code at `evidence` and the linked plan items; make the
+   minimal change that closes the plan's contract, no refactoring of neighbouring code; run the
+   existing read-only probe for the area if there is one; note the outcome: `applied`,
+   `needs-user` or `skipped` (reason in the note).
+4. `assert-protected <tmp-json>`: exit `1` → revert your edits to protected files if possible, mark
+   the affected issues `needs-user`, stop.
+5. `fingerprint-workspace <workspace-root> <fix-end-json> --base <fix-start-json>` and
+   `snapshot-diff <fix-start-json> <fix-end-json>`: the authoritative list of changed files.
+   Every changed path must belong to an `applied` issue; an unexplained change is reverted or
+   reported to the user.
+6. `mark-fix <LAST_REPORT> <id> <state> --files <paths from the diff> [--note ...]` per issue: the
+   only allowed change to a past report, and it touches only the Fix Log.
 
-### needs-user
+`needs-user`, not a fix, when: the issue means the plan itself is wrong or contradictory; the fix
+needs a product or architecture choice the plan does not make; it needs dependency installs,
+real-data migrations, secrets or external services.
 
-Ставить `needs-user`, а не исправлять, когда:
+## FIX invariants
 
-- ошибка означает, что неверен или противоречив сам мастер-план;
-- исправление требует продуктового/архитектурного выбора, которого нет в плане;
-- нужны установка зависимостей, миграция реальных данных, доступ к секретам или внешним сервисам.
+- The master plan never changes; past reports change only through `mark-fix`.
+- No git mutations, installs, migrations or destructive commands; changes stay uncommitted in the
+  working tree for review.
+- `applied` is the implementer's claim, not proof. Only the next AUDIT closes an issue
+  (`✅ fixed` in the new report).
 
-## FIX Invariants
+## AUDIT after FIX
 
-- Мастер-план не изменяется никогда.
-- Прошлые отчёты меняются только через `mark-fix`.
-- Запрещены git-мутации (`add/commit/reset/checkout/clean/stash`), install/update зависимостей,
-  миграции и деструктивные команды. Изменения остаются в рабочем дереве для ревью пользователем.
-- Отметка `applied` — это заявление исполнителя, а не доказательство. Закрывает ошибку только
-  следующий AUDIT (`✅ fixed` в новом отчёте).
+Run AUDIT strictly by WORKFLOW.md with a new start fingerprint taken **after** FIX
+(`--base` = the previous audit's current snapshot). Prefer a fresh subagent
+(`/plan-resolver <plans_list...>`) so the audit does not inherit the fixer's confidence; otherwise
+audit inline, re-reading the code rather than relying on memory of the edits.
 
-## AUDIT After FIX
+## Stop and human gate
 
-AUDIT выполняется строго по [WORKFLOW.md](WORKFLOW.md), с новым стартовым fingerprint, снятым
-**после** FIX (`--base` = текущий снимок предыдущего AUDIT, если он есть). Если платформа умеет запускать субагентов, запускать AUDIT в свежем субагенте
-(`/plan-resolver <plans_list...>`) — так проверка не наследует уверенность исполнителя в своих
-правках. Иначе выполнять inline, заново перечитывая код, а не полагаясь на память о правках.
-
-## Stop And Human Gate
-
-| `cycle-check.action` | Сообщение пользователю |
+| `cycle-check.action` | Message |
 |---|---|
-| `complete` | Путь к `-final` отчёту; план закрыт |
-| `continue` | (только `auto`) — следующий цикл без вопроса |
-| `stop-limit` | Лимит циклов исчерпан; открытые ошибки; `/plan-resolver <plan> next` |
-| `stop-stalled` | Цикл не закрыл ни одной ошибки; `claimed_not_fixed_ids`; нужен разбор вручную |
-| `ask-user` | Остались только `needs-user` ошибки; перечислить вопросы |
+| `complete` | path of the `-final` report; plan closed |
+| `continue` | (`auto` only) next cycle, no question |
+| `ask-user` | only `needs-user` issues remain (or the audit was blocked by drift): list the questions |
+| `stop-stalled` | the cycle closed nothing; `claimed_not_fixed_ids`; manual review needed |
+| `stop-limit` | cycle limit reached; open issues; `/plan-resolver <plan> next` |
 
-В сводке всегда указывать: номера созданных отчётов, закрытые/открытые ошибки, изменённые файлы
-из журнала исправлений.
+Order of precedence: `complete` → `ask-user` → `stop-stalled` → `stop-limit` → `continue`.
+The summary always lists the reports created, closed and open issues, and the changed files from
+the Fix Log.

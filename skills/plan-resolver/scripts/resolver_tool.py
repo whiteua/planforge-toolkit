@@ -539,6 +539,29 @@ def normalize_allowed_path(raw_allowed: str, root: str) -> str:
     return candidate
 
 
+def snapshot_diff(before: Dict[str, object], after: Dict[str, object]) -> Dict[str, List[str]]:
+    before_files = dict(before.get("files") or {})
+    after_files = dict(after.get("files") or {})
+    return {
+        "added": sorted(path for path in after_files if path not in before_files),
+        "removed": sorted(path for path in before_files if path not in after_files),
+        "modified": sorted(path for path in after_files if path in before_files and after_files[path] != before_files[path]),
+    }
+
+
+def cmd_snapshot_diff(args: argparse.Namespace) -> int:
+    try:
+        before = load_snapshot(args.before_json)
+        after = load_snapshot(args.after_json)
+    except (OSError, json.JSONDecodeError, ToolError) as exc:
+        print_json({"valid": False, "errors": [str(exc)]})
+        return 2
+    diff = snapshot_diff(before, after)
+    changed = diff["added"] + diff["removed"] + diff["modified"]
+    print_json({"valid": True, "changed": sorted(changed), **diff, "errors": []})
+    return 0
+
+
 def cmd_assert_readonly(args: argparse.Namespace) -> int:
     try:
         start = load_snapshot(args.start_json)
@@ -940,7 +963,32 @@ def collect_ambiguous_anchors(text: str) -> Dict[str, str]:
     return out
 
 
-def validate_report(path: str) -> Tuple[bool, Dict[str, object]]:
+ANCHOR_PARTS_RE = re.compile(r"^(?P<path>[^\s:#]+)#L(?P<start>\d+)(?:-L?(?P<end>\d+))?$", re.IGNORECASE)
+
+
+def check_anchor(anchor: str, root: str) -> Optional[str]:
+    """Return an error text when `path#Lx[-Ly]` does not point at real lines under root."""
+    match = ANCHOR_PARTS_RE.match(anchor)
+    if not match:
+        return f"malformed anchor: {anchor}"
+    target = os.path.normpath(os.path.join(root, match.group("path").replace("\\", "/")))
+    if not os.path.isfile(target):
+        return f"anchor file not found: {anchor}"
+    try:
+        with open(target, "rb") as handle:
+            line_count = sum(1 for _ in handle)
+    except OSError as exc:
+        return f"anchor unreadable: {anchor} ({exc})"
+    start = int(match.group("start"))
+    end = int(match.group("end") or start)
+    if start < 1 or end < start:
+        return f"anchor has an invalid line range: {anchor}"
+    if end > line_count:
+        return f"anchor beyond end of file ({line_count} lines): {anchor}"
+    return None
+
+
+def validate_report(path: str, root: Optional[str] = None) -> Tuple[bool, Dict[str, object]]:
     if not os.path.isfile(path):
         return False, {"valid": False, "path": path, "errors": [f"file not found: {path}"], "warnings": []}
     text = read_text(path)
@@ -994,7 +1042,11 @@ def validate_report(path: str) -> Tuple[bool, Dict[str, object]]:
         if consecutive != 0:
             errors.append("final report must set consecutive_open_invocations to 0")
 
-    _, gate_tasks, _ = parse_stage_items(text)
+    phases, tasks, _ = parse_stage_items(text)
+    # Every closed leaf needs evidence: tasks, and phases that have no tasks of their own
+    # (a phase line only aggregates when child tasks carry the anchors).
+    phases_with_tasks = {task["phase"] for task in tasks}
+    gate_tasks = tasks + [phase for phase in phases if phase["phase"] not in phases_with_tasks]
     for task in gate_tasks:
         if task["status"] != "✅":
             continue
@@ -1004,6 +1056,19 @@ def validate_report(path: str) -> Tuple[bool, Dict[str, object]]:
                 errors.append(message)
             else:
                 warnings.append(f"[WARNING] {message}")
+
+    if root:
+        # Anchors are claims about the code: a closed item or an issue must point at real lines.
+        checked: List[Tuple[str, str]] = []
+        for task in gate_tasks:
+            if task["status"] in ("✅", "⚠️"):
+                checked.extend((f"task '{task['id']}'", m.group(0)) for m in ANCHOR_RE.finditer(str(task["raw_text"])))
+        for issue in issues:
+            checked.extend((f"issue {issue['id']}", m.group(0)) for m in ANCHOR_RE.finditer(str(issue.get("evidence") or "")))
+        for owner, anchor in checked:
+            problem = check_anchor(anchor, root)
+            if problem:
+                errors.append(f"{owner}: {problem}")
 
     for task in gate_tasks:
         if task["status"] == "✅" and confidence_level(str(task["raw_text"])) == "low":
@@ -1066,7 +1131,11 @@ def cmd_validate_report(args: argparse.Namespace) -> int:
     if not os.path.isfile(args.report):
         print_json({"valid": False, "path": args.report, "errors": [f"file not found: {args.report}"], "warnings": []})
         return 2
-    valid, result = validate_report(args.report)
+    root = os.path.abspath(args.root) if args.root else None
+    if root and not os.path.isdir(root):
+        print_json({"valid": False, "path": args.report, "errors": [f"root not found: {args.root}"], "warnings": []})
+        return 2
+    valid, result = validate_report(args.report, root)
     print_json(result)
     return 0 if valid else 1
 
@@ -1222,7 +1291,7 @@ def list_plan_reports(plan_dir_abs: str, base: str) -> List[Dict[str, object]]:
     return items
 
 
-def discover_open_plans(root: str) -> List[Dict[str, str]]:
+def discover_open_plans(root: str) -> Tuple[List[Dict[str, str]], List[str]]:
     groups: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
     for current_root, dirs, filenames in os.walk(root, topdown=True):
         dirs[:] = [
@@ -1235,6 +1304,7 @@ def discover_open_plans(root: str) -> List[Dict[str, str]]:
                 key = (current_root, str(parsed["base"]).lower())
                 groups.setdefault(key, []).append({"n": int(parsed["n"]), "final": bool(parsed["final"]), "name": name})
     candidates: List[Dict[str, str]] = []
+    skipped: List[str] = []
     for (directory, base), reports in sorted(groups.items()):
         last = max(reports, key=lambda item: (int(item["n"]), bool(item["final"])))
         if last["final"]:
@@ -1252,7 +1322,10 @@ def discover_open_plans(root: str) -> List[Dict[str, str]]:
                     "last_report": posix_rel(os.path.join(directory, str(last["name"])), root),
                 }
             )
-    return candidates
+        else:
+            found = ", ".join(masters) if masters else "no plan file"
+            skipped.append(f"{posix_rel(directory, root) or '.'}: open report '{last['name']}' but {found} for base '{base}'")
+    return candidates, skipped
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
@@ -1261,8 +1334,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
         print_json({"valid": False, "errors": [f"discover-missing-workspace: {root}"]})
         return 2
     if not args.plan:
-        candidates = discover_open_plans(root)
-        print_json({"valid": True, "mode": "workspace", "candidates": candidates, "errors": []})
+        candidates, skipped = discover_open_plans(root)
+        print_json({"valid": True, "mode": "workspace", "candidates": candidates, "skipped": skipped, "errors": []})
         return 0 if len(candidates) == 1 else 1
     try:
         master_abs, master_rel = ensure_inside(root, args.plan)
@@ -1305,10 +1378,12 @@ def cmd_open_issues(args: argparse.Namespace) -> int:
     text = read_text(args.report)
     open_issues = [issue for issue in parse_issues(text) if issue["status"] != "fixed"]
     fields = ("id", "level", "status", "title", "linked_items", "evidence", "description", "recommendations")
+    blocked_by_drift = any("probe-mutated-workspace" in str(issue["title"]).lower() for issue in open_issues)
     print_json(
         {
             "valid": True,
             "report": args.report,
+            "blocked_by_drift": blocked_by_drift,
             "language": report_language(text, parse_header(text)),
             "is_final": os.path.basename(args.report).lower().endswith("-final.md"),
             "open_count": len(open_issues),
@@ -1440,10 +1515,11 @@ def cmd_cycle_check(args: argparse.Namespace) -> int:
 
     if os.path.basename(args.new_report).lower().endswith("-final.md"):
         action = "complete"
+    elif not fixable:
+        # Everything left needs a human decision; nothing more to fix automatically.
+        action = "ask-user"
     elif not fixed_now:
         action = "stop-stalled"
-    elif not fixable:
-        action = "ask-user"
     elif args.cycle >= args.limit:
         action = "stop-limit"
     else:
@@ -1492,7 +1568,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_report_parser = subparsers.add_parser("validate-report")
     validate_report_parser.add_argument("report")
+    validate_report_parser.add_argument("--root", help="workspace root; verifies that evidence anchors point at real lines")
     validate_report_parser.set_defaults(func=cmd_validate_report)
+
+    diff_parser = subparsers.add_parser("snapshot-diff")
+    diff_parser.add_argument("before_json")
+    diff_parser.add_argument("after_json")
+    diff_parser.set_defaults(func=cmd_snapshot_diff)
 
     readonly = subparsers.add_parser("assert-readonly")
     readonly.add_argument("start_json")

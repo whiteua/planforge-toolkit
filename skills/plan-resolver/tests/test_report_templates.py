@@ -23,7 +23,9 @@ def render(template: str, language: str) -> str:
         "{{consecutive_open_invocations}}": "0",
         "{{previous_report_path}}": "null",
         "{{previous_report_sha256}}": "null",
-        "{{plan_stages}}": "- ✅ 1. Bootstrap implemented" if language == "en" else "- ✅ 1. Bootstrap реализован",
+        "{{plan_stages}}": "- ✅ 1. Bootstrap implemented evidence_anchor: src/app.py#L1-L9"
+        if language == "en"
+        else "- ✅ 1. Bootstrap реализован evidence_anchor: src/app.py#L1-L9",
         "{{issues}}": "No issues found." if language == "en" else "Ошибок не найдено.",
         "{{additional_context}}": "No additional context." if language == "en" else "Дополнительного контекста нет.",
         "{{task}}": "Plan is fully implemented; no further action is required."

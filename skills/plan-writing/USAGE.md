@@ -4,8 +4,6 @@ Transform an approved spec into a detailed, bite-sized implementation plan.
 
 ## How to Invoke
 
-In VS Code Copilot chat, type:
-
 ```
 /plan-writing <spec-file-path>
 ```

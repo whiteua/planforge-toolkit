@@ -1,10 +1,10 @@
 ---
 name: plan-resolver
 description: |
-  Audit plan implementation against the codebase. Cross-checks phases, tasks, and previously
-  reported issues with actual code, then produces a single structured report file alongside
-  the master plan. With `fix`/`next` it repairs the code from the last open report and re-audits;
-  with `auto` it loops audit → fix → audit until the plan closes or the cycle limit is hit.
+  Use when a plan has been executed and the implementation must be audited against the code:
+  traces every task and previously reported issue to real files and lines, and writes one
+  structured report next to the master plan. `fix`/`next` repair the code from the last open
+  report and re-audit; `auto` loops audit → fix → audit until the plan closes or a limit is hit.
 allowed-tools:
   - Read
   - Grep
@@ -12,28 +12,29 @@ allowed-tools:
   - Write
   - Edit
   - Bash
+  - Agent
 ---
 
 # Plan Resolver
 
-Проверка реализации мастер-плана по коду. Фаза AUDIT — read-mostly: не меняет код, мастер-план
-и прошлые отчёты, пишет ровно один новый отчёт `<base>-report-N.md` или `<base>-report-N-final.md`
-в каталоге мастер-плана. Фаза FIX (только режимы `fix`/`next`/`auto`) исправляет **код** по
-открытому отчёту; мастер-план не меняется никогда.
+Audits the implementation of a master plan against the code. **AUDIT** is read-mostly: it never
+changes code, the plan or past reports, and writes exactly one new report,
+`<base>-report-N.md` or `<base>-report-N-final.md`, in the plan's directory. **FIX** (modes
+`fix`/`next`/`auto`) repairs the **code** from an open report; the plan is never modified.
 
 ## Modes
 
-Режим — последний аргумент, если он равен `fix`, `next` или `auto` (у `auto` может быть число —
-лимит циклов, по умолчанию `2`).
+The mode is the last argument when it is `fix`, `next` or `auto` (`auto` takes an optional cycle
+limit, default `2`).
 
-| Вызов | Режим |
+| Call | Mode |
 |---|---|
-| `<plan> [reports...]` | **audit** — один проход аудита, как раньше |
-| `[<plan>] fix` / `[<plan>] next` | один цикл FIX → AUDIT, затем стоп |
-| `<plan> auto [limit]` | AUDIT → FIX → AUDIT … до `-final` или лимита |
+| `<plan> [reports...]` | **audit**: one audit pass; list the plan first, then earlier reports in order |
+| `[<plan>] fix` / `[<plan>] next` | one FIX → AUDIT cycle, then stop |
+| `<plan> auto [limit]` | AUDIT → FIX → AUDIT … until `-final` or the limit |
 
-В режиме audit `plans-list` передаётся явно: первый путь — мастер-план, остальные — прошлые
-отчёты. В `fix`/`next`/`auto` список строит `discover` (см. [references/FIX-LOOP.md](references/FIX-LOOP.md)).
+In `fix`/`next`/`auto` the report list comes from `discover`; without a plan path, `fix`/`next`
+take the plan from the conversation or the single plan with an open last report.
 
 ```text
 /plan-resolver docs/plan-impl.md docs/plan-impl-report-1.md
@@ -41,65 +42,62 @@ allowed-tools:
 /plan-resolver docs/plan-impl.md auto
 ```
 
-## Read Before Acting
+## Tool
 
-Читать только то, что нужно текущей фазе:
+`TOOL` = `python "<SKILL_DIR>/scripts/resolver_tool.py"`, `<SKILL_DIR>` being the directory of
+this file; always call it by absolute path. Python ≥ 3.8, stdlib only. Commands, exit codes and
+JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
 
-| Когда | Файлы |
+## Read before acting
+
+| When | Read |
 |---|---|
-| Всегда (AUDIT) | [WORKFLOW.md](references/WORKFLOW.md), [REPORT-FORMAT.md](references/REPORT-FORMAT.md), [STATUS-RULES.md](references/STATUS-RULES.md) |
-| `pass_type == first` | [PASS-FIRST.md](references/PASS-FIRST.md), [CODE-TRACING.md](references/CODE-TRACING.md) |
-| `pass_type == subsequent` | [PASS-SUBSEQUENT.md](references/PASS-SUBSEQUENT.md), [CODE-TRACING.md](references/CODE-TRACING.md) |
-| Нужна проба / выбор level | [PROBES.md](references/PROBES.md), [ERROR-TAXONOMY.md](references/ERROR-TAXONOMY.md) |
-| Режимы `fix`/`next`/`auto` | [FIX-LOOP.md](references/FIX-LOOP.md) |
-| Ошибка CLI, неясный exit code | [TOOLING.md](references/TOOLING.md), [BOOTSTRAP.md](references/BOOTSTRAP.md), [FINGERPRINT.md](references/FINGERPRINT.md) |
+| Always | [references/WORKFLOW.md](references/WORKFLOW.md), [references/REPORT-FORMAT.md](references/REPORT-FORMAT.md) |
+| Before the audit pass | [references/AUDIT.md](references/AUDIT.md) |
+| Modes `fix`/`next`/`auto` | [references/FIX-LOOP.md](references/FIX-LOOP.md) |
 
-## Prerequisites
+## AUDIT phase (summary; WORKFLOW.md is authoritative)
 
-- Python ≥ 3.8 in PATH (stdlib only).
-- `<SKILL_DIR>` is the directory containing this `SKILL.md`. Always invoke the
-  script by absolute path: `python "<SKILL_DIR>/scripts/resolver_tool.py" ...`.
+1. `TOOL bootstrap <workspace-root> <plan> [reports...]`: exit `64` means the plan is closed;
+   say so and write nothing. Copy `report_header` into the report frontmatter as is.
+2. `TOOL preflight <plan-dir> <next-open-name> <next-final-name>`: on failure stop before auditing.
+3. Start fingerprint: `TOOL fingerprint-workspace <workspace-root> <start-json>` (temp file outside
+   the workspace).
+4. One audit pass (AUDIT.md): `first` over the plan, or `subsequent` over the last report plus a
+   full re-scan of the plan. Every closed item and every issue carries an evidence anchor
+   `path#Lx-Ly` that points at real code; probes are read-only.
+5. Report name: `-final` only when there are no issues and every task is `✅` or
+   `not-applicable`; otherwise the open name.
+6. Write exactly one new report (never overwrite an existing one).
+7. `TOOL task-census <plan> <report>`: exit `1` → add the uncovered tasks to the same report.
+8. `TOOL validate-report <report> --root <workspace-root>`: one rewrite of the same report is
+   allowed to fix it; copy every `[WARNING]` line into the report's validator-warnings section.
+9. `TOOL fingerprint-workspace <workspace-root> <current-json> --base <start-json>` and
+   `TOOL assert-readonly <start-json> <current-json> <report>`. Drift → rewrite the same report
+   with the single blocker issue `probe-mutated-workspace`, run only the validator again, stop OPEN.
+10. Non-final subsequent pass: `TOOL iteration-check <previous-report> 5`. Then the human gate:
+    report path, status, counts, next action (audit mode with open issues: suggest
+    `/plan-resolver <plan> fix`).
 
-## AUDIT Phase
+## FIX phase
 
-1. `bootstrap <workspace-root> <plan> [reports...]`. Exit `64` — план уже закрыт: сообщить и
-   ничего не писать. Поля `report_header` использовать для frontmatter отчёта как есть.
-2. `preflight <plan-dir> <next-open-name> <next-final-name>`. Не прошёл — остановиться до аудита;
-   не заменять отчёт memory/chat/terminal notes.
-3. Путь для стартового fingerprint: `tempfile.mkstemp(prefix="fp-", suffix=".json", dir=tempfile.gettempdir())`, закрыть fd, вызвать `fingerprint-workspace`.
-4. Один проход аудита: `first` по мастер-плану либо `subsequent` по `LAST_REPORT` + полный
-   повторный скан мастер-плана.
-5. Имя отчёта: `-final` только если ошибок нет и все задачи `✅`/`not-applicable`
-   (`consecutive_open_invocations: 0`); иначе open-имя
-   (`consecutive_open_invocations_if_open`).
-6. Записать ровно один новый отчёт (create-new, overwrite запрещён).
-7. `task-census <plan> <report>`: exit `1` — дописать непокрытые задачи в тот же отчёт.
-8. `validate-report <report>`: допустим один retry перезаписи того же отчёта; `[WARNING]`
-   переносить в секцию предупреждений.
-9. Текущий fingerprint (`--base <start-json>` — перехешируются только изменённые по size/mtime файлы) + `assert-readonly <start-json> <current-json> <report>`. Drift →
-   перезаписать тот же отчёт blocker-ошибкой `probe-mutated-workspace`, повторить только
-   validator и остановиться со статусом `OPEN`.
-10. Для non-final subsequent-прохода — `iteration-check`. Вывести human gate: путь, статус,
-    счётчики, next action (в режиме audit с открытыми ошибками предложить `/plan-resolver <plan> fix`).
-
-## FIX Phase
-
-Только в режимах `fix`/`next`/`auto`, строго по [references/FIX-LOOP.md](references/FIX-LOOP.md):
-`open-issues` → защита плана и отчётов (`protect`) → минимальные правки кода по `fix_order` →
-`assert-protected` → `mark-fix` для каждой ошибки → AUDIT → `cycle-check`.
+Only in `fix`/`next`/`auto`, strictly by [references/FIX-LOOP.md](references/FIX-LOOP.md):
+`open-issues` → `protect` + fix-start fingerprint → minimal code changes in `fix_order` →
+`assert-protected` + `snapshot-diff` (the authoritative list of changed files) → `mark-fix` per
+issue → AUDIT → `cycle-check`.
 
 ## Language
 
-Язык отчёта определяется содержимым мастер-плана (конвенция экосистемы plan-*,
-см. `detect_lang` в plan-iterative-revision/scripts/next_review_index.py): доля кириллицы среди букв > 5% → `ru`,
-иначе `en`. Пустой или нечитаемый план → `en`. Значение готово в `bootstrap.language`.
+The report language is `bootstrap.language`: `ru` when more than 5% of the plan's letters are
+Cyrillic, otherwise `en` (empty or unreadable plan → `en`). Instructions in this skill are English.
 
-## Forbidden Actions
+## Forbidden
 
-- Никогда не редактировать мастер-план.
-- Прошлые отчёты: менять только секцию журнала исправлений и только через `mark-fix`.
-- В фазе AUDIT не редактировать код, конфиги и generated-файлы; не создавать несколько отчётов;
-  не overwrite'ить существующий `NEXT_REPORT` (self-rewrite — только собственного отчёта текущего прохода).
-- Ни в одной фазе: git-мутации, install/update зависимостей, миграции, formatter/autofix по всему проекту.
-- Не сохранять результат аудита в memory/chat/terminal вместо файла.
-- Не вызывать другие скиллы как исполнителя исправлений.
+- Editing the master plan, ever.
+- Editing past reports except the Fix Log section, and only through `mark-fix`.
+- In AUDIT: editing code, configs or generated files; more than one report per pass; overwriting an
+  existing `NEXT_REPORT` (rewriting your own report of this pass is allowed).
+- In any phase: git mutations (`add/commit/reset/checkout/clean/stash`), dependency install or
+  update, migrations, project-wide formatters or autofix. Code changes from FIX stay uncommitted
+  in the working tree for the engineer's review.
+- Replacing the report file with memory, chat or terminal notes; delegating fixes to other skills.

@@ -1,10 +1,10 @@
 # plan-resolver — Quick Reference
 
-Audit how well a plan was implemented in code. Produces a report with findings. The default audit mode never modifies code or the plan; `fix`/`next`/`auto` modes also repair the code from the report and re-audit (the plan is never modified).
+Audit how well a plan was implemented in the code and write a report with findings. Audit mode
+never modifies code or the plan; `fix`/`next`/`auto` also repair the code from the report and
+re-audit (the plan is never modified).
 
 ## How to Invoke
-
-In VS Code Copilot chat, type:
 
 ```
 /plan-resolver <plan-path> [report-1-path] [report-2-path] ...   # audit
@@ -16,125 +16,101 @@ In VS Code Copilot chat, type:
 ### Usage Examples
 
 ```bash
-# First pass — no prior reports exist yet
-/plan-resolver docs/plans/plan01.md
+# First pass — no prior reports yet
+/plan-resolver docs/plans/plan01-impl.md
 
-# Second pass — supply previous reports for delta analysis
-/plan-resolver docs/plans/plan01.md docs/plans/plan01-report-1.md
+# Second pass — list previous reports in order for delta analysis
+/plan-resolver docs/plans/plan01-impl.md docs/plans/plan01-impl-report-1.md
 
-# Third pass — with all prior reports in order
-/plan-resolver docs/plans/plan01.md docs/plans/plan01-report-1.md docs/plans/plan01-report-2.md
+# Fix the issues of the latest open report, then re-audit (reports discovered automatically)
+/plan-resolver docs/plans/plan01-impl.md fix
 
-# Plan in a custom directory
-/plan-resolver .docs/.plans/refactor/plan.md .docs/.plans/refactor/plan-report-1.md
+# Fully autonomous: audit, fix, re-audit — up to 2 fix cycles
+/plan-resolver docs/plans/plan01-impl.md auto
 
-# Fix issues from the latest open report, then re-audit (reports are discovered automatically)
-/plan-resolver docs/plans/plan01.md fix
-
-# Fully autonomous: audit, fix, re-audit — up to 2 fix cycles, then stop
-/plan-resolver docs/plans/plan01.md auto
-
-# auto stopped with open issues → one more manual cycle
+# auto stopped with open issues → one more cycle
 /plan-resolver next
 ```
 
-**Important:** In audit mode the full `plans-list` must be provided explicitly — list the reports in order after the plan path. In `fix`/`next`/`auto` the reports are discovered next to the plan; without a plan path, `fix`/`next` use the plan from the conversation or the single plan whose latest report is open.
+In audit mode list the plan first and then every previous report in order. In `fix`/`next`/`auto`
+the reports are discovered next to the plan.
 
 ## Arguments
 
 | Argument | Required | Description |
 |---|---|---|
-| Plan path | **Yes** | Path to the master plan (first in the list) |
-| Previous reports | No | Audit mode: paths to previous report files (subsequent passes use them for delta analysis) |
+| Plan path | **Yes** (optional for `fix`/`next`) | The master plan; for a split plan, the original `<base>.md`, not the roadmap |
+| Previous reports | No | Audit mode: earlier report files in order |
 | `fix` / `next` | No | Fix the latest open report's issues in code, then re-audit once |
 | `auto [limit]` | No | Loop audit → fix → audit until `-final` or `limit` fix cycles (default 2) |
 
 ## What Happens
 
 ```
-1. BOOTSTRAP — parse plans-list, determine next report number (N+1)
-   → If plan already closed (exit 64): stop, nothing to do
-2. PREFLIGHT — verify report file can be created
-3. FINGERPRINT — snapshot workspace state before audit
-4. AUDIT — trace plan tasks/phases against actual code
-5. WRITE REPORT — exactly one new report file
-6. VALIDATE — structural check of the report
-7. ASSERT-READONLY — verify no workspace files were mutated
-8. ITERATION-CHECK — suggest next action
-```
+Audit pass
+1. BOOTSTRAP      — validate the plan and reports, next report number (exit 64: plan already closed)
+2. PREFLIGHT      — the report file can be created
+3. FINGERPRINT    — workspace snapshot before the audit
+4. AUDIT          — trace every task and known issue to real code lines (read-only probes allowed)
+5. WRITE REPORT   — exactly one new report
+6. CENSUS + VALIDATE — every plan task covered; structure, statuses and evidence anchors verified against the code
+7. ASSERT-READONLY — nothing but the report changed
+8. NEXT ACTION    — status, counts, suggested command
 
-Fix cycle (`fix` / `next` / `auto`):
-
-```
-1. DISCOVER — find the plan's reports; closed → stop, none → audit first
-2. OPEN-ISSUES — open issues of the last report, ordered critical → low
-3. PROTECT — hash the plan and all reports
-4. FIX — minimal code changes per issue (applied / needs-user / skipped)
-5. ASSERT-PROTECTED — plan and reports unchanged
-6. MARK-FIX — record each outcome in the report's "Fix Log" section
-7. AUDIT — standard subsequent pass → next report
-8. CYCLE-CHECK — complete / continue (auto) / stop-limit / stop-stalled / ask-user
+Fix cycle (fix / next / auto)
+1. DISCOVER       — reports of the plan; closed → stop, none → audit first
+2. OPEN-ISSUES    — open issues, critical → low
+3. PROTECT        — plan and reports hashed; fix-start snapshot
+4. FIX            — minimal code changes per issue (applied / needs-user / skipped)
+5. DIFF           — changed files from the snapshot diff, plan and reports untouched
+6. MARK-FIX       — outcome per issue in the report's Fix Log
+7. AUDIT          — subsequent pass → next report
+8. CYCLE-CHECK    — complete / ask-user / stop-stalled / stop-limit / continue (auto)
 ```
 
 Code changes stay uncommitted in the working tree for your review.
 
 ## Report Types
 
-| Type | When | Meaning |
+| File | When | Meaning |
 |---|---|---|
-| `<base>-report-N.md` | Issues found | Open report with findings |
-| `<base>-report-N-final.md` | All tasks ✅, no errors | Closing report — plan is done |
+| `<base>-report-N.md` | issues or open tasks remain | open report |
+| `<base>-report-N-final.md` | every task ✅/not-applicable, no open issues | closing report |
 
-## First Pass vs Subsequent Pass
+## Task Statuses
 
-| Pass | Input | Focus |
-|---|---|---|
-| First (no prior reports) | Master plan only | Full scan of all tasks against code |
-| Subsequent (has prior reports) | Plan + last report | Delta: what was fixed, what remains, what regressed |
-
-## Task Statuses in Reports
-
-| Status | Meaning |
+| Marker | Meaning |
 |---|---|
-| ✅ | Correctly implemented |
-| ⚠️ | Partially implemented or minor issues |
-| ❌ | Not implemented or critically wrong |
-| N/A | Not applicable (e.g., deprecated by later decisions) |
+| `✅` | implemented as specified (needs an evidence anchor `path#Lx-Ly`) |
+| `⚠️` | partial, defective, or ambiguous |
+| `⭕️` | missing |
+| `‼️` | deviates from the plan |
+| `not-applicable` | explanatory item, nothing to implement |
 
 ## Forbidden Actions
 
-The resolver **never**:
-- Edits the plan
-- Edits previous reports, except the "Fix Log" section written by `mark-fix`
-- Edits code during an audit pass (only the fix phase changes code)
-- Runs installers, migrations, project-wide formatters, or git-mutating commands
-- Creates more than one report per audit pass or overwrites an existing report file
-- Auto-invokes other skills to fix issues
+The resolver never edits the plan; never edits previous reports except the Fix Log via `mark-fix`;
+never edits code during an audit pass; never runs installers, migrations, project-wide formatters or
+git-mutating commands; never writes more than one report per pass or overwrites an existing one;
+never delegates fixes to other skills.
 
 ## Prerequisites
 
-- Python ≥ 3.8 in PATH (for `scripts/resolver_tool.py`)
-- Codebase accessible for read-only inspection
-- File write tools available for creating the report
-
-## Checklist Before Invoking
-
-- [ ] Plan execution is complete (all tasks attempted)
-- [ ] Provide the full plans-list: plan + all previous reports in order
-- [ ] Workspace is the same codebase where the plan was executed
-- [ ] Report directory is writable
+- Python ≥ 3.8 in PATH
+- The codebase where the plan was executed, readable; the plan directory writable
 
 ## Common Errors
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| "Exit 64: plan already closed" | A `-final.md` report already exists | Nothing to do — plan is verified |
-| "Cannot create report file" | Write tools unavailable | Enable file write mode |
-| "Preflight failed" | Report file already exists | Check numbering; provide all existing reports |
-| Report shows ❌ on tasks you completed | Code doesn't match plan expectations | Fix code and re-run resolver, or run `fix` |
-| `auto` stopped: stop-limit | Issues remain after the cycle limit | Review changes, then `/plan-resolver next` |
-| `auto` stopped: stop-stalled | A cycle closed no issues | Check the report's Fix Log and fix manually |
-| `auto` stopped: ask-user | Remaining issues need a decision (plan conflict, design choice) | Answer, update the plan if needed, re-run |
+| Exit 64: plan already closed | A `-final.md` report exists | Nothing to do |
+| Preflight failed | The next report name already exists | Check numbering; list all existing reports |
+| `anchor file not found` / `beyond end of file` | A report cites code that is not there | The audit must cite real lines; fix the report |
+| `task-census-no-units` | The plan has no recognisable tasks | Use a plan with task headings |
+| `probe-mutated-workspace` | Something changed files during the audit | Review the changes; re-run |
+| `auto` stopped: ask-user | Remaining issues need a decision | Answer, update the plan if needed, re-run |
+| `auto` stopped: stop-stalled | A cycle closed nothing | Check the Fix Log; fix manually |
+| `auto` stopped: stop-limit | Issues remain after the limit | Review, then `/plan-resolver next` |
 
 ## Pipeline Position
 
@@ -142,5 +118,5 @@ The resolver **never**:
 plan-brainstorming → plan-writing → plan-iterative-revision → plan-splitter → plan-executor → [YOU ARE HERE]
 ```
 
-**Previous:** `plan-executor` (implements the plan)  
-**Next:** (none — this is the final verification step; use `fix`/`auto` or fix manually and re-run)
+**Previous:** `plan-executor` (its hand-off names the master plan and any units it did not finish)
+**Next:** none; fix with `fix`/`auto` or by hand and re-run

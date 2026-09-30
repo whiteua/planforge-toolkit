@@ -4,8 +4,6 @@ Turn ideas into validated design specs through collaborative dialogue.
 
 ## How to Invoke
 
-In VS Code Copilot chat, type:
-
 ```
 /plan-brainstorming <goal-file-path>
 ```
@@ -47,13 +45,13 @@ Spec path: `review01.json` → `review01-spec.md` next to it. With inline JSON t
 ## Process (what happens)
 
 1. Agent explores your project context (files, docs, commits); in findings mode it validates and triages the findings
-2. Offers Visual Companion if visual questions are expected (you can decline)
-3. Proposes a **depth tier** (Quick / Standard / Deep) — you confirm or adjust
+2. Proposes a **depth tier** (Quick / Standard / Deep) — you confirm or adjust
+3. Offers the Visual Companion when the questions ahead are visual (you can decline)
 4. Asks clarifying questions **one at a time** (prefer multiple-choice)
-5. Proposes 2–3 approaches with trade-offs and a recommendation
+5. Proposes approaches with trade-offs and a recommendation (2–3 on Standard/Deep, one on Quick)
 6. Presents design section by section, asks for approval after each
 7. Runs ambiguity sweep — closes all open questions; if an answer changes the design, re-presents that section
-8. Writes the spec file, checks it with `brainstorm_tool.py spec-check`, runs self-review (Deep: plus a reviewer subagent)
+8. Writes the spec file, checks it with `brainstorm_tool.py spec-check`, runs self-review incl. a fidelity check against your original request (Deep: plus a reviewer subagent)
 9. Asks you to review the written spec
 10. On approval → invokes `plan-writing`
 

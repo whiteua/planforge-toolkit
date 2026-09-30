@@ -1,13 +1,12 @@
 # Spec Contract
 
-The structural contract every spec document must satisfy before
-`plan-writing` is allowed to consume it.
+The structural contract every spec must satisfy before `plan-writing` consumes it, plus the
+artifact names and hand-off rules shared by both skills.
 
-Read together with `plan-lifecycle.md`.
+## Required sections
 
-## Required Sections
-
-A spec document MUST contain these top-level sections, in this order:
+A spec MUST contain these headings, in this order, in English verbatim (they are matched
+literally even when the body is in another language):
 
 1. `# Goal`
 2. `## Architecture`
@@ -18,71 +17,66 @@ A spec document MUST contain these top-level sections, in this order:
 7. `## Out of Scope`
 8. `## Open Questions`
 
-All eight headings are mandatory and are written in English verbatim, even
-when the spec body is in another language (they are matched literally). A heading with body text "(none)" is
-acceptable for sections that genuinely do not apply (e.g. `Data Flow` for
-a pure CLI tool); a missing heading is a contract violation.
-
-The **depth** to which each section is filled is tier-driven (Quick /
-Standard / Deep) — see `depth-tiers.md`. Tiers change fill depth only; they
-never remove a heading and never relax the `Open Questions` gate.
-
-## Tier Metadata Line
-
-Above `# Goal`, a spec SHOULD carry a one-line tier marker as a blockquote:
-
-```markdown
-> Tier: Standard
-```
-
-- Allowed values: `Quick`, `Standard`, `Deep` (see `depth-tiers.md`).
-- It is **additive metadata**, not a heading — it does not count toward or
-  alter the 8 mandatory sections, and its absence is NOT a contract
-  violation (legacy specs predate it).
-- `plan-brainstorming` writes it from the confirmed tier; `plan-writing`
-  reads it at Preflight and defaults to **Standard** when it is missing or
-  unrecognized (see `../../plan-writing/references/task-tiers.md`).
-
-## Section Definitions
-
 | Section | Must contain |
 |---|---|
 | Goal | One sentence describing the outcome. Not a list of features. |
-| Architecture | 2-5 sentences on the approach and major decisions made. |
-| Components | Named units, each with one-line responsibility. |
+| Architecture | 2-5 sentences on the approach and the decisions made, citing the existing code they rest on (`path:line`). |
+| Components | Named units, each with a one-line responsibility; existing units cite their file. |
 | Data Flow | How information moves between components, or `(none)` with rationale. |
-| Error Handling | Failure modes and how each is surfaced/handled. |
+| Error Handling | Failure modes and how each is surfaced or handled. |
 | Testing Strategy | What is tested, at what level, and what is intentionally not tested. |
-| Out of Scope | Explicit list of related work that this spec does NOT cover. |
+| Out of Scope | Explicit list of related work this spec does NOT cover. Never `(none)`. |
 | Open Questions | Unresolved decisions. **Must be empty before plan-writing starts.** |
 
-## Preflight Checklist
+A heading with body `(none)` plus a one-line rationale is acceptable where a section does not
+apply (e.g. Data Flow for a pure CLI tool); a missing heading is a violation. `# Goal` is the
+document's only H1: no separate title heading.
 
-Used by `plan-writing` before producing a plan. The structural part is
-automated by `python "<SKILL_DIR>/scripts/brainstorm_tool.py" spec-check <spec>`
-(exit `0` = all four boxes checked; the `Tier` line is reported as a warning).
+Depth per section is tier-driven (`depth-tiers.md`); tiers change fill depth only.
 
-- [ ] All 8 required headings present, in the listed order.
-- [ ] No section is empty (use `(none)` with one-line rationale instead).
-- [ ] `## Out of Scope` is non-empty (explicit, even if short).
-- [ ] `## Open Questions` is empty or contains only the literal text `(none)`.
+## Tier line
 
-If any checkbox is unchecked, `plan-writing` MUST STOP and direct the user
-back to `plan-brainstorming`. It MUST NOT auto-invoke `plan-brainstorming`.
+Above `# Goal`: `> Tier: Quick|Standard|Deep` (bold forms such as `> **Tier:** Quick` are also
+recognised). It is metadata, not a heading. `plan-brainstorming` writes the confirmed tier;
+`plan-writing` reads it and defaults to Standard when it is missing or unknown
+(`../../plan-writing/references/task-tiers.md`).
 
-## Why these sections
+## Artifacts and naming
 
-- `Goal` / `Architecture` keep planning anchored to intent.
-- `Components` + `Data Flow` give the plan author the unit boundaries.
-- `Error Handling` + `Testing Strategy` ensure tasks can produce real
-  tests (TDD requires knowing failure modes ahead of time).
-- `Out of Scope` prevents scope creep into the plan.
-- `Open Questions` is the load-bearing gate: an unresolved decision in
-  the spec turns the plan into guesswork.
+| Artifact | Path | Owner |
+|---|---|---|
+| goal / idea | goal file or chat input | user |
+| spec | `<plan-root>-spec.md`, next to the goal file | `plan-brainstorming` |
+| plan | `<plan-root>-impl.md`, same directory (`plan_tool.py plan-path`) | `plan-writing` |
+| execution result | code in the working tree; the engineer commits | `plan-executor` |
 
-## Related Files
+`<plan-root>` = the goal file name without extension and without any descriptive suffix after
+the numeric segment: `plan01.md` → `plan01-spec.md`; `plan02-goal.md` → `plan02-spec.md`;
+`superplan03-abstract.md` → `superplan03-spec.md`; `review01.json` → `review01-spec.md`. A goal
+file without a numeric segment keeps its whole stem (`goal.md` → `goal-spec.md`). Inline input has
+no file: ask for the path and recommend a default. A user preference overrides the default.
 
-- `plan-lifecycle.md` - pipeline and handoff rules.
-- `depth-tiers.md` - per-tier section depth (presence rules unchanged).
-- `../SKILL.md` - `plan-brainstorming` produces specs matching this contract.
-- `../../plan-writing/SKILL.md` - `plan-writing` enforces this contract at preflight.
+## Hand-off rules
+
+1. Spec → plan only after the spec self-review passed and the user explicitly approved the
+   written spec file.
+2. Plan → spec is never automatic: when `plan-writing` finds the spec non-conforming, it stops
+   and asks the user to re-enter `plan-brainstorming`.
+3. One owner per artifact: other skills read a spec or plan but never rewrite it.
+
+## Preflight (run by plan-writing)
+
+`python "<SKILL_DIR>/scripts/brainstorm_tool.py" spec-check <spec>` checks: all 8 headings
+present and in order; no empty section; `Out of Scope` non-empty; `Open Questions` empty or
+`(none)` (+ one-line rationale). Exit `1` → `plan-writing` stops and sends the user back to
+`plan-brainstorming`; it never invokes it itself.
+
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| spec | Design document: what and why. |
+| plan | Implementation document: how, step by step. |
+| task | A plan unit that fits 10 minutes or 100 lines of new code. |
+| step | One action inside a task (2-5 minutes), tracked as `- [ ]`. |
+| tier | Spec and plan depth level (Quick / Standard / Deep). |

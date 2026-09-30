@@ -1,63 +1,118 @@
 # Workflow
 
-Фаза AUDIT `plan-resolver` — один read-mostly проход аудита реализации мастер-плана, который
-создаёт ровно один новый отчёт рядом с мастер-планом. Режимы `fix`/`next`/`auto` оборачивают
-этот проход циклом исправлений по [FIX-LOOP.md](FIX-LOOP.md); инварианты ниже относятся к
-каждому проходу AUDIT.
+One AUDIT pass: a read-mostly audit of the master plan's implementation that creates exactly one new
+report next to the plan. `fix`/`next`/`auto` wrap this pass in the fix loop ([FIX-LOOP.md](FIX-LOOP.md));
+the invariants below hold for every AUDIT pass.
 
-## Inputs
+## Notation
 
-- `plans-list`: явный список путей, где первый элемент — MASTER_PLAN, остальные — прошлые отчёты.
-- `WORKSPACE_ROOT`: текущий cwd агента/VS Code, передаётся в CLI `bootstrap`.
+- `WORKSPACE_ROOT`: the project root (the agent's cwd), passed to `bootstrap`.
+- `MASTER_PLAN`: the plan; `PLAN_DIR` its directory; `REPORTS[]` its earlier reports;
+  `LAST_REPORT` the newest one; `NEXT_REPORT` the report this pass writes.
+- `plans-list`: `MASTER_PLAN` followed by `REPORTS[]` in order (audit mode: given by the user;
+  other modes: from `discover`).
 
 ## Invariants
 
-1. Writable-файл ровно один: выбранный `NEXT_REPORT`.
-2. MASTER_PLAN и REPORTS[] read-only.
-3. Код проекта read-only; допустимы только чтение, grep/glob и безопасные read-only probes.
-4. Preflight обязателен до аудита.
-5. Start/current fingerprint обязателен; допустимый diff — только выбранный `NEXT_REPORT`.
-6. Один проход AUDIT = один отчёт; исправления кода внутри AUDIT запрещены (они — отдельная фаза FIX).
-7. Report schema берётся только из [REPORT-FORMAT.md](REPORT-FORMAT.md).
-8. Язык отчёта берётся из `bootstrap.language` (доля кириллицы в мастер-плане > 5% → `ru`, иначе `en`; пустой план → `ru`).
-9. `task-census` обязателен перед сдачей: непокрытая задача (exit 1) блокирует отчёт. Все строки
-	`[WARNING] …` из `validate-report` дословно отражаются в секции «Предупреждения валидатора».
+1. Exactly one writable file: the chosen `NEXT_REPORT`.
+2. `MASTER_PLAN` and `REPORTS[]` are read-only (the Fix Log is written only by `mark-fix`).
+3. Project code is read-only in AUDIT: reading, grep/glob and read-only probes only. The tools
+   cannot prevent a write; `assert-readonly` detects it afterwards and turns it into a blocker.
+4. Preflight before the audit; start/current fingerprint around it; the only allowed diff is
+   `NEXT_REPORT`.
+5. One AUDIT pass = one report. Code fixes belong to FIX, never to AUDIT.
+6. The report schema is [REPORT-FORMAT.md](REPORT-FORMAT.md); the language is `bootstrap.language`.
+7. `task-census` must pass before hand-off: an uncovered task (exit 1) blocks the report.
+8. `validate-report --root` must pass: every evidence anchor points at existing lines.
 
-## Command Sequence
+## Command sequence
 
 ```text
 bootstrap <workspace-root> <plan> [reports...]
 preflight <plan-dir> <next-open-name> <next-final-name>
 fingerprint-workspace <workspace-root> <start-json>
-# audit pass: first/subsequent
-# write selected NEXT_REPORT
-task-census <plan> <selected-report>
-validate-report <selected-report>
+# audit pass (AUDIT.md): first | subsequent
+# write NEXT_REPORT
+task-census <plan> <NEXT_REPORT>
+validate-report <NEXT_REPORT> --root <workspace-root>
 fingerprint-workspace <workspace-root> <current-json> --base <start-json>
-assert-readonly <start-json> <current-json> <selected-report-path>
-iteration-check <last-report> 5   # only when applicable
+assert-readonly <start-json> <current-json> <NEXT_REPORT>
+iteration-check <LAST_REPORT> 5        # non-final subsequent pass only; LAST_REPORT = the previous report
 ```
 
-## First Pass
+## Bootstrap
 
-Если прошлых отчётов нет, агент читает MASTER_PLAN, перечисляет фазы/задачи, сопоставляет их с
-кодом и формирует первичный список ошибок. Каждая задача получает статус из
-[STATUS-RULES.md](STATUS-RULES.md), каждая ошибка — level/status из
-[ERROR-TAXONOMY.md](ERROR-TAXONOMY.md).
+`bootstrap` validates `plans-list`, computes the next report number and returns the header values.
 
-## Subsequent Pass
+- All paths must be inside `WORKSPACE_ROOT`. The plan may be `.md`, `.markdown`, `.txt`, `.text`.
+- Reports are `<base>-report-<N>.md` / `<base>-report-<N>-final.md` in `PLAN_DIR`, `<base>` = plan
+  file name without extension. Numbering is gapless (`bootstrap-gap-in-reports`,
+  `bootstrap-duplicate-report`).
+- A newest `-final` report means the plan is closed: exit `64`, `closed: true`, write nothing.
+- Output: `master_plan*`, `plan_dir*`, `reports`, `last_report`, `next_n`, `next_open_name`,
+  `next_final_name`, `next_open_path`, `next_final_path`, `language`, `pass_type`
+  (`first` | `subsequent`), and `report_header` with ready frontmatter values (`master_plan_path`
+  relative to `PLAN_DIR`, `master_plan_sha256`, `master_plan_size`, `audit_iteration`,
+  `consecutive_open_invocations_if_open` / `_if_final`, `previous_report_path`,
+  `previous_report_sha256`, `language`). Copy them; do not recompute.
 
-Если есть LAST_REPORT, агент сначала переоценивает старые ошибки, затем повторно сканирует весь
-MASTER_PLAN по текущему коду. Итоговый список строится стабильно: carry-over ошибки в старом
-порядке, затем новые ошибки в порядке обнаружения.
+## Fingerprint (read-only guard)
 
-## Report Name
+`fingerprint-workspace` walks `WORKSPACE_ROOT`, skips the root `.gitignore` patterns and the fixed
+exclusions (`node_modules`, `.git/objects`, `__pycache__`, `dist`, `build`, `target`, `out`, `bin`,
+`obj`, `.next`, `.gradle`, `.venv`, `venv`, plus tool caches: `.pytest_cache`, `.mypy_cache`,
+`.ruff_cache`, `.hypothesis`, `.tox`, `.nox`, `.cache`, `.eslintcache`, `*.tsbuildinfo`), hashes every
+file (SHA-256) and stores `files` + `stats` (`[size, mtime_ns]`) as JSON. With `--base <prev-json>`
+(same root) files with unchanged size and mtime reuse the previous hash. More than 200 000 files →
+stop and ask the user to narrow the scope.
 
-`<base>-report-N-final.md` выбирается только если итоговый список ошибок пуст и все задачи закрыты
-(`✅` или `not-applicable`). Во всех остальных случаях используется `<base>-report-N.md`.
+Snapshot files live outside the workspace: `tempfile.mkstemp(prefix="fp-", suffix=".json",
+dir=tempfile.gettempdir())`, close the fd, pass the path.
 
-## Drift Handling
+`assert-readonly <start> <current> <NEXT_REPORT>` allows exactly one changed path. Any other
+added/removed/modified path is the blocker `probe-mutated-workspace`: rewrite the same report with
+that single issue, run only `validate-report` again, stop with status OPEN. No second guard in the
+same invocation.
 
-Если `assert-readonly` обнаружил изменения кроме `NEXT_REPORT`, агент добавляет в тот же отчёт
-единственную blocker-ошибку `probe-mutated-workspace`, повторно запускает только validator и
-останавливается со статусом `OPEN`. Повторный readonly-guard в этой инвокации запрещён.
+`snapshot-diff <before> <after>` lists `added`/`removed`/`modified` paths (used by FIX).
+
+## Report name
+
+`<base>-report-N-final.md` only when the issue list is empty and every task is `✅` or
+`not-applicable` (`consecutive_open_invocations: 0`). Otherwise `<base>-report-N.md` with
+`consecutive_open_invocations_if_open`.
+
+## Stuck open
+
+`consecutive_open_invocations` counts open reports in a row (value ready in `report_header`).
+`iteration-check <LAST_REPORT> [limit=5]` returns `ask_required` at the limit: tell the user the
+audit keeps finding open issues and ask how to proceed. In `fix`/`next`/`auto`, `cycle-check` decides.
+
+## Commands
+
+```text
+bootstrap <workspace-root> <plan> [reports...]
+preflight <plan-dir> <next-open-name> <next-final-name>
+fingerprint-workspace <root> <out-json> [--base <prev-json>]
+snapshot-diff <before-json> <after-json>
+assert-readonly <start-json> <current-json> <allowed-path>
+parse-report <report.md>
+validate-report <report.md> [--root <workspace-root>]
+task-census <plan> <report>
+iteration-check <last-report> [limit]
+discover <workspace-root> [plan]
+open-issues <report>
+protect <out-json> <path>...
+assert-protected <snapshot-json>
+mark-fix <report> <issue-id> applied|needs-user|skipped [--files F...] [--note TEXT]
+cycle-check <prev-report> <new-report> <cycle> [limit=2]
+```
+
+Exit codes: `0` ok; `1` the check ran and the contract is violated (`validate-report`,
+`assert-readonly`, `assert-protected`, `task-census`, `mark-fix`, `preflight` target exists,
+`discover` without exactly one candidate); `2` bad input or filesystem; `64` `bootstrap` found a
+`-final` report.
+
+`task-census` exit `2` with `task-census-no-units` means the plan has no recognisable task units
+(no headings, numbered items, bullets or a roadmap table): stop and ask the user for a structured
+plan; do not hand-write a census.

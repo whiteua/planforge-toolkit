@@ -41,6 +41,8 @@ DONE_WHEN_RE = re.compile(r"^(?:\*\*)?Done when:(?:\*\*)?\s*\S")
 PRE_RE = re.compile(r"^\*\*Preconditions:\*\*")
 POST_RE = re.compile(r"^\*\*Postconditions:\*\*")
 COMMIT_RE = re.compile(r"\bgit\s+commit\b")
+# A backticked path with a directory separator, outside Files lines: `src/app/x.py`.
+REF_PATH_RE = re.compile(r"`(?P<path>[^`\s:]+/[^`\s:]+\.[A-Za-z0-9]+)(?::\d+(?:-\d+)?)?`")
 PLACEHOLDER_RE = re.compile(
     r"\b(TBD|TODO|FIXME)\b|implement later|fill in details|similar to task \d+"
     r"|add appropriate error handling|handle edge cases",
@@ -167,8 +169,10 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
         if COMMIT_RE.search(line) and (fenced or STEP_RE.match(line)):
             errors.append(f"line {number}: commit step; no skill commits, the plan must not commit")
 
-    # Per-task body checks.
+    # Per-task body checks. `created` grows task by task: a later task may Modify or Test
+    # a file an earlier task creates.
     line_counts: Dict[str, Optional[int]] = {}
+    created: set = set()
     for index, task in enumerate(tasks):
         start = task["line"]
         end = tasks[index + 1]["line"] if index + 1 < len(tasks) else None
@@ -212,19 +216,44 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
             if not path_match:
                 errors.append(f"line {n}: {file_match.group('kind')} path must be in backticks: {line.strip()}")
                 continue
-            if root is None or file_match.group("kind") != "Modify":
-                continue
+            kind = file_match.group("kind")
             rel = path_match.group("path").strip()
+            if kind == "Create":
+                created.add(rel)
+            if root is None:
+                continue
             full = os.path.join(root, rel)
+            exists = os.path.isfile(full)
+            if kind == "Create":
+                if exists:
+                    warnings.append(f"line {n}: Create target already exists under root: {rel} (use Modify:)")
+                continue
+            if kind == "Test":
+                if not exists and rel not in created:
+                    warnings.append(f"line {n}: Test target not found under root and not created by an earlier task: {rel}")
+                continue
             if rel not in line_counts:
-                line_counts[rel] = _count_lines(full) if os.path.isfile(full) else None
+                line_counts[rel] = _count_lines(full) if exists else None
             total = line_counts[rel]
             if total is None:
-                warnings.append(f"line {n}: Modify target not found under root: {rel}")
+                if rel not in created:
+                    warnings.append(f"line {n}: Modify target not found under root: {rel}")
                 continue
             last = path_match.group("end") or path_match.group("start")
             if last and int(last) > total:
                 warnings.append(f"line {n}: line range beyond end of {rel} ({total} lines)")
+
+        if root is not None:
+            # Paths cited in prose must exist or be created by the plan: a plan that names
+            # files that are not there is guessing about the codebase.
+            for n, line, fenced in body:
+                if fenced or FILE_LINE_RE.match(line):
+                    continue
+                for ref in REF_PATH_RE.finditer(line):
+                    rel = ref.group("path")
+                    if rel in created or os.path.exists(os.path.join(root, rel)):
+                        continue
+                    warnings.append(f"line {n}: referenced path not found under root: {rel}")
 
         code_lines = sum(1 for _, line, fenced in body if fenced and not FENCE_RE.match(line))
         if code_lines > MAX_CODE_LINES:

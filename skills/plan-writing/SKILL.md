@@ -54,6 +54,13 @@ Before defining tasks, list the files to create or modify and each file's single
 
 **Read before you modify.** For every `Modify:` target, open the file first and record one line in the task's `Files` block: *current state / what changes / what must be preserved*. This makes `path:123-145` line ranges real instead of guessed.
 
+**Ground every claim in the code.** A plan that names files, functions or commands that do not exist is fiction:
+
+- Every existing symbol a step calls or extends is cited once as `path:line` where it is defined (in the `Files` line or the step text). Symbols the plan introduces are defined in a task before they are used.
+- `Create:` targets must not exist yet; a file that exists is `Modify:`.
+- The test command in a step must exist in the project (runner, script, config). Run the project's test suite once before writing tasks and record the command and result in the plan header (`**Baseline:** pytest -q → 128 passed`); a red baseline is reported to the user before planning continues.
+- `plan-check --root` reports `Create:` targets that exist, `Test:`/`Modify:` targets and referenced paths that do not, and line ranges beyond the file; every warning is resolved or explained in the plan.
+
 ## 4. Tasks
 
 **Size.** A task fits **10 minutes of work OR 100 lines of new code**, whichever comes first. Otherwise split it into `Task N.1`, `Task N.2`, … recursively. Warning signs: more than ~5 implementation steps, new logic in more than 2-3 files, "and then" chains in the title. A **step** is one action of 2-5 minutes: write the failing test, run it, implement, run again.
@@ -78,6 +85,8 @@ Before defining tasks, list the files to create or modify and each file's single
 **Architecture:** [2-3 sentences]
 
 **Tech Stack:** [key technologies]
+
+**Baseline:** [test command → result before this plan]
 
 ---
 ```
@@ -160,6 +169,7 @@ Every step contains what the engineer needs. Plan failures:
 1. Run `plan-check <plan> --root <project>` until it exits `0`. It enforces the header fields, task headings and unique ids, the task core per tier, backticked file paths, no commit steps, and no placeholders. Review its `warnings`: a missing `Modify:` target is fine only if an earlier task creates it, and a code-size warning means the task needs splitting.
 2. Then check what the tool cannot:
    - **Spec coverage:** every spec requirement maps to a task. Add a task for each gap.
+   - **Grounding:** every `path:line` citation was actually read; `Create:` targets are new; the test command exists.
    - **Consistency:** names, types and signatures match across tasks (`clearLayers()` in Task 3 and `clearFullLayers()` in Task 7 is a bug).
    - **Size:** each task fits the limit. Split it if not.
 3. On the Deep tier, if the host supports subagents, also dispatch a reviewer with `plan-document-reviewer-prompt.md` and fix what it reports.

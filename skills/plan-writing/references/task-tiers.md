@@ -72,9 +72,3 @@ If the spec has no `Tier:` line, or an unrecognized value, `plan-writing`
 defaults to **Standard**, announces the assumption, and writes
 `**Tier:** Standard` into the plan header. The spec's recorded `Tier:` line is
 the single source of truth when present.
-
-## Related Files
-
-- `../../plan-brainstorming/references/depth-tiers.md` — spec-side tiers.
-- `../SKILL.md` — reads the tier at Preflight and applies this mapping.
-- `../plan-document-reviewer-prompt.md` — Deep-tier reviewer.

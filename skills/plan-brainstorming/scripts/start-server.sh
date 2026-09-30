@@ -7,7 +7,9 @@
 #
 # Options:
 #   --project-dir <path>  Store session files under <path>/.planforge/brainstorm/
-#                         instead of /tmp. Files persist after server stops.
+#                         instead of the temp dir. Files persist after server stops.
+#                         On Windows/Git Bash both C:/... and /c/... forms are accepted;
+#                         the returned JSON uses native (C:/...) paths.
 #   --host <bind-host>    Host/interface to bind (default: 127.0.0.1).
 #                         Use 0.0.0.0 in remote/containerized environments.
 #   --url-host <host>     Hostname shown in returned URL JSON.
@@ -64,24 +66,45 @@ if [[ -n "${CODEX_CI:-}" && "$FOREGROUND" != "true" && "$FORCE_BACKGROUND" != "t
   FOREGROUND="true"
 fi
 
-# Windows/Git Bash reaps nohup background processes. Auto-foreground when detected.
-if [[ "$FOREGROUND" != "true" && "$FORCE_BACKGROUND" != "true" ]]; then
-  case "${OSTYPE:-}" in
-    msys*|cygwin*|mingw*) FOREGROUND="true" ;;
-  esac
-  if [[ -n "${MSYSTEM:-}" ]]; then
-    FOREGROUND="true"
-  fi
+# Windows/Git Bash (MSYS): nohup background processes get reaped, `ps -o` is unsupported,
+# and node resolves POSIX paths (/tmp, /c/...) relative to the current drive. Detect it once.
+IS_MSYS="false"
+case "${OSTYPE:-}" in
+  msys*|cygwin*|mingw*) IS_MSYS="true" ;;
+esac
+if [[ -n "${MSYSTEM:-}" ]]; then
+  IS_MSYS="true"
 fi
+if [[ "$IS_MSYS" == "true" && "$FOREGROUND" != "true" && "$FORCE_BACKGROUND" != "true" ]]; then
+  FOREGROUND="true"
+fi
+
+# Path seen by bash (POSIX) and by node (native). Identical outside MSYS.
+to_node_path() {
+  if [[ "$IS_MSYS" == "true" ]] && command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+to_bash_path() {
+  if [[ "$IS_MSYS" == "true" ]] && command -v cygpath >/dev/null 2>&1; then
+    cygpath -u "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 
 # Generate unique session directory
 SESSION_ID="$$-$(date +%s)"
 
 if [[ -n "$PROJECT_DIR" ]]; then
+  PROJECT_DIR="$(to_bash_path "$PROJECT_DIR")"
   SESSION_DIR="${PROJECT_DIR}/.planforge/brainstorm/${SESSION_ID}"
 else
-  SESSION_DIR="/tmp/brainstorm-${SESSION_ID}"
+  SESSION_DIR="${TMPDIR:-/tmp}/brainstorm-${SESSION_ID}"
 fi
+NODE_SESSION_DIR="$(to_node_path "$SESSION_DIR")"
 
 STATE_DIR="${SESSION_DIR}/state"
 PID_FILE="${STATE_DIR}/server.pid"
@@ -99,24 +122,30 @@ fi
 
 cd "$SCRIPT_DIR"
 
-# Resolve the harness PID (grandparent of this script).
-# $PPID is the ephemeral shell the harness spawned to run us — it dies
-# when this script exits. The harness itself is $PPID's parent.
-OWNER_PID="$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ')"
-if [[ -z "$OWNER_PID" || "$OWNER_PID" == "1" ]]; then
-  OWNER_PID="$PPID"
+# Resolve the owner PID the server watches (node exits when it dies).
+# POSIX: the harness is the grandparent of this script ($PPID is the ephemeral tool shell).
+# MSYS: `ps -o` is unsupported and node needs a Windows PID, so take the WINPID column of the
+# tool shell ($PPID); in foreground mode that shell lives exactly as long as the tool call.
+# An empty OWNER_PID disables owner monitoring (the 30-minute idle timeout still applies).
+if [[ "$IS_MSYS" == "true" ]]; then
+  OWNER_PID="$(ps -p "$PPID" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}')"
+else
+  OWNER_PID="$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ')"
+  if [[ -z "$OWNER_PID" || "$OWNER_PID" == "1" ]]; then
+    OWNER_PID="$PPID"
+  fi
 fi
 
 # Foreground mode for environments that reap detached/background processes.
+# exec keeps $$ = the server's PID, so stop-server.sh can kill it by the pid file.
 if [[ "$FOREGROUND" == "true" ]]; then
   echo "$$" > "$PID_FILE"
-  env BRAINSTORM_DIR="$SESSION_DIR" BRAINSTORM_HOST="$BIND_HOST" BRAINSTORM_URL_HOST="$URL_HOST" BRAINSTORM_OWNER_PID="$OWNER_PID" node server.cjs
-  exit $?
+  exec env BRAINSTORM_DIR="$NODE_SESSION_DIR" BRAINSTORM_HOST="$BIND_HOST" BRAINSTORM_URL_HOST="$URL_HOST" BRAINSTORM_OWNER_PID="$OWNER_PID" node server.cjs
 fi
 
 # Start server, capturing output to log file
 # Use nohup to survive shell exit; disown to remove from job table
-nohup env BRAINSTORM_DIR="$SESSION_DIR" BRAINSTORM_HOST="$BIND_HOST" BRAINSTORM_URL_HOST="$URL_HOST" BRAINSTORM_OWNER_PID="$OWNER_PID" node server.cjs > "$LOG_FILE" 2>&1 &
+nohup env BRAINSTORM_DIR="$NODE_SESSION_DIR" BRAINSTORM_HOST="$BIND_HOST" BRAINSTORM_URL_HOST="$URL_HOST" BRAINSTORM_OWNER_PID="$OWNER_PID" node server.cjs > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 disown "$SERVER_PID" 2>/dev/null
 echo "$SERVER_PID" > "$PID_FILE"

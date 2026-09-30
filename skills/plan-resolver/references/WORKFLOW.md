@@ -37,7 +37,6 @@ task-census <plan> <NEXT_REPORT>
 validate-report <NEXT_REPORT> --root <workspace-root>
 fingerprint-workspace <workspace-root> <current-json> --base <start-json>
 assert-readonly <start-json> <current-json> <NEXT_REPORT>
-iteration-check <LAST_REPORT> 5        # non-final subsequent pass only; LAST_REPORT = the previous report
 ```
 
 ## Bootstrap
@@ -51,7 +50,7 @@ iteration-check <LAST_REPORT> 5        # non-final subsequent pass only; LAST_RE
 - A newest `-final` report means the plan is closed: exit `64`, `closed: true`, write nothing.
 - Output: `master_plan*`, `plan_dir*`, `reports`, `last_report`, `next_n`, `next_open_name`,
   `next_final_name`, `next_open_path`, `next_final_path`, `language`, `pass_type`
-  (`first` | `subsequent`), and `report_header` with ready frontmatter values (`master_plan_path`
+  (`first` | `subsequent`), `stuck_open` (below), and `report_header` with ready frontmatter values (`master_plan_path`
   relative to `PLAN_DIR`, `master_plan_sha256`, `master_plan_size`, `audit_iteration`,
   `consecutive_open_invocations_if_open` / `_if_final`, `previous_report_path`,
   `previous_report_sha256`, `language`). Copy them; do not recompute.
@@ -74,7 +73,9 @@ added/removed/modified path is the blocker `probe-mutated-workspace`: rewrite th
 that single issue, run only `validate-report` again, stop with status OPEN. No second guard in the
 same invocation.
 
-`snapshot-diff <before> <after>` lists `added`/`removed`/`modified` paths (used by FIX).
+`snapshot-diff <before> <after>` lists `added`/`removed`/`modified` paths and their union
+`changed` (used by FIX). `.git/index` is excluded from the fingerprint, so read-only git commands
+(`git status`, `git diff`) do not trip the guard; commits, resets and checkouts still do.
 
 ## Report name
 
@@ -85,8 +86,9 @@ same invocation.
 ## Stuck open
 
 `consecutive_open_invocations` counts open reports in a row (value ready in `report_header`).
-`iteration-check <LAST_REPORT> [limit=5]` returns `ask_required` at the limit: tell the user the
-audit keeps finding open issues and ask how to proceed. In `fix`/`next`/`auto`, `cycle-check` decides.
+`bootstrap.stuck_open` = `{consecutive_if_open, limit: 5, ask_required}`: when `ask_required` is
+true and this pass also ends open, tell the user the audit keeps finding open issues and ask how
+to proceed instead of proposing another pass. In `fix`/`next`/`auto`, `cycle-check` decides.
 
 ## Commands
 
@@ -99,7 +101,6 @@ assert-readonly <start-json> <current-json> <allowed-path>
 parse-report <report.md>
 validate-report <report.md> [--root <workspace-root>]
 task-census <plan> <report>
-iteration-check <last-report> [limit]
 discover <workspace-root> [plan]
 open-issues <report>
 protect <out-json> <path>...

@@ -25,7 +25,7 @@ gates, review rendering, validation) is done by the script; you do the audit and
 
 - `PLAN` (required): path to the master plan, e.g. `docs/plans/plan01-impl.md`, or a plan-splitter
   roadmap `<base>-roadmap.md` (batch mode, see below).
-- `parts`: batch mode only; a comma-separated list of part ids to verify (default: all).
+- `parts`: batch mode only; `all` (default) or a comma-separated list of part ids to verify.
 - `mode`: `full-cycle` (default) or `audit-only` (the user asks for "only audit", "only a review",
   "don't implement"): one audit, one review file, no Phase B.
 - `preset`: `quick` | `standard` (default) | `deep`. Sets `lenses` 1/2/4, `rigor`
@@ -61,7 +61,7 @@ audited; the roadmap and the source plan are not.
 
 ```
 P = TOOL parts PLAN                      # parts in table order; exit 1 if a part file is missing → report and stop
-parts = P.parts, or only the ids in `parts=` (roadmap order; an unknown id → report and stop)
+parts = P.parts (`parts=all` or absent), or only the ids in `parts=` (roadmap order; an unknown id → report and stop)
 finals = {}
 for part in parts:
     run the whole Loop below with PLAN = part.path: bootstrap (same preset/stop_policy

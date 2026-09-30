@@ -14,7 +14,7 @@ import random
 import re
 import string
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
@@ -63,7 +63,9 @@ FIXED_EXCLUDED_DIRS = {
     ".venv",
     "venv",
 }
-FIXED_EXCLUDED_PREFIXES = {".git/objects"}
+# .git/index: read-only git commands (status, diff) refresh its stat cache. HEAD and refs stay
+# in the fingerprint, so commits, resets and checkouts are still detected.
+FIXED_EXCLUDED_PREFIXES = {".git/objects", ".git/index"}
 # Tool caches that read-only probes (pytest, mypy, ruff, tsc, eslint) create as a side effect.
 FIXED_EXCLUDED_CACHE_DIRS = {".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis", ".tox", ".nox", ".cache"}
 FIXED_EXCLUDED_FILES = {".eslintcache"}
@@ -168,6 +170,7 @@ def parse_report_filename(filename: str) -> Optional[Dict[str, object]]:
 
 
 CYRILLIC_RATIO_THRESHOLD = 0.05
+STUCK_OPEN_LIMIT = 5
 
 
 def detect_plan_language(plan_path: str) -> str:
@@ -290,15 +293,24 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         "master_plan_sha256": master_sha,
         "master_plan_size": os.path.getsize(master_abs),
         "audit_iteration": next_n,
+        "audited_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "consecutive_open_invocations_if_open": previous_consecutive + 1,
         "consecutive_open_invocations_if_final": 0,
         "previous_report_path": os.path.basename(str(last_report["abs_path"])) if last_report else None,
         "previous_report_sha256": last_report["sha256"] if last_report else None,
         "language": language,
     }
+    # Stuck-open gate: this many audits in a row ended with an open report (counting this
+    # one if it stays open). At the limit the agent asks the user instead of auditing again.
+    stuck_open = {
+        "consecutive_if_open": previous_consecutive + 1,
+        "limit": STUCK_OPEN_LIMIT,
+        "ask_required": previous_consecutive + 1 >= STUCK_OPEN_LIMIT,
+    }
     result = {
         "valid": True,
         "closed": False,
+        "stuck_open": stuck_open,
         "workspace_root": workspace_root,
         "master_plan": master_rel,
         "master_plan_abs": master_abs,
@@ -1140,37 +1152,6 @@ def cmd_validate_report(args: argparse.Namespace) -> int:
     return 0 if valid else 1
 
 
-def cmd_iteration_check(args: argparse.Namespace) -> int:
-    if not os.path.isfile(args.last_report):
-        print_json({"valid": False, "errors": [f"file not found: {args.last_report}"]})
-        return 2
-    header = parse_header(read_text(args.last_report))
-    audit_iteration = parse_int(header.get("audit_iteration"))
-    previous_consecutive = parse_int(header.get("consecutive_open_invocations"))
-    if audit_iteration is None or previous_consecutive is None:
-        print_json({"valid": False, "errors": ["iteration-check-missing-header-fields"]})
-        return 2
-    if os.path.basename(args.last_report).lower().endswith("-final.md"):
-        consecutive = 0
-        next_audit_iteration = audit_iteration
-    else:
-        consecutive = previous_consecutive + 1
-        next_audit_iteration = audit_iteration + 1
-    limit = args.limit
-    print_json(
-        {
-            "valid": True,
-            "previous_consecutive": previous_consecutive,
-            "consecutive": consecutive,
-            "last_audit_iteration": audit_iteration,
-            "next_audit_iteration": next_audit_iteration,
-            "ask_required": consecutive >= limit and consecutive > 0,
-            "limit": limit,
-        }
-    )
-    return 0
-
-
 def extract_plan_task_id(line: str) -> str:
     return extract_plan_task_id_kind(line)[0]
 
@@ -1581,11 +1562,6 @@ def build_parser() -> argparse.ArgumentParser:
     readonly.add_argument("current_json")
     readonly.add_argument("allowed_path")
     readonly.set_defaults(func=cmd_assert_readonly)
-
-    iteration = subparsers.add_parser("iteration-check")
-    iteration.add_argument("last_report")
-    iteration.add_argument("limit", nargs="?", type=int, default=5)
-    iteration.set_defaults(func=cmd_iteration_check)
 
     census = subparsers.add_parser("task-census")
     census.add_argument("plan")

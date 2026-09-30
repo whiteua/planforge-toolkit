@@ -47,7 +47,8 @@ loop:
 1. `open-issues <LAST_REPORT>` → `fix_order` (critical → low) and compact issue fields; the JSON is
    enough, do not re-read the whole report.
 2. `protect <tmp-json> <plan> <all reports>` and `fingerprint-workspace <workspace-root> <fix-start-json>`
-   (temp paths outside the workspace).
+   (temp paths outside the workspace; `--base <last audit's current snapshot>` is optional and
+   only saves rehashing).
 3. For each issue in `fix_order`: read the code at `evidence` and the linked plan items; make the
    minimal change that closes the plan's contract, no refactoring of neighbouring code; run the
    existing read-only probe for the area if there is one; note the outcome: `applied`,

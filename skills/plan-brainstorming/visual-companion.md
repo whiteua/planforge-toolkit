@@ -45,7 +45,7 @@ Save `screen_dir` and `state_dir` from the response. Tell user to open the URL.
 
 **Finding connection info:** The server writes its startup JSON to `$STATE_DIR/server-info`. If you launched the server in the background and didn't capture stdout, read that file to get the URL and port. When using `--project-dir`, check `<project>/.planforge/brainstorm/` for the session directory.
 
-**Note:** Pass the project root as `--project-dir` so mockups persist in `.planforge/brainstorm/` and survive server restarts. Without it, files go to `/tmp` and get cleaned up. Remind the user to add `.planforge/` to `.gitignore` if it's not already there.
+**Note:** Pass the project root as `--project-dir` so mockups persist in `.planforge/brainstorm/` and survive server restarts. Without it, files go to the OS temp dir and get cleaned up on stop. Remind the user to add `.planforge/` to `.gitignore` if it's not already there.
 
 **Launching the server by platform:**
 
@@ -55,14 +55,14 @@ Save `screen_dir` and `state_dir` from the response. Tell user to open the URL.
 scripts/start-server.sh --project-dir /path/to/project
 ```
 
-**Claude Code (Windows):**
+**Claude Code (Windows / Git Bash):**
 ```bash
 # Windows auto-detects and uses foreground mode, which blocks the tool call.
 # Use run_in_background: true on the Bash tool call so the server survives
 # across conversation turns.
-scripts/start-server.sh --project-dir /path/to/project
+scripts/start-server.sh --project-dir C:/path/to/project     # /c/path/to/project works too
 ```
-When calling this via the Bash tool, set `run_in_background: true`. Then read `$STATE_DIR/server-info` on the next turn to get the URL and port.
+When calling this via the Bash tool, set `run_in_background: true`. Then read `$STATE_DIR/server-info` on the next turn to get the URL and port. The returned `screen_dir`/`state_dir` are native paths (`C:/...`): use them as they are with the Write/Read tools and pass `state_dir`'s parent to `stop-server.sh` unchanged. The server watches the Bash tool's shell: when that background call ends, the server exits within a minute (or after 30 minutes idle).
 
 **Codex:**
 ```bash

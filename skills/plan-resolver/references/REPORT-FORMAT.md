@@ -5,7 +5,8 @@ checks exactly this structure. Templates: `assets/report-template.{ru,en}.md`.
 
 ## Header
 
-YAML frontmatter; paths POSIX-relative to `PLAN_DIR`; values copied from `bootstrap.report_header`.
+YAML frontmatter; paths POSIX-relative to `PLAN_DIR`; values copied from `bootstrap.report_header`
+(including `audited_at`; `consecutive_open_invocations` takes the `_if_open` or `_if_final` value).
 
 ```yaml
 ---
@@ -57,12 +58,15 @@ One line per phase or task with a status marker:
 
 Rules:
 
-- Task ids are `<phase>.<n>`; phase lines carry the phase number. `plan-splitter` part ids
+- Ids are the plan's own ids. A `plan-writing` plan (`### Task 1:`, `### Task 1.1:`) gives
+  `- ✅ 1. Title evidence_anchor: …` and `- ✅ 1.1 Title evidence_anchor: …`; a plan with phases
+  and nested items gives phase lines (`1`) with tasks `<phase>.<n>` under them. `plan-splitter` part ids
   (`a`, `b`) are written as `- ✅ a: Title`.
 - Every closed leaf (`✅` task, or `✅` phase without tasks of its own) needs an
-  `evidence_anchor: path#Lx-Ly` (inline or on an indented detail line). Missing anchor: warning in
-  an open report, error in `-final`. With `--root`, every anchor on `✅`/`⚠️` items and in issue
-  `evidence` must point at an existing file and line range; otherwise the report is invalid.
+  `evidence_anchor: path#Lx-Ly` (inline or on an indented detail line; several anchors are
+  fine). Missing anchor: warning in an open report, error in `-final`. With `--root`, every anchor
+  on `✅`/`⚠️` items and in issue `evidence` must point at an existing file and line range;
+  otherwise the report is invalid. `evidence: not found` has no anchor and is not checked.
 - `⚠️ ambiguous` always needs an anchor; the same task with the same anchor as in the previous
   report is a `[WARNING] … stuck in ambiguous`.
 - Optional `confidence: high|medium|low`. `low` on a `✅` task or a `fixed` issue: warning in an
@@ -81,10 +85,15 @@ Numbered from 1, stable across the report:
 - **title**: Short title
 - **linked_items**: 1.2, 1.3
 - **origin**: carry|new
-- **evidence**: path/to/file.py#L10-L20
+- **category**: logic            (optional; one of the AUDIT.md categories)
+- **evidence**: path/to/file.py#L10-L20      (or `not found` when the code does not exist)
 - **description**: at least 200 characters: symptom, cause, plan contract, actual behaviour, impact.
 - **recommendations**: concrete actions to fix and to re-verify.
 ```
+
+One issue per defect that needs its own fix (a wrong branch and a missing test are two issues).
+A carry-over issue keeps its title, description and evidence field verbatim, also when it is now
+`✅ fixed`; its recommendations become what was verified.
 
 `level`: `critical`, `high`, `medium`, `low`. `status`: `✅ fixed`, `⚠️ fixed-with-errors`,
 `⭕️ not-fixed`, `⚠️ regressed`. No issues: the section contains `Ошибок не найдено.` /

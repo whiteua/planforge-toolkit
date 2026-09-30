@@ -102,17 +102,18 @@ parse the same ids.
    Fix defects and repeat; after 3 failed rounds exit with a warning, files kept.
 
 7. DONE NOTICE / VERIFY CHOICE
-   Print assets/verify-prompt.<LANG>.md; resolve scope from `verify` or ask.
+   Scope comes from `verify`; only when it is `ask` (interactive), print
+   assets/verify-prompt.<LANG>.md and ask.
    scope = none → print assets/completion.<LANG>.md and exit.
    Otherwise do not announce "done" for the selected parts before step 8 passes.
 
 8. GATED DEEP VERIFICATION (references/DEEP-VERIFY.md)
-   TOOL verify-baseline DIR BASE --stages <scope>  > <BASE>-verify-baseline.json
+   TOOL verify-baseline DIR BASE --stages <scope> --out DIR/<BASE>-verify-baseline.json
    Run plan-iterative-revision ONCE on <BASE>-roadmap.md (batch mode, autonomous,
-   preset=verify_depth, mode=verify_mode, parts=<scope>), sequentially per part.
-   TOOL verify-record DIR BASE --results <its batch JSON> --ledger <BASE>-verify-ledger.json --mode verify_mode
+   preset=verify_depth, mode=verify_mode, parts=<list> unless the scope is all), sequentially per part.
+   TOOL verify-record DIR BASE --results <its batch JSON file> --ledger DIR/<BASE>-verify-ledger.json --mode verify_mode
    TOOL verify-status DIR BASE --baseline ... --ledger ... --validator <SKILL_DIR>/../plan-iterative-revision/scripts/next_review_index.py --stages <scope>
-   exit 0 → print assets/verify-summary.<LANG>.md, then completion.
+   exit 0 → (full-cycle: re-run validate-all, parts were edited) → print assets/verify-summary.<LANG>.md, then completion.
    missing → re-dispatch those parts once and repeat; still missing or any inconsistent → stop.
 ```
 

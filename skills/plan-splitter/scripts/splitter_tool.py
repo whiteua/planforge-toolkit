@@ -34,9 +34,10 @@ Subcommands:
       task-coverage (sum of part tasks >= original-plan tasks), original-plan hash.
       Print JSON with detailed results. Exit 0 on success, 1 on failure.
 
-  verify-baseline <dir> <base_name> [--stages all|a[,b...]]
+  verify-baseline <dir> <base_name> [--stages all|a[,b...]] [--out <file>]
       Snapshot selected part SHA-256 values and pre-existing review files.
-      'all' takes the parts from the roadmap table, in table order.
+      'all' takes the parts from the roadmap table, in table order. --out writes the JSON
+      file itself (UTF-8) in addition to printing it.
 
   verify-record <dir> <base_name> --results <file|-> --ledger <file> [--mode full-cycle|audit-only]
       Upsert the ledger from plan-iterative-revision's batch JSON ({"parts": {"a": {...}}}).
@@ -620,7 +621,7 @@ def cmd_validate_all(directory: str, base_name: str) -> None:
 
 # ---------- verify-baseline ----------
 
-def cmd_verify_baseline(directory: str, base_name: str, stages_arg: str) -> None:
+def cmd_verify_baseline(directory: str, base_name: str, stages_arg: str, out_path: Optional[str] = None) -> None:
     if not os.path.isdir(directory):
         print_json({"error": f"Directory not found: {directory}"}, 1)
 
@@ -632,7 +633,13 @@ def cmd_verify_baseline(directory: str, base_name: str, stages_arg: str) -> None
             "review_files": _reviews_for_stage(directory, base_name, stage),
         }
 
-    print_json({"base_name": base_name, "stages": stages}, 0)
+    snapshot = {"base_name": base_name, "stages": stages}
+    if out_path:
+        # Written by the tool so the encoding never depends on the shell's redirect.
+        with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(snapshot, f, ensure_ascii=False, sort_keys=True, indent=2)
+            f.write("\n")
+    print_json(snapshot, 0)
 
 
 # ---------- verify-record ----------
@@ -739,7 +746,8 @@ def cmd_verify_status(
             remaining_issues = ledger_entry.get("remaining_issues")
 
         reviews_validated = False
-        if not isinstance(ledger_entry, dict):
+        if not isinstance(ledger_entry, dict) or result is None:
+            # No entry, or a recorded failure without a result: the part was not verified.
             verdict = "missing"
         elif result == "clean":
             verdict = "satisfied" if not new_reviews and not stg_sha_changed else "inconsistent"
@@ -806,7 +814,7 @@ USAGE = """Usage:
   splitter_tool.py validate-stage <file>
   splitter_tool.py validate-roadmap <file>
   splitter_tool.py validate-all <dir> <base_name>
-  splitter_tool.py verify-baseline <dir> <base_name> [--stages all|a[,b...]]
+  splitter_tool.py verify-baseline <dir> <base_name> [--stages all|a[,b...]] [--out <file>]
   splitter_tool.py verify-record <dir> <base_name> --results <file|-> --ledger <file> [--mode full-cycle|audit-only]
   splitter_tool.py verify-status <dir> <base_name> --baseline <file> --ledger <file> --validator <file> [--stages all|a[,b...]]
   splitter_tool.py hash <file>
@@ -836,7 +844,7 @@ def main(argv: List[str]) -> None:
             cmd_validate_all(args[0], args[1])
         elif cmd == "verify-baseline" and len(args) >= 2:
             stages_arg = _get_flag(args[2:], "--stages", "all") or "all"
-            cmd_verify_baseline(args[0], args[1], stages_arg)
+            cmd_verify_baseline(args[0], args[1], stages_arg, _get_flag(args[2:], "--out"))
         elif cmd == "verify-record" and len(args) >= 2:
             results_arg = _get_flag(args[2:], "--results")
             ledger_path = _get_flag(args[2:], "--ledger")

@@ -23,7 +23,10 @@ Columns, in this order:
 - **Title**: 1–4 words.
 - **Depends on**: `—` or a comma-separated list of ids (`a, b`).
 - **Parallel group**: a capital letter (`A`, `B`, …); a lone part still gets its own group.
-- **Weight**: `🔴 heavy` / `🟡 medium` / `🟢 light`. Required.
+- **Weight**: `🔴 heavy` / `🟡 medium` / `🟢 light`. Required; `plan-executor` derives the gate
+  depth from it. Heavy: more than 10 tasks, or risky work (migrations, security, auth,
+  concurrency, cross-module refactoring). Medium: 6–10 tasks, or a new integration. Light: up to
+  5 tasks of local, low-risk work.
 
 Validators lower-case ids and accept space-separated dependencies, but the generated file uses
 the canonical form above. Any id that is not letters is an error.

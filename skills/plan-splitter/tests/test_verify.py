@@ -443,6 +443,27 @@ class VerifyRecordTests(unittest.TestCase):
             self.assertEqual(ledger["stages"]["b"]["attempts"], 2)
             self.assertEqual(ledger["stages"]["a"]["result"], "clean")
 
+    def test_recorded_failure_is_missing_not_inconsistent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            base = "plan"
+            make_stage_dir(directory, base)
+            baseline_path = directory / f"{base}-verify-baseline.json"
+            process = run_tool("verify-baseline", str(directory), base, "--stages", "a", "--out", str(baseline_path))
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            self.assertEqual(json.loads(baseline_path.read_text(encoding="utf-8")), read_json(process))
+            ledger_path = directory / f"{base}-verify-ledger.json"
+            results = {"parts": {"a": {"result": None, "error": "subagent died"}}}
+            process = subprocess.run(
+                [sys.executable, str(TOOL), "verify-record", str(directory), base,
+                 "--results", "-", "--ledger", str(ledger_path)],
+                text=True, capture_output=True, encoding="utf-8", input=json.dumps(results),
+            )
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            process = run_status(directory, base, baseline_path, ledger_path, stages="a")
+            self.assertEqual(process.returncode, 1)
+            self.assertEqual(read_json(process)["stages"]["a"]["verdict"], "missing")
+
     def test_baseline_all_follows_roadmap_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

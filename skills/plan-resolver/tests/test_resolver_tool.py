@@ -201,7 +201,8 @@ class PreflightAndFingerprintTests(unittest.TestCase):
             process = run_tool("fingerprint-workspace", str(root), str(start_json))
             self.assertEqual(process.returncode, 0, read_json(process))
             write(root / "main-plan-report-1.md", "report")
-            # Probe side effects (tool caches) must not count as workspace mutations.
+            # Probe side effects (tool caches, git's stat-cache refresh) must not count as mutations.
+            write(root / ".git" / "index", "refreshed by git status")
             write(root / ".pytest_cache" / "v" / "nodeids", "[]")
             write(root / ".mypy_cache" / "3.12" / "x.json", "{}")
             write(root / ".eslintcache", "{}")
@@ -290,19 +291,6 @@ class ReportTests(unittest.TestCase):
             data = read_json(process)
             self.assertEqual(process.returncode, 1, data)
             self.assertIn("final report contains non-fixed issues", "\n".join(data["errors"]))
-
-    def test_iteration_check(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            report = Path(tmp) / "main-plan-report-4.md"
-            content = valid_report().replace("audit_iteration: 1", "audit_iteration: 4").replace(
-                "consecutive_open_invocations: 1", "consecutive_open_invocations: 4"
-            )
-            write(report, content)
-            process = run_tool("iteration-check", str(report), "5")
-            data = read_json(process)
-            self.assertEqual(process.returncode, 0, data)
-            self.assertEqual(data["consecutive"], 5)
-            self.assertTrue(data["ask_required"])
 
 
 class AnchorVerificationTests(unittest.TestCase):
@@ -840,6 +828,21 @@ class FixLoopToolTests(unittest.TestCase):
             self.assertEqual(header["previous_report_sha256"], sha256(report1))
             self.assertEqual(header["consecutive_open_invocations_if_open"], 2)
             self.assertEqual(header["consecutive_open_invocations_if_final"], 0)
+            self.assertEqual(data["stuck_open"], {"consecutive_if_open": 2, "limit": 5, "ask_required": False})
+            self.assertRegex(header["audited_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+    def test_bootstrap_stuck_open_at_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root / "main-plan.md", "# Main\n")
+            report = valid_report().replace("audit_iteration: 1", "audit_iteration: 4").replace(
+                "consecutive_open_invocations: 1", "consecutive_open_invocations: 4"
+            )
+            for n in range(1, 5):
+                write(root / f"main-plan-report-{n}.md", report)
+            data = read_json(run_tool("bootstrap", str(root), "main-plan.md", *[f"main-plan-report-{n}.md" for n in range(1, 5)]))
+            self.assertTrue(data["stuck_open"]["ask_required"])
+            self.assertEqual(data["stuck_open"]["consecutive_if_open"], 5)
 
     def test_discover_by_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

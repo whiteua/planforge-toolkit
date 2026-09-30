@@ -41,7 +41,7 @@ A part is a group of tasks that:
 1. belongs to one module or layer (a module change is a candidate boundary);
 2. shares one mental context;
 3. ends in a checkable deliverable;
-4. fits one agent pass (8–15 tasks).
+4. fits one agent pass (up to 15 tasks; smaller parts are fine when module boundaries give them).
 
 ## 5. Grouping rules
 
@@ -64,7 +64,7 @@ executable as a whole.
 
 ## 7. Oversized part
 
-If a part still holds more than 10–12 tasks after analysis, add to its file:
+If a part still holds more than 15 tasks after analysis (the `validate-stage` warning), add to its file:
 
 ```markdown
 > ⚠️ This part may be too large for a single pass.

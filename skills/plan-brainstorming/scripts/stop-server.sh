@@ -2,8 +2,8 @@
 # Stop the brainstorm server and clean up
 # Usage: stop-server.sh <session_dir>
 #
-# Kills the server process. Only deletes session directory if it's
-# under /tmp (ephemeral). Persistent directories (.planforge/) are
+# Kills the server process. Only deletes the session directory if it's
+# under the temp dir (ephemeral). Persistent directories (.planforge/) are
 # kept so mockups can be reviewed later.
 
 SESSION_DIR="$1"
@@ -11,6 +11,17 @@ SESSION_DIR="$1"
 if [[ -z "$SESSION_DIR" ]]; then
   echo '{"error": "Usage: stop-server.sh <session_dir>"}'
   exit 1
+fi
+
+# Accept the native (C:/...) path that start-server.sh returns on Windows/Git Bash.
+EPHEMERAL_ROOT="${TMPDIR:-/tmp}"
+if command -v cygpath >/dev/null 2>&1; then
+  case "${OSTYPE:-}${MSYSTEM:-}" in
+    *msys*|*cygwin*|*mingw*|*MINGW*|*MSYS*)
+      SESSION_DIR="$(cygpath -u "$SESSION_DIR")"
+      EPHEMERAL_ROOT="$(cygpath -u "$EPHEMERAL_ROOT")"
+      ;;
+  esac
 fi
 
 STATE_DIR="${SESSION_DIR}/state"
@@ -45,10 +56,18 @@ if [[ -f "$PID_FILE" ]]; then
 
   rm -f "$PID_FILE" "${STATE_DIR}/server.log"
 
-  # Only delete ephemeral /tmp directories
-  if [[ "$SESSION_DIR" == /tmp/* ]]; then
-    rm -rf "$SESSION_DIR"
-  fi
+  # Only delete ephemeral sessions: `brainstorm-<id>` directly under the temp dir.
+  # Project sessions (.planforge/brainstorm/<id>) persist, even when the project
+  # itself happens to live under the temp dir.
+  SESSION_DIR="${SESSION_DIR%/}"
+  case "$SESSION_DIR" in
+    */.planforge/brainstorm/*) ;;
+    /tmp/brainstorm-*|"${EPHEMERAL_ROOT%/}"/brainstorm-*)
+      if [[ "$(basename "$SESSION_DIR")" == brainstorm-* ]]; then
+        rm -rf "$SESSION_DIR"
+      fi
+      ;;
+  esac
 
   echo '{"status": "stopped"}'
 else

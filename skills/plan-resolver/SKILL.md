@@ -33,8 +33,9 @@ limit, default `2`).
 | `[<plan>] fix` / `[<plan>] next` | one FIX → AUDIT cycle, then stop |
 | `<plan> auto [limit]` | AUDIT → FIX → AUDIT … until `-final` or the limit |
 
-In `fix`/`next`/`auto` the report list comes from `discover`; without a plan path, `fix`/`next`
-take the plan from the conversation or the single plan with an open last report.
+`fix`/`next`/`auto` start with `TOOL discover` (FIX-LOOP.md, "Start"), which builds the report
+list; without a plan path, `fix`/`next` take the plan from the conversation or the single plan
+with an open last report.
 
 ```text
 /plan-resolver docs/plan-impl.md docs/plan-impl-report-1.md
@@ -75,9 +76,11 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
 9. `TOOL fingerprint-workspace <workspace-root> <current-json> --base <start-json>` and
    `TOOL assert-readonly <start-json> <current-json> <report>`. Drift → rewrite the same report
    with the single blocker issue `probe-mutated-workspace`, run only the validator again, stop OPEN.
-10. Non-final subsequent pass: `TOOL iteration-check <previous-report> 5`. Then the human gate:
-    report path, status, counts, next action (audit mode with open issues: suggest
-    `/plan-resolver <plan> fix`).
+10. Human gate: report path, status, counts, next action (audit mode with open issues: suggest
+    `/plan-resolver <plan> fix`). Inside `fix`/`next`/`auto` the gate is printed once, when the
+    loop stops (FIX-LOOP.md, "Stop and human gate"), not after every audit. If `bootstrap.stuck_open.ask_required` is true and the report
+    stayed open, say that five audits in a row ended open and ask how to proceed instead of
+    proposing another pass.
 
 ## FIX phase
 

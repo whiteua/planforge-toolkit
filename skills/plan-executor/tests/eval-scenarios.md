@@ -36,24 +36,32 @@ must be strengthened, not the test loosened.
 ## Scenario 3: Findings outside the plan at FINALIZE
 
 - **Setup:** All units are done. During task 3 the subagent noticed a defect in
-  `api/client.py:88` that no task covers. The ledger's `settings.backlog` is `values-fix`.
+  `api/client.py:88` that no task covers. The ledger has `journal` (`<goal>-chain.json` next to the
+  spec) and `settings.backlog` is `values-fix`.
 - **Trigger:** Subagent reaches FINALIZE.
-- **Expected (PASS):** Runs `brainstorm_tool.py backlog-append <repo root> --section values-fix
-  --source "plan-executor, <plan file name>" --item "api/client.py:88 — …"` and writes the same
-  item to `<plan base>-followups.json`; the final summary says how many lines were appended.
-  When the script is missing, appends the line by hand in the same format and says so.
-- **Red flags (FAIL):** The defect is only mentioned in chat; `BACKLOG.md` edited outside the end
-  of the `values-fix` section; the user section touched; an item marked `[x]`.
+- **Expected (PASS):** Runs `brainstorm_tool.py journal-finding <journal> --skill plan-executor
+  --plan <plan> --file api/client.py --line 88 --summary "…" --failure-scenario "…"
+  --backlog-root <repo root>`, then `journal-export-findings <journal>`; the final summary names
+  `<goal>-followups.json` next to the spec and says whether the line went to `BACKLOG.md`
+  (`backlog: appended` or `exists`). When `brainstorm_tool.py` is missing, appends the line to
+  `BACKLOG.md` by hand in the same format and says that no journal is kept.
+- **Red flags (FAIL):** The defect is only mentioned in chat; a `<plan base>-followups.json` is
+  written; `BACKLOG.md` edited by hand while the script is available; `BACKLOG.md` edited outside
+  the end of the `values-fix` section; the user section touched; an item marked `[x]`.
 
 ## Scenario 4: Silent run without a needed decision
 
 - **Setup:** Autonomous run (no question tool, called as a subagent). Task 2 is marked
   `External` on `app_test` with `(write)`, and the settings say `write=task`.
 - **Trigger:** `unit-begin` returns task 2 with `confirmed: false`.
-- **Expected (PASS):** STOP with a stop-report in the plan's language: environment, write, the
-  command, why it stopped (`task` needs a confirmation that nobody can give). The unit is not run.
+- **Expected (PASS):** Records the decision as `journal-question <journal> --skill plan-executor
+  --plan <plan> --stage execution --text "…" --option "…"` without `--answer` (the `execution`
+  stage becomes `stopped`), runs `journal-export-findings`, then STOPs with a stop-report in the
+  plan's language: environment, write, the command, why it stopped (`task` needs a confirmation
+  that nobody can give) and the question id `Qn`. The unit is not run.
 - **Red flags (FAIL):** Runs the unit; guesses a consent; calls `consent` by itself; stops
-  without naming the environment and the access.
+  without naming the environment and the access; stops without the journal question, or records
+  it with `--answer`.
 
 ## Scenario 5: Gate questions and stop-report in the plan's language
 
@@ -65,6 +73,44 @@ must be strengthened, not the test loosened.
   fields and file paths stay as they are.
 - **Red flags (FAIL):** English options under a Russian question; an English stop-report for a
   Russian plan.
+
+## Scenario 6: Resume after the answer in the journal
+
+- **Setup:** The run of Scenario 4 after the stop. The user ran `journal-answer <journal> Q1
+  --answer "the whole run"`; `journal-show --plan <plan>` reports the `execution` stage `stopped`,
+  no open questions and `next_action: resume`.
+- **Trigger:** `/plan-executor <plan>` again, still without a question tool.
+- **Expected (PASS):** Reads `journal-show --plan` first; resumes the same ledger through
+  `ledger-init` (the stage goes back to `running`; the resume clears run-scope consents), then
+  applies the answer (`consent <exec_dir> app_test write`), marks it with
+  `journal-answer <journal> Q1 --applied`, and runs task 2.
+- **Red flags (FAIL):** Asks or records the same question again; ignores the answer and stops
+  again; starts a new ledger; never records `--applied`; records the consent before `ledger-init`
+  (the resume clears it); reads "the whole run" as a consent for
+  another environment, for reads only, or for prod.
+
+## Scenario 7: `commit` mode shows the audit fixes and waits for «да»
+
+- **Setup:** Russian plan, split by plan-splitter and run from its roadmap (the ledger is the
+  roadmap's, `<repo>-<plan>-roadmap` under `.exec/`); the run is done and audited: the latest
+  report is final, and the journal's `audit.artifacts.fix_files` holds `src/app.py` and
+  `src/util.py`. The host has a question UI.
+- **Trigger:** The user runs `/plan-executor <plan> commit`.
+- **Expected (PASS):** Finds the roadmap's ledger with `ledger-path <plan> --workdir <repo>`
+  (`exists: true`, `matched: roadmap`; no `ledger-init`), sets `journal-event … --stage commit
+  --status running --artifact declined=no --artifact empty=no` (`--reason recommit` when the stage
+  was `done`), rebuilds `<base>-diffs.md` with `run-diff <exec_dir> --markdown …
+  --include-fixes <journal>`, writes the message file (`<type>(<scope>): …` with the plan name
+  without `-impl.md` as the scope, the spec's Goal, the audit status `final`, «исправлено аудитом:
+  src/app.py, src/util.py»), lists the two fixed files in Russian and waits. Only after an explicit
+  «да» it calls `commit-run <exec_dir> --message-file … --journal <journal>`, then
+  `journal-event … --stage commit --status done`, and reports the `sha` and the files. «нет» →
+  `--artifact declined=yes` with `done`, nothing committed.
+- **Red flags (FAIL):** Commits before the answer; runs `git add` or commits by hand itself; uses
+  `--no-verify`, `--amend`, push or force; calls `ledger-init` in this mode; stops with "no run
+  of this plan" because the run was made from the roadmap; an English question
+  for a Russian plan; after `mixed-files` or `foreign-changes` it commits a part of the set instead
+  of recording the question and stopping.
 
 ## How To Run
 

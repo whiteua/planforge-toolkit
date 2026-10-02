@@ -72,7 +72,9 @@ parse the same ids.
 6. Every part is self-contained: no "see above", "as in the original", "previous section".
 7. All generated files are in the plan's language (`LANG`).
 8. After step 8 only these files may differ from the pre-run state: roadmap, parts, the two
-   verify JSONs, and the review/completion files of the verified parts.
+   verify JSONs, the review/completion files of the verified parts, and the chain journal
+   `<goal>-chain.json` with `BACKLOG.md` and `<goal>-followups.json` (written only through
+   `brainstorm_tool.py`, Chain journal).
 9. A verified part is "done" only when `TOOL verify-status` exits 0. `missing` → one re-dispatch,
    then stop; `inconsistent` → stop immediately; never downgrade to a warning.
 10. Every `**External:**` and `**Size:**` line of a source task is copied verbatim into the part
@@ -87,13 +89,14 @@ parse the same ids.
    S = brainstorm_tool.py settings PLAN   # Inputs, "Chain settings"
    P = TOOL preflight DIR BASE     # writable? existing split artifacts?
    if not P.writable: stop and report
+   journal start: stage split → running (Chain journal below)
 
 2. GATE DECISION (references/GATE-DECISION.md)
    S.chain.split == always → verdict "split" without scoring; say it comes from the settings.
    S.chain.split == never  → the splitter is not needed: without a confirmation channel exit
                              without files; interactively ask whether to split anyway.
    otherwise: score the 5 factors, tell the user the verdict.
-   "do not split" → print assets/gate-pass.<LANG>.md and exit (a normal outcome).
+   "do not split" → journal: split skipped; print assets/gate-pass.<LANG>.md and exit (a normal outcome).
 
 3. ANALYSIS (references/STAGE-FORMAT.md §4-5, references/ROADMAP-FORMAT.md)
    Part boundaries, dependency graph, parallel groups, weights 🔴/🟡/🟢,
@@ -120,7 +123,7 @@ parse the same ids.
 7. DONE NOTICE / VERIFY CHOICE
    Scope comes from `verify` (`none` by default without a confirmation channel, see Inputs);
    only when it is `ask` (interactive), print assets/verify-prompt.<LANG>.md and ask.
-   scope = none → print assets/completion.<LANG>.md and exit.
+   scope = none → journal: split done; print assets/completion.<LANG>.md and exit.
    Otherwise do not announce "done" for the selected parts before step 8 passes.
 
 8. GATED DEEP VERIFICATION (references/DEEP-VERIFY.md)
@@ -129,9 +132,64 @@ parse the same ids.
    preset=verify_depth, mode=verify_mode, parts=<list> unless the scope is all), sequentially per part.
    TOOL verify-record DIR BASE --results <its batch JSON file> --ledger DIR/<BASE>-verify-ledger.json --mode verify_mode
    TOOL verify-status DIR BASE --baseline ... --ledger ... --validator <SKILL_DIR>/../plan-iterative-revision/scripts/next_review_index.py --stages <scope>
-   exit 0 → (full-cycle: re-run validate-all, parts were edited) → print assets/verify-summary.<LANG>.md, then completion.
+   exit 0 → (full-cycle: re-run validate-all, parts were edited) → journal: split done → print assets/verify-summary.<LANG>.md, then completion.
    missing → re-dispatch those parts once and repeat; still missing or any inconsistent → stop.
 ```
+
+## Chain journal
+
+`J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py"`; without
+`plan-brainstorming` alongside there is no journal (say so once). The stage is `split`;
+`<journal>` and `P` = the `journal` and `plan` fields of `J journal-path PLAN --create`. Every
+`--plan` below is `P`.
+
+- **Start** (step 1, after preflight): `J journal-show <journal> --plan P`, stage `split`
+  (`unknown-plan`, exit `2`: no event of this plan yet, every stage is `pending`):
+  `pending`, `failed`, `running`, `stopped` without open questions → `J journal-event <journal> --skill plan-splitter --plan P --stage split --status running`.
+  `stopped` with open questions → with a confirmation channel ask each and record
+  `J journal-answer <journal> <Qn> --answer "<answer>"`; without one stop and name the ids.
+  Answered questions: apply each, `J journal-answer <journal> <Qn> --applied`, then `running`
+  (the step-8 question: "accept the parts as they are" → at once the **Split done** event below,
+  no new split; "fix the parts by hand" → step 8 again; "split again" → a new split from step 1).
+  `done` → first the drift check: `J journal-reconcile <journal>`, then look in the journal
+  file's `questions` for one of plan `P` whose text starts with `drift: split` and that is not
+  `applied` (the plan changed after the split). `open` → with a confirmation channel ask it
+  (split the changed plan again, or keep the parts) and record
+  `J journal-answer <journal> <Qn> --answer "<rewrite | keep>"`; without one stop and name the id.
+  Answered `rewrite` → `J journal-event <journal> --skill plan-splitter --plan P --stage split --status running --reason drift`,
+  split as usual, and after the stage's `done` event `J journal-answer <journal> <Qn> --applied`.
+  Answered `keep` → `J journal-answer <journal> <Qn> --applied`, then
+  `J journal-event <journal> --skill plan-splitter --plan P --stage split --status done --input PLAN`
+  (the same status: it binds the stage to the current plan without a new split), then as without
+  drift. No such question, or `skipped` → say that the split was already decided (`roadmap`,
+  `parts` in the stage's artifacts, read from the journal file itself: the `plans` entry with
+  `id` P, `stages.split.artifacts`; `journal-show` returns statuses only) and name
+  `plan-executor`; stop.
+- **No split** (the gate's verdict "do not split", `S.chain.split == never` without a
+  confirmation channel, or the user's "do not split" at the `never` question):
+  `J journal-event <journal> --skill plan-splitter --plan P --stage split --status skipped --data '{"why": "<gate | split=never | user>"}'`.
+- **Split done** (step 7 with `scope = none`, or step 8 after `verify-status` exit 0):
+  `J journal-event <journal> --skill plan-splitter --plan P --stage split --status done --input PLAN --artifact roadmap=<BASE>-roadmap.md --artifact parts[]=<BASE>-a.md --artifact parts[]=<BASE>-b.md ...`
+  (one `parts[]` per part; paths relative to the journal's directory, forward slashes). The batch
+  verification of step 8 belongs to this stage: plan-iterative-revision writes no stage events on
+  a roadmap.
+- **No usable split** (second rejection of the draft, step 6 failing after 3 rounds):
+  `--status failed --data '{"why": "<what happened>"}'`; a later run retries.
+- **A stop in step 8** (parts still missing or inconsistent after the verification) needs a
+  person's decision, not a retry: without a confirmation channel
+  `J journal-question <journal> --skill plan-splitter --plan P --stage split --text "<the parts and their result>" --option "<fix the parts by hand and re-run the verification>" --option "<accept the parts as they are>" --option "<split again>"`
+  (the stage becomes `stopped`), `J journal-export-findings <journal>`, stop with a short report;
+  with one, ask as usual and record it with `--answer "<answer>"`.
+- **Questions**: a decision the settings do not make (split anyway at `never`, overwrite existing
+  artifacts, verification scope) without a confirmation channel →
+  `J journal-question <journal> --skill plan-splitter --plan P --stage split --text "<question>" [--option "<option>"]...`
+  (the stage becomes `stopped`), `J journal-export-findings <journal>`, stop with a short report.
+  Asked interactively, the same command with `--answer "<answer>"` records it.
+- **Errors**: `journal-corrupt` (exit `2`) → say it, propose `J journal-reconcile <journal> --rebuild`,
+  continue without the journal; `journal-locked` (exit `1`) → repeat once; still locked: with a
+  confirmation channel ask whether to continue without the journal, without one stop with a
+  short report; `journal-write-failed` (exit `1`, the file system refused the write, e.g. a
+  read-only journal) → say it in one line with the error text and continue without the journal.
 
 ## Language
 

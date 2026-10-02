@@ -43,7 +43,7 @@ the plan, and repeat until the plan is clean or a stop gate fires.
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | Plan file path | **Yes** | — | Path to the master plan `.md` file |
-| `preset` | No | `standard`, or `revision` of an explicit `Chain` setting | `quick` / `standard` / `deep`: lenses, code rigor, max iterations |
+| `preset` | No | `standard`; with an explicit `Chain` setting, its `revision`, else the tier | `quick` / `standard` / `deep`: lenses, code rigor, max iterations |
 | `lenses` / `rigor` / `max` | No | from preset | Override one preset dial |
 | `stop_policy` | No | `pragmatic`, or `stop` of an explicit `Chain` setting | `pragmatic` (stop when only nits remain) / `strict` (zero issues) |
 | `interaction` | No | `auto` | `auto` / `interactive` / `autonomous` |
@@ -52,6 +52,8 @@ the plan, and repeat until the plan is clean or a stop gate fires.
 
 With a `> Chain:` line in the spec (or `**Chain:**` in an old plan header), `bootstrap` takes
 `preset` and `stop_policy` from it and the skill does not ask; an argument you pass still wins.
+When that line has no `revision` key, the preset is the tier (`> Tier: Deep` → `deep`), not
+`standard`; only without a tier it is `standard`.
 A run without a confirmation channel stops at the iteration limit without a question. A read
 allowed for the whole run (`read=run`) lets the audit check that environment, read-only.
 
@@ -92,6 +94,7 @@ Only reviews created in the current run count for these gates.
 
 - `<plan-basename>-review-N.md` — one per audit with issues (immutable history)
 - `<plan-basename>-completion.md` — when the cycle converges
+- `<goal>-chain.json` next to the spec — the chain journal: the `revision` stage (running, done with the last review and the completion file, stopped at a gate that needs you, with an open question when nobody could answer) and the code defects found on the way (also appended to `BACKLOG.md`)
 
 ## Prerequisites
 

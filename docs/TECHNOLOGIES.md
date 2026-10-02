@@ -21,6 +21,12 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Separate read and change consent | Least privilege; change approval (ITIL change enablement) | `read=` / `write=` per environment with `run`, `task` or `deny`; production changes are never allowed for a whole run |
 | Shared append-only backlog | Product backlog (Scrum); append-only log | `backlog-append` adds one line at the end of a goal's section and verifies that every other byte is unchanged |
 | Deterministic language detection | Unicode block heuristics | `detect-lang`: Cyrillic letters over 5% of all letters → Russian; every user-facing message of every skill follows it |
+| Chain journal as a state machine | Workflow engines (Apache Airflow task states, 2015; AWS Step Functions, 2016); finite-state machines | Each plan has seven stages with checked transitions (`illegal-transition`, exit 1); a finished stage re-opens only for a named reason; events are append-only and `journal-validate` replays them against the stored statuses |
+| Lock file with stale takeover | `git` `index.lock`; exclusive create (`O_CREAT \| O_EXCL`) | Writes take `<journal>.lock`, wait up to 10 s (`journal-locked`) and take over a lock older than 60 s with a `lock-takeover` event |
+| Atomic replace | POSIX `rename(2)` atomicity; write-temp-then-rename | The journal and `BACKLOG.md` are written to a temporary file in the same directory and swapped with `os.replace`; the file mode and a symlinked target are kept |
+| Reconciliation from artifacts | Kubernetes controller reconcile loop (2014); `fsck` | `journal-reconcile` derives stage statuses from the files the skills left (plan, completion, roadmap, ledger, diff report, reports, commits) and turns a changed stage input into a drift question |
+| Single findings stream | Deduplicated issue intake (Sentry fingerprinting); single source of truth | Findings of the executor, the resolver and the revision are recorded once per `file` + `summary`, appended to `BACKLOG.md` at once and exported as `<goal>-followups.json`, the input format of `findings-parse` |
+| Questions as durable state | Human-in-the-loop callback tasks (AWS Step Functions); ticket lifecycle | A run without a confirmation channel records `Qn` (`open → answered → applied`) and stops; the owning skill applies the answer on resume |
 
 ---
 
@@ -117,6 +123,9 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Settings drift | Terraform plan drift; lockfile hashes | The ledger stores the SHA-256 of the settings' source; a changed spec stops the run with `settings-drift` until the engineer accepts it |
 | Risk-scaled gate per unit | Risk-based testing (ISTQB) | Checkpoint, documentation-only and test-only tasks get a lighter gate than the plan tier |
 | Stop report on failure | CI/CD failure notifications (Jenkins, GitHub Actions, GitLab CI) | Structured report explains why execution halted |
+| Diff report of the run | Code review diffs (Gerrit, GitHub pull requests); `git diff --numstat` | `run-diff --markdown` writes `<base>-diffs.md`: a file table with status and line counts, one `diff` block per file with an adaptive fence, cut at 400 lines, pipeline artifacts excluded; `--include-fixes` adds the audit's fixes, and fix files git ignores are listed under "Not included (ignored by git)" |
+| Scoped commit stage | Maker–checker; Git hooks; Conventional Commits (2017) | `commit-run` commits only the run's files and the audit's fix files with hooks; it refuses a non-empty index, files the user had changed before the run (`mixed-files`, against `baseline_head`), foreign changes and the edits of a failed unit that was not rolled back (`failed-attempt`), and never pushes, amends, forces or skips hooks |
+| Graceful degradation without git | Feature detection | Outside git, `run-diff --markdown` and `commit-run` fail with `no-git` and the `diffs` and `commit` stages are `skipped`; the rest of the run works |
 
 ---
 
@@ -136,6 +145,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Verified evidence anchors | Citation checking; link validation | `validate-report --root` checks that every `path#Lx-Ly` on a closed task or in issue evidence points at existing lines |
 | Authoritative fix diff | Reproducible builds; before/after snapshots | The fix phase is bracketed by workspace fingerprints and `snapshot-diff` lists the changed files, which the Fix Log must account for |
 | Re-verification under a run-scope read | Reliance limited to what cannot be re-performed (ISA 500) | With `read=run`, tasks marked `External (read)` are re-checked by the audit instead of being closed as `executor-reported` |
+| Fix files handed to the commit stage | Separation of Duties (maker–checker) | The fix phase records the files `snapshot-diff` lists as `fix_files` (repository-root paths) in the chain journal; the resolver runs no mutating git command, and its gate names `/plan-executor <plan> commit` |
 
 ---
 
@@ -163,3 +173,4 @@ The full skill pipeline (`brainstorming → writing → [splitter] → executor 
 | Separation of read and write roles | Fagan Inspection (1976); SOX Separation of Duties (2002) |
 | Deterministic tooling (Python stdlib, no deps) | Reproducible Builds (Debian); Hermetic builds (Bazel) |
 | Append-only audit trail | WORM; Event log; in-toto supply-chain attestation |
+| Resumable, journaled chain | Event sourcing; workflow engines (Airflow, Step Functions) |

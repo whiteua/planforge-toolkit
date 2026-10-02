@@ -33,7 +33,7 @@ Usually invoked **automatically** by `plan-brainstorming` after spec approval �
 3. **Scope Check** — a spec with several independent subsystems stops for your choice of how to split it
 4. **File Structure** — maps out which files will be created/modified
 5. **Task Generation** — tasks with TDD steps, exact code, file paths; no commit steps
-6. **Check and Self-Review** — `scripts/plan_tool.py plan-check` for the format contract, then spec coverage, consistency and task size (Deep: plus a reviewer subagent)
+6. **Check and Self-Review** — `scripts/plan_tool.py plan-check` for the format contract, then spec coverage, consistency and task size (Deep: plus a reviewer subagent); the chain journal `<goal>-chain.json` next to the spec records the `writing` stage (running at the start, done with the plan), and a question asked in a run without you stops the skill and stays open in the journal
 7. **Execution Handoff** — offers the next step (audit via `plan-iterative-revision`, split via `plan-splitter`, or execute via `plan-executor`) with the task count and plan size; with `split=auto` and more than 15 tasks the split comes first; with an explicit `Chain` in the settings, `split=always|never` and `resolver=` are stated, not asked; waits for your explicit choice
 
 ## Spec Preflight Requirements
@@ -64,7 +64,7 @@ The input spec **must** have:
 
 Plan file next to the spec: `<X>-spec.md` → `<X>-impl.md` (e.g. `plan01-spec.md` → `plan01-impl.md`), or a user-specified path.
 
-The plan header carries `**Spec:**` and `**Tier:**`; tasks use `### Task N: <title>` headings. This is the format `plan-executor` and `plan-resolver` parse. Plans contain no `git commit` steps; committing the result is up to you.
+The plan header carries `**Spec:**` and `**Tier:**`; tasks use `### Task N: <title>` headings. This is the format `plan-executor` and `plan-resolver` parse. Plans contain no commit steps; after the audit, `/plan-executor <plan> commit` commits the run's files and the audit's fixes.
 
 Chain settings and external-system permissions are not copied into the plan: every skill reads them from the spec through `**Spec:**`. Only a plan written from an old spec without settings carries `**Chain:**`, `**Environments:**` (with `read=`/`write=` rights) and `**Backlog:**` in its header. A task that touches an external system has `` **External:** `name` (read|write) — what ``.
 

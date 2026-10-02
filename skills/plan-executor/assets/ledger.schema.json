@@ -176,6 +176,19 @@
         "null"
       ]
     },
+    "baseline_head": {
+      "type": "string",
+      "description": "HEAD sha at the first ledger-init (\"\" for an unborn HEAD); commit-run's mixed-files and head-moved checks. Absent in older ledgers and outside git"
+    },
+    "journal": {
+      "type": ["object", "null"],
+      "required": ["path", "plan"],
+      "properties": {
+        "path": {"type": "string", "description": "Absolute path of the chain journal <goal>-chain.json"},
+        "plan": {"type": "string", "description": "Plan id in the journal: the master plan file name without .md"}
+      },
+      "description": "Chain journal of the run (plan-brainstorming journal_path_for); null when plan-brainstorming is not installed alongside or the journal cannot be opened"
+    },
     "expected_tree": {
       "type": ["string", "null"],
       "description": "Git tree the working tree must match before the next unit (foreign-changes check in unit-begin)"

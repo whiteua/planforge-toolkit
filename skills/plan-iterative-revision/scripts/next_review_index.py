@@ -9,13 +9,16 @@ Run orchestration (used by SKILL.md):
       settings: chain settings by the shared reading rule (plan header, else the spec at
       **Spec:**; a part or roadmap via Source); null without plan-brainstorming alongside.
       An explicit Chain supplies --preset/--stop-policy the caller did not pass
-      (config_from_settings lists them).
+      (config_from_settings lists them). journal: the chain journal path when that file
+      exists, else null.
 
   record <plan> --run-start N0 --max M --issues <file|-> [--stop-policy S]
          [--mode full-cycle|audit-only] [--interaction interactive|autonomous] [--user-stop] [--lang ru|en]
       Takes the Phase A issues JSON, resolves 'carry' fingerprints, computes fingerprints, merges
       duplicates, applies ALL loop gates (single authority), renders + writes + strictly validates
-      REVIEW(N) or the completion file, and prints {action, result, stop_reason, ..., final?}.
+      REVIEW(N) or the completion file, and prints {action, result, stop_reason, ..., final?,
+      journal_event}. journal_event = {stage: revision, status: done|stopped, artifacts: [k=v],
+      input?} when the run stops (done: clean/converged), null while the loop continues.
 
   guard-begin <git-root> <label> / guard-check <git-root> <label> <allowed-path>...
       Diff guard with snapshots stored in the OS temp dir (never inside the repository).
@@ -1037,6 +1040,21 @@ def settings_config_args(settings: Optional[Dict[str, object]], config_args: Lis
     return extra
 
 
+def journal_for(plan: str) -> Optional[str]:
+    """The chain journal of PLAN (a plan, roadmap or part; brainstorm_tool.journal_path_for)
+    when that file exists. None when it does not exist yet, when plan-brainstorming is not
+    installed alongside or predates the journal, and when the path cannot be resolved (e.g. a
+    missing spec): the revision then runs without a journal."""
+    finder = getattr(_load_brainstorm_tool(), "journal_path_for", None)
+    if finder is None:
+        return None
+    try:
+        found = finder(os.path.abspath(plan))
+    except Exception:  # the module's InputError or a read error: no journal, not a failure
+        return None
+    return found["journal"] if found.get("exists") else None
+
+
 def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
     if not os.path.isfile(plan):
         print_json({"valid": False, "error": f"plan not found: {plan}"})
@@ -1077,6 +1095,7 @@ def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
             "config": config,
             "settings": settings,
             "config_from_settings": [flag[2:].replace("-", "_") for flag in from_settings[0::2]],
+            "journal": journal_for(plan),
         }
     )
     return 0 if not errors else 1
@@ -1419,6 +1438,54 @@ def render_completion(lang: str, basename: str, plan: str, reviews: List[str]) -
     return template
 
 
+# Chain journal status of the revision stage for each way a run ends (the verdict is
+# stop_reason, else the gate status, else the result; see decide). A gate that is not
+# listed needs a human as well.
+REVISION_JOURNAL_STATUS = {
+    "clean": "done", "converged": "done", "drain": "done", "audit-only": "done",
+    "limit": "stopped", "user-stop": "stopped", "regression": "stopped",
+    "unchanged": "stopped", "churn": "stopped", "stuck": "stopped",
+}
+
+
+def journal_ref(path: str, journal: Optional[str]) -> str:
+    """PATH as the journal stores it: relative to the journal's directory with forward
+    slashes; absolute without a journal or without a relative path (another drive)."""
+    path = os.path.abspath(path)
+    if journal:
+        try:
+            return os.path.relpath(path, os.path.dirname(os.path.abspath(journal))).replace(os.sep, "/")
+        except ValueError:
+            pass
+    return path
+
+
+def revision_journal_event(
+    decision: Dict[str, object],
+    plan: str,
+    review: Optional[str],
+    completion: Optional[str],
+    journal: Optional[str],
+) -> Optional[Dict[str, object]]:
+    """The revision stage update for `journal-event`, or None while the loop continues
+    (implement, ask_limit). Artifacts are `key=value` strings: the last review of this run,
+    the completion file, the verdict. `input` (the plan, for input_sha256) only on done."""
+    if decision["action"] != "stop":
+        return None
+    verdict = str(decision["stop_reason"] or decision["status"] or decision["result"])
+    status = REVISION_JOURNAL_STATUS.get(verdict, "stopped")
+    artifacts: List[str] = []
+    if review:
+        artifacts.append(f"review={journal_ref(review, journal)}")
+    if completion:
+        artifacts.append(f"completion={journal_ref(completion, journal)}")
+    artifacts.append(f"verdict={verdict}")
+    event: Dict[str, object] = {"stage": "revision", "status": status, "artifacts": artifacts}
+    if status == "done":
+        event["input"] = os.path.abspath(plan)
+    return event
+
+
 RECORD_OPTIONS = {
     "--run-start": "run_start",
     "--max": "max",
@@ -1572,6 +1639,11 @@ def cmd_record(args: List[str]) -> int:
         if isinstance(lenses, int) and 1 <= lenses <= MAX_LENSES:
             final["lenses_used"] = lenses
         out["final"] = final
+    journal_event = None
+    if decision["action"] == "stop":
+        last_review = os.path.join(directory, run_reviews[-1]) if run_reviews else None
+        journal_event = revision_journal_event(decision, plan, last_review, out["completion_path"], journal_for(plan))
+    out["journal_event"] = journal_event
     print_json(out)
     return 0
 

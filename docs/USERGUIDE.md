@@ -51,6 +51,9 @@ Each skill is an independent module with a well-defined input, output, and invar
 | **Chain settings** | Decisions for the whole chain (`split`, `revision`, `stop`, `resolver`), external environments with read/write rights and the backlog section. Recorded in the spec by `plan-brainstorming`; later skills read them instead of asking. |
 | **Backlog** | `BACKLOG.md` at the repository root: what the skills deferred, one section per goal. Only you check items off. |
 | **Dialogue language** | The language of your first task statement. Every question, option and summary of every skill uses it. |
+| **Chain journal** | `<goal>-chain.json` next to the spec: the stage of each plan (`writing`, `revision`, `split`, `execution`, `diffs`, `audit`, `commit`), questions waiting for your answer, findings. Every skill keeps it, manual runs too. |
+| **Follow-ups** | `<goal>-followups.json` next to the journal: defects found outside the plans, in the input format of `plan-brainstorming`. |
+| **Diff report** | `<base>-diffs.md` next to the plan: what the run changed, file by file. |
 
 ---
 
@@ -84,6 +87,7 @@ Each skill is an independent module with a well-defined input, output, and invar
 └─────────────────────────────────────────────────────┘
 
 plan-iterative-revision  — use at any stage to clean up a plan before execution
+plan-executor <plan> commit — after plan-resolver: commit the run's files and the audit's fixes
 ```
 
 ---
@@ -126,7 +130,7 @@ Every message you see (questions, answer options, summaries) and the spec body f
 
 **Backlog.** After you approve the spec, its Out of Scope items (and, when one task is split into several specs, the spec map) are appended to `BACKLOG.md` at the repository root, in the section of this goal. Several specs of one goal are numbered `<root>-1-spec.md`, `<root>-2-spec.md` unless you ask for descriptive names.
 
-**Output:** `*-spec.md` in the same directory as the goal file.
+**Output:** `*-spec.md` in the same directory as the goal file. After you approve it, the skill creates the chain journal `<goal>-chain.json` next to it (`<goal>` is the `Backlog` setting, else the spec name without `-spec.md`); the dialogue questions are not recorded there.
 
 **Depth tiers:**
 
@@ -136,7 +140,7 @@ Every message you see (questions, answer options, summaries) and the spec body f
 | Standard | Feature touching 2–5 components | Short paragraph per section |
 | Deep | New subsystem, external integrations, complex failure modes | Full paragraphs, tables |
 
-> **Dependency:** `plan-writing` reads contract files from this skill, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through its `brainstorm_tool.py`; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it. Install them in the same parent directory.
+> **Dependency:** `plan-writing` reads contract files from this skill, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through its `brainstorm_tool.py`; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it, and every skill keeps the chain journal through it. Install them in the same parent directory.
 
 ---
 
@@ -158,7 +162,7 @@ Each task in the plan specifies:
 - Exact steps (2–5 min each)
 - How to test / verify done-state
 
-Plans contain no `git commit` steps; committing the result is up to you. An optional `### Task N: Checkpoint — …` task smoke-tests a group of tasks (Standard/Deep).
+Plans contain no `git commit` steps; after the audit, `/plan-executor <plan> commit` commits the result. An optional `### Task N: Checkpoint — …` task smoke-tests a group of tasks (Standard/Deep).
 
 Settings are not copied into the plan: `plan-check` reads them from the spec named by `**Spec:**`. For an older spec without settings, the skill asks as before and records the answers in the plan header (`**Chain:**`, `**Environments:**` with `read=`/`write=` rights, `**Backlog:**`). Tasks on external systems carry `` **External:** `name` (read|write) — what ``, and `plan-check` rejects an access the environment denies.
 
@@ -197,6 +201,7 @@ In a chain, the `split` setting decides: `always` skips the gate, `never` means 
 **Invoke:**
 ```
 /plan-executor <plan-or-roadmap-path>
+/plan-executor <plan-path> commit      # after the audit: commit the run's files and the audit's fixes
 ```
 
 **Input types:**
@@ -207,20 +212,22 @@ In a chain, the `split` setting decides: `always` skips the gate, `never` means 
 | Whole plan (with `### Task N:` headings) | Task headings outside code blocks | Executes tasks strictly in order; a failed task is retried before anything else |
 
 **Phases:**
-1. **BOOTSTRAP** — `ledger-init <exec_dir> <plan> --workdir <repo>`: parse units, create or resume the ledger in `exec_dir` (outside the repository or git-ignored; stops on a dirty repo, on a changed plan/part (`plan-drift`) or on changed chain settings (`settings-drift`, continue with `--accept-drift`)), store the chain settings and the expected file tree, baseline snapshot
+1. **BOOTSTRAP** — `ledger-init <exec_dir> <plan> --workdir <repo>`: parse units, create or resume the ledger in `exec_dir` (outside the repository or git-ignored; stops on a dirty repo (the pipeline's own files, the run's journal and `BACKLOG.md` do not count), on a changed plan/part (`plan-drift`) or on changed chain settings (`settings-drift`, continue with `--accept-drift`)), store the chain settings and the expected file tree, baseline snapshot
 2. **LOOP** — `unit-begin` (checks for files changed since the last unit, returns the unit text, files and external accesses) → execute → gate → `unit-finish` (snapshot + done, or retry/stop)
-3. **FINALIZE** — findings outside the plan go to `BACKLOG.md`; `plan-resolver` is proposed (audit, or `auto` to audit and fix), or the `resolver=` setting is announced instead of asked
+3. **FINALIZE** — `run-diff --markdown` writes `<base>-diffs.md` next to the plan (without git the `diffs` stage is `skipped`); findings outside the plan go to the chain journal and `BACKLOG.md` (`journal-finding`) and `<goal>-followups.json` is exported; `plan-resolver` is proposed (audit, or `auto` to audit and fix), or the `resolver=` setting is announced instead of asked
 
 **Invariants:**
 - Never edits source plan or part files.
 - Progress lives only in `state.json`.
-- Nothing is committed to your branch: snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`; the final commit is yours.
+- Only `commit-run` commits on your branch: in a chain after the audit, by hand with `/plan-executor <plan> commit`. Snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`; push, amend and force are never used.
 - Destructive operations (restore) require explicit engineer confirmation.
 - A gate cannot pass silently when checks are absent.
 - A task marked `` **External:** `env` (read|write) `` runs without a question only when that access is `run` in the settings or you allowed it for this run (`consent`); `task` asks "this task only / the whole run / stop", `deny` stops, and a run without a confirmation channel stops with a report. Consents given during a run are cleared when the run resumes.
 - Files changed between tasks by someone else are reported (`foreign-changes`) before the next task starts: accept them (`accept-changes`), restore those files (`checkpoint-restore --paths … --exec-dir …`), or stop. A run without a confirmation channel stops with the list.
 
-The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent tells you the path at the start. At the end it shows what the run changed (`run-diff`, separate from work that was uncommitted before) and appends defects it noticed but did not fix to `BACKLOG.md` (section from the `Backlog` setting, else the plan name without `-impl`) and to `<plan>-followups.json`, which `plan-brainstorming` accepts as input.
+The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent tells you the path at the start. At the end it writes `<base>-diffs.md` next to the plan (what the run changed, separate from work that was uncommitted before) and records defects it noticed but did not fix in the chain journal and in `BACKLOG.md` (section from the `Backlog` setting, else the goal); `<goal>-followups.json` next to the spec collects them for `plan-brainstorming`. A run that stops without anyone to ask writes its question into the journal; the next run applies your answer and continues from the ledger.
+
+**Commit stage.** `/plan-executor <plan> commit` finds the ledger without changing it (`ledger-path`) and the journal, rebuilds `<base>-diffs.md` with the audit's fixes, writes the message (`<type>(<scope>): …`, the spec's goal, the audit status, the fixed files) and calls `commit-run`, which commits only the run's files and the audit's fixes, with your hooks. With audit fixes, a manual run lists them first and waits for your explicit "yes"; "no" leaves everything uncommitted. It stops instead of committing when something is already staged (`index-not-empty`), when a file held your uncommitted work before the run and the run changed it too (`mixed-files`), when a file changed outside the run (`foreign-changes`), or when a task failed and files the commit would take differ from the last finished task (`failed-attempt`: the half-done attempt was not rolled back, or the files changed outside the run; the agent restores only those files, so the audit's fixes stay). A second call after new audit fixes commits only them. Without git the stage is `skipped`.
 
 **Prerequisites:** Python ≥ 3.8 in PATH.
 
@@ -257,7 +264,7 @@ The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent t
 
 Stop decisions use only the reviews of the current run.
 
-In a chain, the preset and the stop policy come from the `Chain` setting of the spec and are not asked; a run without a confirmation channel stops at the iteration limit. A read allowed for the whole run (`read=run`) lets the audit check that environment, read-only.
+In a chain, the preset and the stop policy come from the `Chain` setting of the spec and are not asked; a run without a confirmation channel stops at the iteration limit. A read allowed for the whole run (`read=run`) lets the audit check that environment, read-only. A remark about the code rather than the plan goes to the chain journal and `BACKLOG.md` (`journal-finding`), and a stop that needs your decision is recorded there as a question.
 
 **Output:** `<plan-basename>-review-N.md` per iteration; `<plan-basename>-completion.md` on convergence.
 
@@ -277,7 +284,7 @@ In a chain, the preset and the stop policy come from the `Chain` setting of the 
 /plan-resolver <plan-path> auto [limit]   # audit → fix → audit until final, max 2 fix cycles by default
 ```
 
-In audit mode, always provide the full list of previous reports for delta analysis. `fix`/`next`/`auto` discover the reports next to the plan. The fix phase records each outcome (`applied` / `needs-user` / `skipped`) in the report's "Fix Log" section; only the following audit can mark an issue `✅ fixed`. Code changes are left uncommitted.
+In audit mode, always provide the full list of previous reports for delta analysis. `fix`/`next`/`auto` discover the reports next to the plan. The fix phase records each outcome (`applied` / `needs-user` / `skipped`) in the report's "Fix Log" section; only the following audit can mark an issue `✅ fixed`. Code changes are left uncommitted: the files the fix phase changed are recorded in the chain journal (`fix_files`), and the closing gate names `/plan-executor <plan> commit` to commit them with the run. The resolver itself never runs a git command that changes anything.
 
 **Report types:**
 
@@ -500,6 +507,8 @@ done
 /plan-executor docs/plans/plan01-impl.md
 
 /plan-resolver docs/plans/plan01-impl.md
+
+/plan-executor docs/plans/plan01-impl.md commit          # commit the run's files and the audit's fixes
 ```
 
 ### Large refactor
@@ -533,6 +542,10 @@ done
   → one summary: worst part result wins
 ```
 
+### Chain journal and resuming
+
+Every skill records its stage of each plan in `<goal>-chain.json` next to the spec. When a skill needs a decision and there is nobody to ask (a subagent or a chained run), it writes the question into the journal, marks its stage `stopped` and stops with a report. Answer with `brainstorm_tool.py journal-answer <journal> Q1 --answer "…"` or run the skill again interactively: on start it reads `journal-show --plan <plan>`, applies the answer, marks it applied and continues where it stopped (the ledger for the executor, the last report for the resolver, a new run for the revision). `journal-show` prints each plan's stages, open questions and the next action; after a crash `journal-reconcile` restores the statuses from the files the skills left, and a corrupt journal is rebuilt with `journal-reconcile --rebuild`. When a spec or plan changes after the stage that read it is done, `journal-reconcile` records a `drift: <stage> …` question; the skill that owns the stage asks it on its next start and, by your answer, runs the stage again (`rewrite`) or keeps its result for the changed file (`keep`).
+
 ### External systems
 
 No skill reaches a database, API or remote service without your explicit permission for a named environment, given separately for reading and for changes (`read=` / `write=`: `run`, `task` or `deny`). The permission is not widened to other environments, production changes are never allowed for a whole run, and an existing project script aimed at production is not permission. The spec lists the environments with your words quoted, tasks that use them are marked `**External:**` with `(read)` or `(write)`, and the executor asks before each of them unless that access is allowed for the whole run. The audits flag a step that ran somewhere it was not permitted; a read allowed for the run lets them re-check such tasks themselves.
@@ -543,7 +556,7 @@ No skill reaches a database, API or remote service without your explicit permiss
 
 ### Version control
 
-No skill commits on your branch: specs, plans, reviews, roadmaps and parts are written to disk uncommitted, `plan-resolver`'s fixes stay in the working tree, and `plan-executor` keeps rollback snapshots in hidden refs (`refs/plan-executor/…`). Commit when a block of work is verified.
+Only `plan-executor` commits on your branch, at its commit stage (`/plan-executor <plan> commit`, or the chain after the audit): the run's files and the audit's fixes, with your hooks, never push, amend or force. Specs, plans, reviews, roadmaps, parts, reports, the journal and `<base>-diffs.md` are written to disk uncommitted, `plan-resolver`'s fixes stay in the working tree until that stage, and `plan-executor` keeps rollback snapshots in hidden refs (`refs/plan-executor/…`). Without git there is no diff report and no commit stage.
 
 ---
 
@@ -561,6 +574,9 @@ No skill commits on your branch: specs, plans, reviews, roadmaps and parts are w
 | `<base>-completion.md` | `plan-iterative-revision` | Convergence notice |
 | `<base>-report-N.md` | `plan-resolver` | Implementation audit report |
 | `<base>-report-N-final.md` | `plan-resolver` | Final closing report |
+| `<goal>-chain.json` | every pipeline skill | Chain journal: stages of each plan, questions, findings |
+| `<goal>-followups.json` | `plan-executor`, `plan-resolver`, `plan-iterative-revision` (`journal-export-findings`) | Findings outside the plans; input for `plan-brainstorming` |
+| `<base>-diffs.md` | `plan-executor` | What the run changed, file by file |
 
 ---
 
@@ -580,3 +596,13 @@ No skill commits on your branch: specs, plans, reviews, roadmaps and parts are w
 | `plan-executor` stops with `foreign-changes` | Files changed between tasks outside the run | Accept them, restore the listed files, or stop |
 | `plan-executor` stops with `settings-drift` | The spec (or plan header) with the settings changed since the last session | Check the changed keys, then resume with `--accept-drift` |
 | `spec-check` / `plan-check` reject `write=run` | Production changes cannot be allowed for a whole run | Use `write=task` or `write=deny` |
+| `journal-locked` | Another skill is writing the chain journal, or a crashed run left `<journal>.lock` (taken over after 60 s) | Wait and re-run the skill |
+| `journal-corrupt` | `<goal>-chain.json` is not valid JSON | `brainstorm_tool.py journal-reconcile <journal> --rebuild` (the old file is kept as `.corrupt-<time>`) |
+| `commit-run`: `mixed-files` | A file held your uncommitted changes before the run, and the run changed it too | Commit or set aside your part yourself, then re-run `/plan-executor <plan> commit` |
+| `commit-run`: `index-not-empty` | Something is already staged | Commit or unstage it, then re-run |
+| `commit-run`: `baseline-head-unknown` | The ledger was created before the commit stage existed | Commit by hand or start a new run |
+| `commit-run`: `run-incomplete` | A task of the run is still `running` (the run was interrupted) | Resume with `/plan-executor <plan>`, then commit |
+| `commit-run`: `failed-attempt` | A task failed and the files the commit would take differ from the last finished task (its edits were not rolled back, or the files changed outside the run) | Restore only those files (`checkpoint-restore <repo> <restore_to> --paths <files> --exec-dir <exec_dir>`), then commit; or commit by hand |
+| `commit-run`: `snapshots-missing` | The run's snapshots were garbage-collected; or only the expected tree was (the error names `accept-changes`) | Commit by hand; for the expected tree run `accept-changes <exec_dir>`, then commit again |
+| `commit-run`: `head-moved` | The current branch does not contain the commit the run started from | Switch back to that branch, or commit by hand |
+| No `<base>-diffs.md`, `diffs` and `commit` are `skipped` | The project is not a git repository | Expected: the diff report and the commit need git |

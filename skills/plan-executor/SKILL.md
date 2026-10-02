@@ -16,7 +16,7 @@ Do not use it to invent a plan. Use `plan-writing` or `plan-splitter` first when
 1. Never edit source `*.md` plan or stage files while executing them.
 2. Progress lives only in `state.json`, changed only through `scripts/executor_tool.py`; `progress.md` is generated.
 3. Exactly one unit runs at a time. A failed unit is retried or stops the run before anything else runs.
-4. Nothing is committed to the user's branch: snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`. The final commit is the engineer's.
+4. Only `commit-run` commits to the user's branch: in a chain after the audit, manually with the `commit` mode (`/plan-executor <plan> commit`). Snapshots are hidden refs `refs/plan-executor/<run>/<unit>`; never push, amend or force.
 5. Destructive operations (`checkpoint-restore`) require explicit engineer confirmation. Every restore the executor makes passes `--exec-dir <exec_dir>`; otherwise the next `unit-begin` reports the restore itself as `foreign-changes`.
 6. A gate cannot pass silently when checks are absent; no tests means escalation, not fake success.
 7. A unit marked `**External:**` runs only when each of its `external` entries is `confirmed` (`run` in the settings, or a run-scope `consent`) or the engineer confirms it for that environment and access. `deny` stops the run; changes on prod are confirmed task by task, never for the whole run. Never run a step on an environment the plan does not list, and never widen a permission to another environment or from read to write.
@@ -32,17 +32,19 @@ $T ledger-init <exec_dir|auto> <plan_path> --workdir <repo> [--whole] [--allow-d
 $T unit-begin  <exec_dir>
 $T unit-finish <exec_dir> <unit_id> pass|fail [--error "<signature>"] [--note "<agreed deviation or External confirmation>"]...  # --note repeats: one note per entry
 $T consent     <exec_dir> <env> read|write  # the engineer chose "the whole run"; refused for prod write and deny
-$T run-diff    <exec_dir>                # what this run changed: baseline vs last unit snapshot
+$T run-diff    <exec_dir> [--markdown <file> [--include-fixes <journal>]]   # what this run changed: baseline vs last unit snapshot; --markdown writes the diff report
 $T accept-changes <exec_dir> [--note "<why>"]   # the engineer keeps files changed outside the run
 $T checkpoint-restore <repo> <sha> [--paths <file> ...] --exec-dir <exec_dir>   # only after engineer confirmation
 $T checkpoint-prune <exec_dir>            # after the run, with confirmation
+$T ledger-path <plan_path> --workdir <repo>   # commit mode: where this plan's ledger is; reads only
+$T commit-run  <exec_dir> --message-file <file> [--journal <journal>]   # commit mode only: the run's files + the audit's fixes, with hooks
 ```
 
 Other commands (`ledger-next`, `ledger-mark`, `ledger-status`, `parse-tasks`, …) are listed in [TOOLING.md](references/TOOLING.md); the loop does not need them.
 
 ## Workflow
 
-1. **BOOTSTRAP** — `ledger-init auto …`: the ledger goes to `<repo parent>/.exec/<repo>-<plan>/`, outside the repository and stable across sessions (a temp directory is refused as `exec-dir-ephemeral`). Tell the engineer the `exec_dir` from the result in one line before the first unit. Show the result's `warnings`. Stop and ask the engineer on these errors: `no-units`, `dirty-worktree`, `plan-drift`, `settings-drift`, `settings-unavailable`, `exec-dir-inside-workdir`. Details: [INPUT-DETECTION.md](references/INPUT-DETECTION.md).
+1. **BOOTSTRAP** — the journal first (Chain journal below), then `ledger-init auto …`: the ledger goes to `<repo parent>/.exec/<repo>-<plan>/`, outside the repository and stable across sessions (a temp directory is refused as `exec-dir-ephemeral`). Tell the engineer the `exec_dir` from the result in one line before the first unit. Show the result's `warnings`. Stop and ask the engineer on these errors: `no-units`, `dirty-worktree`, `plan-drift`, `settings-drift`, `settings-unavailable`, `exec-dir-inside-workdir`. Details: [INPUT-DETECTION.md](references/INPUT-DETECTION.md).
 2. **LOOP** — `unit-begin` → act on `reason`:
 
    | `reason` | Action |
@@ -54,9 +56,37 @@ Other commands (`ledger-next`, `ledger-mark`, `ledger-status`, `parse-tasks`, �
    | `all-done` | Go to FINALIZE. |
 
    `unit-finish … pass` snapshots and marks done (a failed snapshot turns into `fail`). `unit-finish … fail` returns `decision` (`retry`/`stop`) and `restore_to`; ask the engineer before `checkpoint-restore <repo> <restore_to> --exec-dir <exec_dir>`, then loop. Both move the ledger's `expected_tree`, so a retry is not reported as foreign. `foreign_changes: null` means the check is off (no git, or a ledger from before the check, where it starts after the next finished unit): show `foreign_warning` to the engineer in one line and continue.
-3. **FINALIZE** — show `run-diff` (the run's own changes, separate from work that was uncommitted before), append out-of-scope findings to `BACKLOG.md` and `<plan base>-followups.json` (WORKFLOW.md, FINALIZE), propose `plan-resolver` per [RESOLVER-PROPOSAL.md](references/RESOLVER-PROPOSAL.md); offer `checkpoint-prune`.
+3. **FINALIZE** — write the diff report `run-diff <exec_dir> --markdown <plan dir>/<base>-diffs.md` (the run's own changes, separate from work that was uncommitted before) and record the `diffs` stage; record out-of-scope findings with `journal-finding` (they go to `BACKLOG.md` too) and export them with `journal-export-findings` to `<goal>-followups.json`; propose `plan-resolver` per [RESOLVER-PROPOSAL.md](references/RESOLVER-PROPOSAL.md). Details: [WORKFLOW.md](references/WORKFLOW.md), FINALIZE.
+4. **COMMIT** — a separate call, `/plan-executor <plan> commit`, after the audit (the resolver's gate names it) or after `resolver=skip`: `ledger-path` finds the ledger, the diff report is rebuilt with the audit's fixes, `commit-run` commits only the run's files and the audit's fixes with the repository's hooks. Details and every refusal: WORKFLOW.md, COMMIT. Offer `checkpoint-prune` only after this stage is `done`: it needs the run's snapshots.
 
 Units of one `parallel_group` may run in any order, but always one at a time in one session.
+
+## Chain journal
+
+`J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py"`. The journal
+`<goal>-chain.json` records the stages `execution`, `diffs` and `commit` of the plan for the other
+skills and the chain runner; the rules per stage status: [WORKFLOW.md](references/WORKFLOW.md),
+Chain journal. `ledger-init`, `unit-begin` and `unit-finish` write the `execution` stage and the
+unit events themselves (a `journal_error` in their result: say it in one line and continue). The
+agent writes the rest, always with `--plan <P>`, the master plan:
+
+- before `ledger-init` (and in COMMIT): `J journal-path <plan> --create` → `journal`, `plan` (= `P`),
+  then `J journal-show <journal> --plan <P>`; open questions of the stage you are about to run are
+  asked (interactive) or stop the run (silent); answered ones are applied and marked with
+  `J journal-answer <journal> <Qn> --applied`;
+- a question asked interactively that decides how the run goes (External confirmation, foreign
+  changes, retry or restore, the commit confirmation): `J journal-question <journal> --skill plan-executor --plan <P> --stage <stage> --text "<question>" [--option "<option>"]... --answer "<answer>"`;
+- every STOP without a confirmation channel: the same command without `--answer` (a `running`
+  stage becomes `stopped`; after `exhausted`/`stagnated`/`blocked` it stays `failed` with the
+  question open), then `J journal-export-findings <journal>`, then the stop report. A stop in
+  BOOTSTRAP (`dirty-worktree`, `plan-drift`, `settings-drift`, `settings-unavailable`) comes before
+  `ledger-init` has moved `execution`: first `J journal-event <journal> --skill plan-executor --plan <P> --stage execution --status running`,
+  then the question, so that it stops the stage (WORKFLOW.md, Chain journal);
+- a defect outside the unit's text that is not fixed: `J journal-finding …` at once
+  ([GATE.md](references/GATE.md), Deviations), never a file of its own.
+
+Without `plan-brainstorming` alongside, the run works without the journal; say once
+`plan-brainstorming not installed alongside`.
 
 ## Language
 
@@ -73,4 +103,4 @@ In this skill: `executor_tool.py detect-lang <plan>`; the stop reports below use
 
 ## Stop Reports
 
-Use [stop-report.en.md](assets/stop-report.en.md) or [stop-report.ru.md](assets/stop-report.ru.md) according to `executor_tool.py detect-lang <plan>` (`ru` when more than 5% of the plan's letters are Cyrillic, otherwise `en`). Put `git diff --stat` and at most ~80 lines of diff into the report, not the full diff.
+Use [stop-report.en.md](assets/stop-report.en.md) or [stop-report.ru.md](assets/stop-report.ru.md) according to `executor_tool.py detect-lang <plan>` (`ru` when more than 5% of the plan's letters are Cyrillic, otherwise `en`). Put `git diff --stat` and at most ~80 lines of diff into the report, not the full diff. Without a confirmation channel, record the decision the stop needs first (`journal-question`, then `journal-export-findings`, Chain journal) and fill the report's journal section with the question id and text, the journal path and the exported follow-ups path; without a journal, leave that section out.

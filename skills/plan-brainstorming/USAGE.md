@@ -69,7 +69,7 @@ Spec path: `review01.json` → `review01-spec.md` next to it. With inline JSON t
 
 ## Output
 
-A spec file saved to `<dir>/<plan-root>-spec.md` next to the goal file (or user-specified path). The skill does not commit it.
+A spec file saved to `<dir>/<plan-root>-spec.md` next to the goal file (or user-specified path). The skill does not commit it. After your approval it also creates the chain journal `<goal>-chain.json` next to the spec, where the later skills record their stages, questions and findings; the findings come back as `<goal>-followups.json` (`/plan-brainstorming <goal>-followups.json` starts the next cycle from them).
 
 Language: the dialogue and the spec body follow the language of your input (a Russian goal gives a Russian spec). The `> Tier:` line and the section headings stay in English.
 

@@ -6,6 +6,7 @@ import json
 from json import JSONDecodeError
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -490,7 +491,7 @@ def ledger_init(exec_dir, plan_path, input_type, units, source_sha256=None, acce
             # The interrupted attempt's files are the run's own state, as after unit-finish fail:
             # the next unit-begin must not report them as foreign.
             try:
-                led["expected_tree"] = _worktree_tree(led["workdir"])
+                led["expected_tree"] = _worktree_tree(led["workdir"], journal=_run_journal(led))
             except ToolError:
                 led["expected_tree"] = None
         if led.get("consents"):
@@ -632,7 +633,7 @@ def _git(workdir, *args, env=None):
     return result.stdout
 
 
-def checkpoint_detect(workdir):
+def checkpoint_detect(workdir, journal=None):
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
@@ -647,7 +648,19 @@ def checkpoint_detect(workdir):
         # BACKLOG.md at the repository root is the shared backlog the skills append to between
         # runs: it never makes the working tree dirty (same set as the foreign-change check).
         excluded = [f":(top,exclude){path}" for path in sorted(_FOREIGN_IGNORED)]
-        dirty = bool(_git(workdir, "status", "--porcelain", "--", ":/", *excluded).strip())
+        excluded += _journal_pathspecs(workdir, journal, "top,exclude")
+        # The pipeline's own files (_is_chain_file: followups, diffs, reviews, reports, specs and plans)
+        # never make it dirty either; a *-chain.json other than the run's journal still does.
+        # -uall lists the files of an untracked folder one by one, so each is judged by its name.
+        out = _git(workdir, "status", "--porcelain", "-z", "--untracked-files=all", "--", ":/", *excluded)
+        items, paths = out.split("\0"), []
+        while items:
+            item = items.pop(0)
+            if len(item) > 3:
+                paths.append(item[3:])
+                if "R" in item[:2] or "C" in item[:2]:  # a rename or copy: the source path follows
+                    paths.append(items.pop(0) if items else "")
+        dirty = any(not _is_chain_file(path) or _JOURNAL_NAME_RE.search(path) for path in paths)
         return {"vcs": "git", "dirty": dirty}
     return {"vcs": "none", "dirty": None}
 
@@ -670,7 +683,7 @@ _FOREIGN_IGNORED = {"BACKLOG.md"}
 _TREE_STATUS = {"A": "added", "D": "deleted"}
 
 
-def _worktree_tree(workdir):
+def _worktree_tree(workdir, journal=None):
     """Tree sha of the working tree, built exactly like a snapshot (temp index: HEAD, then
     add -A) but without commit-tree or a ref. None outside git."""
     if not workdir or checkpoint_detect(workdir)["vcs"] != "git":
@@ -683,6 +696,7 @@ def _worktree_tree(workdir):
         except ToolError:
             pass
         _git(workdir, "add", "-A", env=env)
+        _drop_journal(workdir, env, journal)
         return _git(workdir, "write-tree", env=env).strip()
 
     return _with_temp_index(workdir, build)
@@ -706,7 +720,7 @@ def _tree_diff(workdir, old_tree, new_tree):
     return sorted(changes, key=lambda change: change["path"])
 
 
-def checkpoint_create(workdir, label, run_id="manual"):
+def checkpoint_create(workdir, label, run_id="manual", journal=None):
     """Snapshot the working tree into refs/plan-executor/<run>/<label>.
 
     Uses a temporary index and commit-tree: HEAD, the branch and the user's index
@@ -721,6 +735,7 @@ def checkpoint_create(workdir, label, run_id="manual"):
         except ToolError:
             pass
         _git(workdir, "add", "-A", env=env)
+        _drop_journal(workdir, env, journal)
         tree = _git(workdir, "write-tree", env=env).strip()
         return _git(workdir, "commit-tree", tree, "-m", f"[plan-executor] {label}", env=env).strip()
 
@@ -739,21 +754,25 @@ def checkpoint_restore(workdir, checkpoint_id):
     after it. The branch, HEAD and the user's index are not changed."""
     if checkpoint_detect(workdir)["vcs"] != "git":
         raise ToolError("not a git repository", 1)
-    snapshot_files = _z_list(_git(workdir, "ls-tree", "-r", "-z", "--name-only", checkpoint_id))
-    current_files = _z_list(_git(workdir, "ls-files", "-z", "--cached", "--others", "--exclude-standard"))
-    # The shared backlog is not part of a rollback (skills append to it, the user checks items off).
-    removed = sorted(current_files - snapshot_files - _FOREIGN_IGNORED)
+    # Like snapshots and --paths, the whole repository is restored from its root, not only workdir.
+    root = _git(workdir, "rev-parse", "--show-toplevel").strip()
+    snapshot_files = _z_list(_git(root, "ls-tree", "-r", "-z", "--name-only", checkpoint_id))
+    current_files = _z_list(_git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"))
+    # The shared backlog and the pipeline's files are not part of a rollback (the skills write them).
+    removed = sorted(rel for rel in current_files - snapshot_files if not _is_chain_file(rel))
     for rel in removed:
-        target = Path(workdir) / rel
+        target = Path(root) / rel
         if target.is_file() or target.is_symlink():
             target.unlink()
 
     def checkout(env):
-        _git(workdir, "read-tree", checkpoint_id, env=env)
-        _git(workdir, "rm", "--cached", "-f", "-q", "--ignore-unmatch", "--", *sorted(_FOREIGN_IGNORED), env=env)
-        _git(workdir, "checkout-index", "-a", "-f", env=env)
+        _git(root, "read-tree", checkpoint_id, env=env)
+        kept = _FOREIGN_IGNORED | {rel for rel in snapshot_files if _is_chain_file(rel)}
+        _git(root, "--literal-pathspecs", "rm", "--cached", "-f", "-q", "--ignore-unmatch", "--", *sorted(kept),
+             env=env)
+        _git(root, "checkout-index", "-a", "-f", env=env)
 
-    _with_temp_index(workdir, checkout)
+    _with_temp_index(root, checkout)
     return {"restored_to": checkpoint_id, "removed": removed}
 
 
@@ -761,9 +780,21 @@ def _safe_rel_path(raw):
     rel = str(raw).replace("\\", "/")
     while rel.startswith("./"):
         rel = rel[2:]
-    if not rel or rel.startswith("/") or os.path.isabs(str(raw)) or ".." in rel.split("/"):
+    # `C:x` is relative to the current directory of drive C, a leading `:` is git pathspec magic.
+    if (not rel or rel.startswith("/") or os.path.isabs(str(raw)) or ".." in rel.split("/")
+            or re.match(r"^[A-Za-z]:", rel) or rel.startswith(":")):
         raise ToolError(f"invalid-path: {raw} (expected a path relative to the repository root)", 2)
     return rel
+
+
+def _same_as_tree(workdir, tree_ish, rels):
+    """The paths of `rels` whose working-tree content equals their blob in `tree_ish`
+    (hash-object applies the same filters as git add, so line-ending conversion is not a change)."""
+    if not rels:
+        return set()
+    blobs = _git(workdir, "rev-parse", *[f"{tree_ish}:{rel}" for rel in rels]).split()
+    hashes = _git(workdir, "hash-object", "--", *rels).split()
+    return {rel for rel, blob, digest in zip(rels, blobs, hashes) if blob == digest}
 
 
 def checkpoint_restore_paths(workdir, tree_ish, paths):
@@ -771,26 +802,31 @@ def checkpoint_restore_paths(workdir, tree_ish, paths):
     files absent from it are deleted. Every path is checked before anything is written."""
     if checkpoint_detect(workdir)["vcs"] != "git":
         raise ToolError("not a git repository", 1)
-    wanted = sorted({_safe_rel_path(raw) for raw in paths} - _FOREIGN_IGNORED)
-    in_tree = _z_list(_git(workdir, "ls-tree", "-r", "-z", "--name-only", tree_ish, "--", *wanted))
-    present = {rel for rel in wanted if (Path(workdir) / rel).is_file() or (Path(workdir) / rel).is_symlink()}
+    wanted = sorted(rel for rel in {_safe_rel_path(raw) for raw in paths} if not _is_chain_file(rel))
+    if not wanted:
+        raise ToolError("paths-empty: nothing to restore after excluding BACKLOG.md and the chain files", 2)
+    # Like snapshots and foreign changes, paths are relative to the repository root, not to workdir.
+    root = _git(workdir, "rev-parse", "--show-toplevel").strip()
+    in_tree = _z_list(_git(root, "ls-tree", "-r", "-z", "--name-only", tree_ish, "--", *wanted))
+    present = {rel for rel in wanted if (Path(root) / rel).is_file() or (Path(root) / rel).is_symlink()}
     unknown = [rel for rel in wanted if rel not in in_tree and rel not in present]
     if unknown:
         raise ToolError("unknown-path: " + ", ".join(unknown) + " (neither in the snapshot nor in the working tree)",
                         2, unknown=unknown)
     restored = [rel for rel in wanted if rel in in_tree]
     removed = [rel for rel in wanted if rel not in in_tree]
-    statuses = [{"path": rel, "status": "added" if rel in removed else "modified" if rel in present else "deleted"}
-                for rel in wanted]
+    same = _same_as_tree(root, tree_ish, [rel for rel in restored if rel in present])
+    statuses = [{"path": rel, "status": "added" if rel in removed else "unchanged" if rel in same
+                 else "modified" if rel in present else "deleted"} for rel in wanted]
     for rel in removed:
-        (Path(workdir) / rel).unlink()
+        (Path(root) / rel).unlink()
 
     def checkout(env):
-        _git(workdir, "read-tree", tree_ish, env=env)
-        _git(workdir, "checkout-index", "-f", "--", *restored, env=env)
+        _git(root, "read-tree", tree_ish, env=env)
+        _git(root, "checkout-index", "-f", "--", *restored, env=env)
 
     if restored:
-        _with_temp_index(workdir, checkout)
+        _with_temp_index(root, checkout)
     return {"restored_to": tree_ish, "restored": restored, "removed": removed, "paths": statuses}
 
 
@@ -948,7 +984,7 @@ def _foreign_check(led):
     foreign_changes is None, with a one-line warning, when the check cannot run: no git working
     tree, or a ledger written before expected_tree existed (the next unit-finish sets it)."""
     workdir = led.get("workdir")
-    current = _worktree_tree(workdir)
+    current = _worktree_tree(workdir, journal=_run_journal(led))
     expected = led.get("expected_tree")
     result = {"foreign_changes": None, "expected_tree": expected, "current_tree": current, "warning": None}
     if current is None:
@@ -963,14 +999,14 @@ def _foreign_check(led):
             result["warning"] = (f"expected_tree {expected} is missing from the object store; "
                                  "accept-changes resets it")
         else:
-            result["foreign_changes"] = [change for change in changes if change["path"] not in _FOREIGN_IGNORED]
+            result["foreign_changes"] = [change for change in changes if not _is_chain_file(change["path"])]
     return result
 
 
 def unit_begin(exec_dir):
     nxt = ledger_next(exec_dir)
     if nxt["reason"] not in {"ready", "retry-available"}:
-        return nxt
+        return _journal_stop(exec_dir, nxt)
     # Files changed outside the run since the last unit (J11): report them and mark nothing running.
     check = _foreign_check(_load(exec_dir))
     if check["foreign_changes"]:
@@ -980,7 +1016,7 @@ def unit_begin(exec_dir):
     text = unit_text(unit) or ""
     strategy = recommend_strategy(unit["weight"], unit["title"])
     running = ledger_mark(exec_dir, unit["id"], "running")
-    return {
+    result = {
         "reason": nxt["reason"],
         "foreign_changes": check["foreign_changes"],
         "foreign_warning": check["warning"],
@@ -992,6 +1028,7 @@ def unit_begin(exec_dir):
         # recorded on the unit in the ledger. Unconfirmed entries need the engineer (GATE.md).
         "external": _record_external(exec_dir, running, text),
     }
+    return _journal_progress(exec_dir, "unit-begin", unit["id"], result)
 
 
 def _restore_target(led, unit_id):
@@ -1031,6 +1068,30 @@ def _external_items(line):
             for m in re.finditer(r"`([^`]+)`\s*(?:\((read|write)\))?", head, re.IGNORECASE)]
 
 
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def _external_lines(text):
+    """Bodies of the `**External:**` lines outside fenced code blocks: a fixture or an example
+    inside a fence is not a request for access. As in CommonMark, only a line of the opening
+    fence's character, at least as long and with nothing else on it, closes the block: a shorter
+    or other fence inside it is content, so a real External line after the block is never lost."""
+    bodies, fence = [], None
+    for line in (text or "").splitlines():
+        opening = _FENCE_OPEN_RE.match(line)
+        if fence is None:
+            if opening:
+                fence = opening.group(1)
+                continue
+            found = _EXTERNAL_RE.match(line)
+            if found:
+                bodies.append(found.group(1))
+        elif (opening and opening.group(1)[0] == fence[0] and len(opening.group(1)) >= len(fence)
+              and not line.strip().strip(fence[0])):
+            fence = None
+    return bodies
+
+
 def _external_entries(text, led):
     """One entry per environment of each `**External:**` line: the consent from the stored settings
     (run|task|deny) and whether it may run without a question (run, or a run-scope consent).
@@ -1039,7 +1100,7 @@ def _external_entries(text, led):
     environments = _environments(led)
     consents = led.get("consents") or {}
     entries = []
-    for line in _EXTERNAL_RE.findall(text):
+    for line in _external_lines(text):
         for env, access in _external_items(line) or [(None, None)]:
             setting = environments.get(env) or {}
             consent = setting.get(access) if access and valid else None
@@ -1110,6 +1171,8 @@ def run_diff(exec_dir):
     for unit in led["units"]:
         if unit["status"] == "done" and unit.get("checkpoint_id"):
             last = unit["checkpoint_id"]
+    if workdir and checkpoint_detect(workdir)["vcs"] != "git":
+        raise ToolError("no-git: the workdir is not a git repository; no diff report", 1)
     if not workdir or not baseline or not last:
         raise ToolError("run-diff-unavailable: the run has no baseline or no finished unit snapshot", 1)
 
@@ -1130,6 +1193,266 @@ def run_diff(exec_dir):
     }
 
 
+# Files the pipeline writes itself never enter a run's diff report or commit (spec C).
+_PIPELINE_ARTIFACT_RE = re.compile(
+    r"(?:.*-spec\.md|.*-impl.*\.md|.*-review-.*\.md|.*-report-.*\.md|.*-roadmap\.md"
+    r"|.*-chain\.json|.*-diffs\.md|.*-followups\.json)")
+
+
+def _is_pipeline_artifact(rel, plan_dir_rel):
+    """True for the plan directory (unless it is the repository root), the chain's artifacts in
+    any directory (matched on the file name) and BACKLOG.md at the root. `rel` and `plan_dir_rel`
+    are relative to the repository root."""
+    rel = str(rel).replace("\\", "/").strip("/")
+    plan_dir = str(plan_dir_rel or "").replace("\\", "/").strip("/")
+    if rel in _FOREIGN_IGNORED:
+        return True
+    if plan_dir not in ("", ".") and (rel == plan_dir or rel.startswith(plan_dir + "/")):
+        return True
+    return bool(_PIPELINE_ARTIFACT_RE.fullmatch(rel.rsplit("/", 1)[-1]))
+
+
+# The user's git config must not change the report: no colour, no external diff or textconv driver,
+# the a/ and b/ prefixes whatever diff.noprefix or diff.mnemonicPrefix say.
+_DIFF_PLAIN = ("--no-color", "--no-ext-diff", "--no-textconv")
+_DIFF_PATCH = _DIFF_PLAIN + ("--src-prefix=a/", "--dst-prefix=b/")
+
+
+def _diff_git(root, *args):
+    result = subprocess.run(["git", "-c", "core.quotepath=off", *args], cwd=root, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", check=False)
+    if result.returncode != 0:
+        raise ToolError(f"run-diff-failed: {result.stderr.strip()}", 2)
+    return result.stdout
+
+
+def _diff_entries(root, base, target, paths=None):
+    """Files of `git diff -M base target` (run from the repository root, paths root-relative):
+    [{path, old_path, status, added, deleted, binary}] sorted by path. `paths` limits the diff;
+    an empty list gives []. Binary files have added/deleted None."""
+    if paths is not None and not paths:
+        return []
+    spec = ["--", *(":(literal)" + rel for rel in paths)] if paths else []
+    items = _diff_git(root, "diff", *_DIFF_PLAIN, "-M", "--name-status", "-z", base, target, *spec).split("\0")
+    entries, index = {}, 0
+    while index < len(items) and items[index]:
+        code = items[index]
+        if code[:1] in ("R", "C"):
+            old, path, index = items[index + 1], items[index + 2], index + 3
+        else:
+            old, path, index = None, items[index + 1], index + 2
+        entries[path] = {"path": path, "old_path": old, "status": code[:1],
+                         "added": None, "deleted": None, "binary": False}
+    items = _diff_git(root, "diff", *_DIFF_PLAIN, "-M", "--numstat", "-z", base, target, *spec).split("\0")
+    index = 0
+    while index < len(items) and items[index]:
+        added, deleted, path = items[index].split("\t", 2)
+        if path:
+            index += 1
+        else:  # rename: "added\tdeleted\t\0old\0new\0"
+            path, index = items[index + 2], index + 3
+        if path in entries:
+            binary = added == "-"
+            entries[path].update(added=None if binary else int(added),
+                                 deleted=None if binary else int(deleted), binary=binary)
+    return [entries[path] for path in sorted(entries)]
+
+
+DIFF_TRUNCATE_LINES = 400
+# Headings of the diff report in the plan's language (detect_lang).
+_DIFF_STRINGS = {
+    "ru": {"title": "Diff-отчёт", "plan": "План", "baseline": "Исходный снимок", "last": "Последний снимок",
+           "fixes": "Исправления аудита: от исходного снимка до рабочей копии", "date": "Дата",
+           "summary": "Сводка", "files": "Изменения по файлам", "file": "Файл", "status": "Статус",
+           "note": "Примечание", "binary": "двоичный файл", "fixed": "исправлено аудитом",
+           "renamed": "переименован из", "empty": "Прогон не изменил файлов вне артефактов конвейера.",
+           "truncated": "Показаны первые {shown} из {total} строк. Полный diff:",
+           "excluded": "Не включены (артефакты конвейера)", "ignored": "Не включены (игнорируются git)"},
+    "en": {"title": "Diff report", "plan": "Plan", "baseline": "Baseline snapshot", "last": "Last snapshot",
+           "fixes": "Audit fixes: from the baseline snapshot to the working tree", "date": "Date",
+           "summary": "Summary", "files": "Changes by file", "file": "File", "status": "Status",
+           "note": "Note", "binary": "binary file", "fixed": "fixed by audit",
+           "renamed": "renamed from", "empty": "The run changed no files outside the pipeline artifacts.",
+           "truncated": "First {shown} of {total} lines shown. Full diff:",
+           "excluded": "Not included (pipeline artifacts)", "ignored": "Not included (ignored by git)"},
+}
+
+
+def _md_link(report_dir, path, text):
+    """[text](target) with the target relative to the report's folder; a target with a space or
+    parentheses goes in <...>; | is escaped because the link also sits in a table cell."""
+    try:
+        target = os.path.relpath(path, report_dir).replace(os.sep, "/")
+    except ValueError:  # another drive on Windows
+        target = Path(path).as_posix()
+    if any(ch in target for ch in " ()"):
+        target = f"<{target}>"
+    return f"[{text}]({target})".replace("|", "\\|")
+
+
+def _fence(text):
+    """A backtick fence longer than any backtick run inside `text`, at least three."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def _file_section(heading, diff_text, command, strings):
+    """Lines of one file's section: heading and a diff block; a diff longer than
+    DIFF_TRUNCATE_LINES keeps its first lines and names the command that shows it in full."""
+    lines = diff_text.split("\n")  # not splitlines:  , \x0c and the like are inside a diff line
+    if lines and lines[-1] == "":
+        lines.pop()
+    body = "\n".join(lines[:DIFF_TRUNCATE_LINES])
+    fence = _fence(body)
+    section = [heading, "", fence + "diff", body, fence]
+    if len(lines) > DIFF_TRUNCATE_LINES:
+        note = strings["truncated"].format(shown=DIFF_TRUNCATE_LINES, total=len(lines))
+        section += ["", f"{note} `{command}`"]
+    return section
+
+
+def _render_diff_report(lang, plan_link, title, baseline, last, entries, fixes, excluded=(), ignored=()):
+    """Markdown of the diff report. `entries`: dicts with path, old_path, status, added, deleted,
+    binary, fixed, link, diff (text; unused for binary files) and command (full diff). `excluded`:
+    the run's files dropped as pipeline artifacts, listed last so that none is dropped silently;
+    `ignored`: audit fix files git ignores (no tree holds them), listed after them."""
+    s = _DIFF_STRINGS.get(lang, _DIFF_STRINGS["en"])
+    lines = [f"# {s['title']}: {title}", "", f"- {s['plan']}: {plan_link}",
+             f"- {s['baseline']}: `{baseline}`", f"- {s['last']}: `{last}`"]
+    if fixes:
+        lines.append(f"- {s['fixes']}")
+    lines += [f"- {s['date']}: {_utc_now()}", "", f"## {s['summary']}", ""]
+    tail = (["", f"## {s['excluded']}", ""] + [f"- `{rel}`" for rel in excluded]) if excluded else []
+    tail += (["", f"## {s['ignored']}", ""] + [f"- `{rel}`" for rel in ignored]) if ignored else []
+    if not entries:
+        return "\n".join(lines + [s["empty"]] + tail) + "\n"
+    lines += [f"| {s['file']} | {s['status']} | + | − | {s['note']} |", "|---|---|---|---|---|"]
+    for entry in entries:
+        notes = [f"{s['renamed']} `{entry['old_path']}`"] if entry.get("old_path") else []
+        notes += [s["binary"]] if entry["binary"] else []
+        notes += [s["fixed"]] if entry["fixed"] else []
+        added = "-" if entry["added"] is None else entry["added"]
+        deleted = "-" if entry["deleted"] is None else entry["deleted"]
+        lines.append(f"| {entry['link']} | {entry['status']} | {added} | {deleted} | {', '.join(notes)} |")
+    lines += ["", f"## {s['files']}"]
+    for entry in entries:
+        if entry["binary"]:
+            continue  # a binary file is a table row only
+        heading = f"### {entry['link']}" + (f" — {s['fixed']}" if entry["fixed"] else "")
+        lines += [""] + _file_section(heading, entry["diff"], entry["command"], s)
+    return "\n".join(lines + tail) + "\n"
+
+
+def _plan_id(plan_path):
+    """Journal plan id of a ledger's plan: the file name without .md (a roadmap: without
+    -roadmap.md, i.e. the master plan's id)."""
+    name = Path(plan_path).name
+    if name.endswith(ROADMAP_SUFFIX):
+        return name[: -len(ROADMAP_SUFFIX)]
+    return name[:-3] if name.endswith(".md") else name
+
+
+def _audit_fix_files(led, journal):
+    """Repository-root-relative files the audit's fix loop changed: the journal's
+    plans[<id>].stages.audit.artifacts.fix_files. The journal is `journal`, else the ledger's
+    journal.path; the plan id is the ledger's journal.plan, else _plan_id(plan_path).
+    [] without a journal or without an audit stage."""
+    ref = led.get("journal") or {}
+    path = journal or ref.get("path")
+    if not path:
+        return []
+    module = _load_brainstorm_tool()
+    if module is None or not hasattr(module, "journal_load"):
+        raise ToolError("journal-unavailable: plan-brainstorming not installed alongside; "
+                        "the audit's fix files cannot be read", 2)
+    try:
+        data = module.journal_load(str(path))
+    except getattr(module, "InputError", ValueError) as exc:
+        raise ToolError(str(exc), 2) from exc
+    plan_id = ref.get("plan") or _plan_id(led["plan_path"])
+
+    def shaped(value, kind, where):
+        if value is not None and not isinstance(value, kind):
+            raise ToolError(f"journal-corrupt: {path}: {where} must be {kind.__name__}", 2)
+        return value or kind()
+
+    entry = next((plan for plan in shaped(data.get("plans"), list, "plans")
+                  if isinstance(plan, dict) and plan.get("id") == plan_id), None)
+    if entry is None:
+        raise ToolError(f"journal-plan-unknown: {plan_id} is not in {path}", 2)
+    audit = shaped(shaped(entry.get("stages"), dict, f"{plan_id}.stages").get("audit"), dict,
+                   f"{plan_id}.stages.audit")
+    raw = shaped(audit.get("artifacts"), dict, f"{plan_id}.stages.audit.artifacts").get("fix_files") or []
+    raw = [raw] if isinstance(raw, str) else raw
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise ToolError(f"journal-corrupt: {path}: {plan_id}.stages.audit.artifacts.fix_files "
+                        "must be a list of strings", 2)
+    return sorted({_safe_rel_path(item) for item in raw})
+
+
+def run_diff_markdown(exec_dir, out_path, journal=None):
+    """The run's diff as a Markdown report (spec C): header, summary table, one diff block per
+    file; pipeline artifacts are excluded. The report file is overwritten (derived artifact).
+    With `journal`, the audit's fix files are diffed from the baseline to the working tree
+    and marked."""
+    info = run_diff(exec_dir)  # no-git and run-diff-unavailable come from here
+    led = _load(exec_dir)
+    baseline, last = info["baseline"], info["last"]
+    root = os.path.realpath(_diff_git(led["workdir"], "rev-parse", "--show-toplevel").strip())
+    plan = os.path.realpath(led["plan_path"])
+    plan_dir_rel = os.path.relpath(os.path.dirname(plan), root) if _inside(plan, root) else ""
+    entries = {entry["path"]: dict(entry, fixed=False, target=last,
+                                   command=f"git diff {baseline} {last} -- {_top_literal(entry['path'])}")
+               for entry in _diff_entries(root, baseline, last)}
+    fix_files = _audit_fix_files(led, journal) if journal else []
+    ignored = []
+    if fix_files:
+        tree = _worktree_tree(led["workdir"], journal=_run_journal(led))  # untracked fix files count too
+        paths = list(fix_files)
+        for rel in fix_files:  # the audit's state replaces the run's: a file it reverted drops out
+            popped = entries.pop(rel, None)
+            if popped and popped["old_path"] and popped["old_path"] not in paths:
+                paths.append(popped["old_path"])  # the run's rename: its deletion stays in the report
+        for entry in _diff_entries(root, baseline, tree, paths):
+            entries[entry["path"]] = dict(entry, fixed=True, target=tree,
+                                          command=f"git diff {baseline} -- {_top_literal(entry['path'])}")
+        # add -A skips ignored files, so no tree holds them: named, never dropped silently.
+        ignored = sorted(rel for rel in _git_ignored(root, fix_files) if rel not in entries)
+    excluded = sorted(path for path in entries if _is_pipeline_artifact(path, plan_dir_rel))
+    kept = [entries[path] for path in sorted(entries) if path not in excluded]
+    report_dir = os.path.dirname(os.path.realpath(out_path))
+    for entry in kept:
+        entry["link"] = _md_link(report_dir, os.path.join(root, entry["path"]), entry["path"])
+        if not entry["binary"]:
+            paths = [":(literal)" + rel for rel in (entry["old_path"], entry["path"]) if rel]
+            entry["diff"] = _diff_git(root, "diff", *_DIFF_PATCH, "-M", baseline, entry["target"], "--", *paths)
+    lang = detect_lang(_read_text(plan))["lang"] if os.path.isfile(plan) else "en"
+    text = _render_diff_report(lang, _md_link(report_dir, plan, os.path.basename(plan)), _plan_id(plan),
+                               baseline, last, kept, fixes=bool(fix_files), excluded=excluded, ignored=ignored)
+    Path(out_path).write_bytes(text.encode("utf-8"))
+    files = [{key: entry[key] for key in ("path", "old_path", "status", "added", "deleted", "binary", "fixed")}
+             for entry in kept]
+    return {"ok": True, "path": str(Path(out_path).resolve()), "lang": lang, "baseline": baseline,
+            "last": last, "files": files, "excluded": excluded, "fix_files": fix_files, "ignored": ignored}
+
+
+def _top_literal(rel):
+    """A root-relative path as a shell-quoted literal pathspec for the full-diff command."""
+    return shlex.quote(f":(top,literal){rel}")
+
+
+def _git_ignored(root, rels):
+    """The paths of `rels` that git ignores (untracked and matched by an ignore rule)."""
+    if not rels:
+        return []
+    result = subprocess.run(["git", "-c", "core.quotepath=off", "check-ignore", "-z", "--stdin"], cwd=root,
+                            input="\0".join(rels) + "\0", capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", check=False)
+    if result.returncode not in (0, 1):  # 1: none of them is ignored
+        raise ToolError(f"run-diff-failed: {result.stderr.strip()}", 2)
+    return sorted(_z_list(result.stdout))
+
+
 def unit_finish(exec_dir, unit_id, outcome, error=None, note=None):
     led = _load(exec_dir)
     workdir = led.get("workdir")
@@ -1137,7 +1460,8 @@ def unit_finish(exec_dir, unit_id, outcome, error=None, note=None):
         checkpoint = None
         if workdir:
             try:
-                checkpoint = checkpoint_create(workdir, unit_id, led["run_id"])["checkpoint_id"]
+                checkpoint = checkpoint_create(workdir, unit_id, led["run_id"],
+                                               journal=_run_journal(led))["checkpoint_id"]
             except ToolError as exc:
                 outcome, error = "fail", f"checkpoint-failed: {exc}"
         if outcome == "pass":
@@ -1147,17 +1471,18 @@ def unit_finish(exec_dir, unit_id, outcome, error=None, note=None):
             for text in ([note] if isinstance(note, str) else note or []):
                 unit = _add_note(exec_dir, unit_id, text)
             progress = render_progress(exec_dir)
-            return {"status": "done", "unit": unit, "checkpoint_id": checkpoint, "progress": progress["path"]}
+            result = {"status": "done", "unit": unit, "checkpoint_id": checkpoint, "progress": progress["path"]}
+            return _journal_progress(exec_dir, "unit-finish", unit_id, result, outcome="pass")
     unit = ledger_mark(exec_dir, unit_id, "failed", error=error or "gate failed")
     if workdir:
         # The failed attempt's files are the run's own state: a retry must not see them as foreign.
         try:
-            _set_expected_tree(exec_dir, _worktree_tree(workdir))
+            _set_expected_tree(exec_dir, _worktree_tree(workdir, journal=_run_journal(led)))
         except ToolError:
             _set_expected_tree(exec_dir, None)
     stop = _stop_reason(unit)
     progress = render_progress(exec_dir)
-    return {
+    result = {
         "status": "failed",
         "unit": {k: v for k, v in unit.items() if k != "stagnation"},
         "decision": "stop" if stop else "retry",
@@ -1165,6 +1490,7 @@ def unit_finish(exec_dir, unit_id, outcome, error=None, note=None):
         "restore_to": _restore_target(led, unit_id),
         "progress": progress["path"],
     }
+    return _journal_progress(exec_dir, "unit-finish", unit_id, result, outcome="fail")
 
 
 def cmd_detect_input(args):
@@ -1215,6 +1541,325 @@ BRAINSTORM_MISSING = ("plan-brainstorming not installed alongside: settings are 
                       "every External unit needs the engineer's confirmation")
 
 
+def _head_sha(workdir):
+    """HEAD commit of the repository; "" while HEAD is unborn (no commit yet)."""
+    try:
+        return _git(workdir, "rev-parse", "--verify", "-q", "HEAD").strip()
+    except ToolError:
+        return ""
+
+
+def locate_ledger(plan_path, workdir):
+    """Where `ledger-init auto` keeps the ledger of this plan. A split plan runs by its roadmap, so
+    <X>.md is also looked up as <X>-roadmap.md and a roadmap also as its master plan <X>.md; both
+    found is ledger-ambiguous. Reads nothing else and writes nothing: consents and settings-drift
+    stay as they are (the commit mode uses it after the run)."""
+    path = Path(plan_path)
+    if path.name.endswith(ROADMAP_SUFFIX):
+        names = {"roadmap": path, "plan": path.with_name(path.name[: -len(ROADMAP_SUFFIX)] + ".md")}
+    else:
+        names = {"plan": path, "roadmap": path.with_name(path.stem + ROADMAP_SUFFIX)}
+    found = {kind: default_exec_dir(workdir, name) for kind, name in names.items()}
+    existing = [kind for kind, exec_dir in found.items() if ledger_path(exec_dir).is_file()]
+    if len(existing) > 1:
+        dirs = [found[kind] for kind in existing]
+        raise ToolError("ledger-ambiguous: both the plan and its roadmap have a ledger: " + ", ".join(dirs)
+                        + "; pass the exec_dir of the run to commit to commit-run", 2, exec_dirs=dirs)
+    matched = existing[0] if existing else None
+    return {"ok": True, "exec_dir": found[matched or next(iter(found))], "exists": matched is not None,
+            "matched": matched}
+
+
+def cmd_ledger_path(args):
+    return locate_ledger(args.plan_path, args.workdir)
+
+
+# Files of the pipeline itself, by exact name in any folder, plus BACKLOG.md at the root: the skills write
+# them between units, so they are never a foreign change and a rollback never deletes or rewrites them.
+# Any other file stays watched, in the plan's folder too (diffs and commits use _is_pipeline_artifact).
+_CHAIN_FILE_RE = re.compile(
+    r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
+    r"|impl-roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
+
+
+def _is_chain_file(rel):
+    rel = str(rel).replace("\\", "/")
+    return rel in _FOREIGN_IGNORED or bool(_CHAIN_FILE_RE.fullmatch(rel.rsplit("/", 1)[-1]))
+
+
+# A chain file named like a journal: the dirty check leaves out only the run's own journal (by path).
+_JOURNAL_NAME_RE = re.compile(r"-chain\.json(?:\.lock)?$")
+
+
+# The chain journal is the run's own record, like the ledger: it changes after every unit, so snapshots
+# and the working-tree tree leave it out, and it never makes the working tree dirty. Only the run's own
+# journal is left out; every *-chain.json is the fallback for a journal whose path is unknown.
+_JOURNAL_GLOBS = ("**/*-chain.json", "**/*-chain.json.lock")
+
+
+def _journal_file(plan_path):
+    """Absolute path of the plan's chain journal (brainstorm_tool.journal_path_for; nothing is created).
+    None when it cannot be known: plan-brainstorming not alongside, or the plan's sources are missing."""
+    try:
+        module = _load_brainstorm_tool()
+        if module is None or not hasattr(module, "journal_path_for"):
+            return None
+        return module.journal_path_for(str(Path(plan_path).resolve()))["journal"]
+    except Exception:  # an unknown journal falls back to every *-chain.json
+        return None
+
+
+def _run_journal(led):
+    """The run's journal: the ledger's journal.path, else the journal of the ledger's plan."""
+    return (led.get("journal") or {}).get("path") or _journal_file(led["plan_path"])
+
+
+def _journal_pathspecs(workdir, journal, magic):
+    """Pathspecs of the journal and its lock with `magic` ("top" or "top,exclude"): the exact paths
+    from the repository root, none for a journal outside it, every *-chain.json when it is unknown."""
+    if not journal:
+        return [f":({magic},glob){pattern}" for pattern in _JOURNAL_GLOBS]
+    root = os.path.realpath(_git(workdir, "rev-parse", "--show-toplevel").strip())
+    path = os.path.realpath(journal)
+    if not _inside(path, root):
+        return []
+    rel = os.path.relpath(path, root).replace(os.sep, "/")
+    return [f":({magic},literal){rel}", f":({magic},literal){rel}.lock"]
+
+
+def _drop_journal(workdir, env, journal=None):
+    """Remove the chain journal from the temporary index a snapshot or a tree is written from."""
+    specs = _journal_pathspecs(workdir, journal, "top")
+    if specs:
+        _git(workdir, "rm", "--cached", "-q", "--ignore-unmatch", "--", *specs, env=env)
+
+
+def _journal_call(led, name, *args, **kwargs):
+    """brainstorm_tool.<name>(<the run's journal>, *args, **kwargs). Returns None on success, or when
+    there is no journal or no journal code alongside, else the error text: the journal is a record
+    of the run, never a gate, so this never raises."""
+    journal = led.get("journal")
+    if not journal:
+        return None
+    try:
+        module = _load_brainstorm_tool()
+        function = getattr(module, name, None) if module is not None else None
+        if function is not None:
+            function(journal["path"], *args, **kwargs)
+    except Exception as exc:  # any failure of the journal is reported, not raised
+        return str(exc) or exc.__class__.__name__
+    return None
+
+
+def _journal_open(plan_path):
+    """(journal, master plan path, error) for a plan, roadmap or part: the chain journal found by
+    brainstorm_tool.journal_path_for, created when missing. journal is {path, plan id}; it is None,
+    without an error, when plan-brainstorming or its journal code is not installed alongside."""
+    try:
+        module = _load_brainstorm_tool()
+        if module is None or not hasattr(module, "journal_path_for"):
+            return None, None, None
+        info = module.journal_path_for(str(Path(plan_path).resolve()))
+        if not info.get("plan"):
+            return None, None, None
+        if not info["exists"]:
+            lang = module.detect_lang_text(_read_text(info.get("spec") or info["plan"]))
+            module.journal_create(info["journal"], info["goal"], lang, info.get("spec"))
+        return {"path": info["journal"], "plan": Path(info["plan"]).stem}, info["plan"], None
+    except Exception as exc:  # the journal never stops ledger-init
+        return None, None, str(exc) or exc.__class__.__name__
+
+
+def _journal_stage(led, stage):
+    """Status of a stage of the run's plan in its journal: "pending" while the journal does not list
+    the plan yet, None when the journal cannot be read (the next journal call reports why)."""
+    try:
+        data = _load_brainstorm_tool().journal_load(led["journal"]["path"])
+    except Exception:  # unreadable journal: the caller's journal call returns the error
+        return None
+    for entry in data.get("plans") or []:
+        if entry.get("id") == led["journal"]["plan"]:
+            return ((entry.get("stages") or {}).get(stage) or {}).get("status", "pending")
+    return "pending"
+
+
+_JOURNAL_STOP = {"all-done": "done", "exhausted": "failed", "stagnated": "failed", "blocked": "failed"}
+
+
+def _journal_progress(exec_dir, kind, unit_id, result, **data):
+    """unit-begin / unit-finish event with the run's progress (done of total units); a journal error
+    is added to the command's result as journal_error."""
+    led = _load(exec_dir)
+    if led.get("journal"):
+        done = sum(1 for unit in led["units"] if unit["status"] == "done")
+        payload = dict({"unit": unit_id}, **data, done=done, total=len(led["units"]))
+        error = _journal_call(led, "journal_unit", led["journal"]["plan"], kind, payload)
+        if not error and kind == "unit-finish" and _journal_stage(led, "execution") == "running":
+            # Same status, new artifacts (stage-update): the stage carries the run's progress (spec A).
+            error = _journal_call(led, "journal_event", "plan-executor", led["journal"]["plan"], "execution",
+                                  "running", artifacts=[f"units_done={done}", f"units_total={len(led['units'])}"])
+        if error:
+            result["journal_error"] = error
+    return result
+
+
+def _journal_stop(exec_dir, nxt):
+    """No unit to begin: stage execution becomes done (all-done, with the plan or roadmap hash) or
+    failed (exhausted, stagnated, blocked), once; in-progress changes nothing."""
+    status = _JOURNAL_STOP.get(nxt["reason"])
+    led = _load(exec_dir)
+    if status and led.get("journal") and _journal_stage(led, "execution") != status:
+        extra = {"input_path": led["plan_path"]} if status == "done" else {}
+        error = _journal_call(led, "journal_event", "plan-executor", led["journal"]["plan"], "execution",
+                              status, **extra)
+        if error:
+            return dict(nxt, journal_error=error)
+    return nxt
+
+
+_SUBJECT_RE = re.compile(r"^(feat|fix|docs|refactor|test|chore|ci|perf|style)\([^()\s]+\): \S")
+
+
+def _empty_tree(top):
+    """Tree sha of the empty tree: what an unborn HEAD holds."""
+    return _with_temp_index(top, lambda env: _git(top, "write-tree", env=env).strip())
+
+
+def _changed_paths(top, old, new):
+    """Repository-root-relative paths that differ between two tree-ish; an empty old is the empty tree.
+    A rename is a deletion plus an addition, so both of its paths are listed."""
+    return {change["path"] for change in _tree_diff(top, old or _empty_tree(top), new)}
+
+
+def _commit_conflicts(led, top, files, fix_files, current):
+    """Checks 3 and 4 of commit-run. mixed-files: the start snapshot differs from HEAD at the start, so the
+    file held the user's uncommitted work when the run changed it. foreign-changes: the file differs from
+    the run's expected tree and is not an audit fix."""
+    dirty_at_start = _changed_paths(top, led["baseline_head"], led["baseline_checkpoint"])
+    mixed = [rel for rel in files if rel in dirty_at_start]
+    if mixed:
+        raise ToolError("mixed-files: these files held the user's uncommitted work before the run and the run "
+                        "changed them too: " + ", ".join(mixed), 1, files=mixed)
+    expected = led.get("expected_tree")
+    changed = _changed_paths(top, expected, current) if expected else set()
+    foreign = [rel for rel in files if rel in changed and rel not in fix_files]
+    if foreign:
+        raise ToolError("foreign-changes: changed outside the run after its last unit: " + ", ".join(foreign),
+                        1, files=foreign)
+
+
+def commit_run(exec_dir, message_file, journal=None):
+    """Commit the run's files and the audit's fixes on the user's branch (spec D): every refusal comes
+    before the index is touched, and the commit runs the hooks. Never --no-verify, --amend, push or --force."""
+    led = _load(exec_dir)
+    workdir = led.get("workdir")
+    if not workdir or checkpoint_detect(workdir)["vcs"] != "git":
+        raise ToolError("no-git: the workdir is not a git repository; nothing to commit", 1)
+    if "baseline_head" not in led:
+        raise ToolError("baseline-head-unknown: the ledger has no baseline_head (it was created before "
+                        "commit-run existed); commit this run by hand", 1)
+    top = os.path.realpath(_git(workdir, "rev-parse", "--show-toplevel").strip())
+    staged = sorted(_z_list(_git(top, "diff", "--cached", "--name-only", "-z")))
+    if staged:
+        raise ToolError("index-not-empty: the index already holds staged changes: " + ", ".join(staged)
+                        + "; commit or unstage them first", 1, staged=staged)
+    journal = journal or (led.get("journal") or {}).get("path")
+    journal_error = None
+    try:
+        fix_files = set(_audit_fix_files(led, journal))
+    except Exception as exc:  # unreadable journal: no audit fix is known, so a fixed file reads as foreign
+        fix_files, journal_error = set(), str(exc) or exc.__class__.__name__
+    last = None
+    for unit in led["units"]:
+        if unit["status"] == "done" and unit.get("checkpoint_id"):
+            last = unit["checkpoint_id"]
+    baseline = led.get("baseline_checkpoint")
+    for sha in (baseline, last, led.get("expected_tree")):
+        try:
+            if sha:
+                _git(top, "cat-file", "-e", sha)
+        except ToolError:
+            if sha == led.get("expected_tree") and sha not in (baseline, last):
+                raise ToolError(f"snapshots-missing: the expected tree {sha} is not in the object store; run "
+                                "accept-changes to take the current working tree as expected, then commit-run "
+                                "again", 1) from None
+            raise ToolError(f"snapshots-missing: {sha} is not in the object store (snapshot refs pruned and "
+                            "garbage-collected); commit-run needs the run's snapshots, commit by hand", 1) from None
+    running = [{"id": unit["id"], "status": "running"} for unit in led["units"] if unit["status"] == "running"]
+    if running:
+        raise ToolError("run-incomplete: a unit is still running: " + ", ".join(unit["id"] for unit in running)
+                        + "; finish it (unit-finish) or roll it back before the commit", 1, units=running)
+    run_files = _changed_paths(top, baseline, last) if baseline and last else set()
+    plan = os.path.realpath(led["plan_path"])
+    plan_dir = os.path.relpath(os.path.dirname(plan), top) if _inside(plan, top) else ""
+    current = _worktree_tree(top, journal=_run_journal(led))
+    pool = run_files | fix_files
+    candidates = {rel for rel in pool if not _is_pipeline_artifact(rel, plan_dir)}
+    # A file whose working copy equals HEAD is committed already (by an earlier call or by the user).
+    files = sorted(candidates & _changed_paths(top, _head_sha(top), current))
+    failed = [unit["id"] for unit in led["units"] if unit["status"] == "failed"]
+    if failed and last:
+        # A failed attempt that was not rolled back: its edits sit on top of the done units' files, and
+        # expected_tree is that attempt's tree, so foreign-changes cannot see them. Audit fixes are wanted.
+        after = _changed_paths(top, last, current)
+        attempt = [rel for rel in files if rel in after and rel not in fix_files]
+        if attempt:
+            raise ToolError("failed-attempt: " + ", ".join(failed) + " failed and was not rolled back; these files "
+                            "differ from the last done snapshot (the failed attempt's edits, or were changed outside "
+                            "the run): " + ", ".join(attempt) + "; restore them (checkpoint-restore --paths) or "
+                            "commit by hand", 1, files=attempt)
+    # Units that failed or never ran are a warning, not a refusal: the user decides (COMMIT shows them).
+    incomplete = [{"id": unit["id"], "status": unit["status"]} for unit in led["units"]
+                  if unit["status"] in {"failed", "pending"}]
+    if led["baseline_head"]:
+        head = _head_sha(top)
+        try:
+            _git(top, "merge-base", "--is-ancestor", led["baseline_head"], "HEAD")
+        except ToolError:  # another branch, rewritten history or an unborn HEAD: not the run's line
+            raise ToolError(f"head-moved: HEAD {head or '(unborn)'} does not descend from {led['baseline_head']}, "
+                            "the HEAD the run started from; switch back or commit by hand", 1,
+                            baseline_head=led["baseline_head"], head=head) from None
+    excluded = sorted(pool - candidates)  # run files that are the pipeline's artifacts: never committed
+    # Dropped by the broad rules only (plan folder, name patterns), not as the pipeline's own files:
+    # they may be real project files, so the agent names them to the user. A *-chain.json other than
+    # the run's journal and its lock is a project file too (Task 53), e.g. config/supply-chain.json.
+    own = _run_journal(led)
+    own = os.path.realpath(own) if own else None
+    own = os.path.relpath(own, top).replace(os.sep, "/") if own and _inside(own, top) else None
+    info = {"excluded": excluded, "excluded_outside_chain": [
+        rel for rel in excluded if not _is_chain_file(rel)
+        or (rel.endswith(("-chain.json", "-chain.json.lock")) and rel not in (own, f"{own}.lock"))]}
+    if incomplete:
+        info["incomplete"] = incomplete
+    _commit_conflicts(led, top, files, fix_files, current)
+    if not files:
+        return {"ok": True, "empty": True, "files": [], **info}
+    message = _read_text(message_file)
+    subject = (message.splitlines() or [""])[0].strip()
+    if not _SUBJECT_RE.match(subject) or len(subject) > 72:
+        raise ToolError(f"bad-subject: {subject!r}: expected <type>(<scope>): <subject>, at most 72 characters, "
+                        "type feat|fix|docs|refactor|test|chore|ci|perf|style", 2)
+    _git(top, "--literal-pathspecs", "add", "-A", "--", *files)
+    try:
+        _git(top, "commit", "-q", "-F", str(Path(message_file).resolve()))
+    except ToolError as exc:  # a hook refused the commit: the index goes back to how it was
+        _git(top, "--literal-pathspecs", "reset", "-q", "--", *files)
+        raise ToolError(f"commit-failed: {exc}", 1, files=files) from exc
+    result = {"ok": True, "sha": _head_sha(top), "subject": subject, "files": files, "empty": False, **info}
+    if journal:
+        plan_id = (led.get("journal") or {}).get("plan") or _plan_id(led["plan_path"])
+        target = {"journal": {"path": str(Path(journal).resolve()), "plan": plan_id}}
+        journal_error = journal_error or _journal_call(target, "journal_add_commit", plan_id, result["sha"],
+                                                       subject, files)
+    if journal_error:
+        result["journal_error"] = journal_error
+    return result
+
+
+def cmd_commit_run(args):
+    return commit_run(args.exec_dir, args.message_file, journal=args.journal)
+
+
 def _load_brainstorm_tool():
     path = Path(__file__).resolve().parents[2] / "plan-brainstorming" / "scripts" / "brainstorm_tool.py"
     if not path.is_file():
@@ -1259,7 +1904,7 @@ def cmd_ledger_init(args):
     fresh = not ledger_path(args.exec_dir).exists()
     if workdir and fresh:
         _check_exec_dir(args.exec_dir, workdir, allow_temp=getattr(args, "allow_temp", False))
-        detected_vcs = checkpoint_detect(workdir)
+        detected_vcs = checkpoint_detect(workdir, journal=_journal_file(args.plan_path))
         if detected_vcs["dirty"] and not getattr(args, "allow_dirty", False):
             raise ToolError("dirty-worktree: uncommitted changes in workdir; ask the engineer (commit/stash or --allow-dirty)", 1)
     settings, warning = _resolve_settings(args.plan_path)
@@ -1267,7 +1912,7 @@ def cmd_ledger_init(args):
     if settings is not None and not settings.get("ok", True):
         raw_units = units.get("units", []) if isinstance(units, dict) else units
         problems = "; ".join(settings.get("errors") or [])
-        if any(_EXTERNAL_RE.search(unit_text(unit) or "") for unit in raw_units):
+        if any(_external_lines(unit_text(unit)) for unit in raw_units):
             raise ToolError("settings-unavailable: the plan has External units but its settings cannot be read ("
                             + problems + "); ask the engineer", 1, settings_errors=settings.get("errors") or [])
         warnings.append(f"settings-unavailable: {problems}; Chain defaults apply")
@@ -1276,12 +1921,32 @@ def cmd_ledger_init(args):
                       settings=settings)
     if workdir and fresh:
         led["workdir"] = os.path.abspath(workdir)
-        led["baseline_checkpoint"] = checkpoint_create(workdir, "baseline", led["run_id"])["checkpoint_id"]
+        led["baseline_checkpoint"] = checkpoint_create(workdir, "baseline", led["run_id"],
+                                                       journal=_journal_file(args.plan_path))["checkpoint_id"]
         led["expected_tree"] = _commit_tree(workdir, led["baseline_checkpoint"])
         led["foreign_events"] = []
+        if led["baseline_checkpoint"]:
+            # HEAD at the start of the run: commit-run tells the user's uncommitted work from the run's.
+            led["baseline_head"] = _head_sha(workdir)
         _save(args.exec_dir, led)
+    journal, master_plan, journal_error = _journal_open(args.plan_path)
+    if journal is not None or "journal" not in led:
+        led["journal"] = journal
+        _save(args.exec_dir, led)
+    if journal is not None and _journal_stage(led, "execution") in {"pending", "stopped", "failed", None}:
+        # A running stage is a resume and a done stage stays done: neither gets a new event.
+        # artifacts.exec_dir lets journal-reconcile find this ledger (_ledger_evidence); like every path
+        # in the journal it is relative to the journal's folder. unit-finish keeps units_done current.
+        exec_rel = _load_brainstorm_tool()._journal_rel(journal["path"], str(Path(args.exec_dir).resolve()))
+        done = sum(1 for unit in led["units"] if unit["status"] == "done")
+        journal_error = _journal_call(led, "journal_event", "plan-executor", master_plan, "execution", "running",
+                                      artifacts=["exec_dir=" + exec_rel, f"units_done={done}",
+                                                 f"units_total={len(led['units'])}"])
     # exec_dir is reported, not stored: tell the engineer where the ledger lives.
-    return dict(led, exec_dir=str(Path(args.exec_dir).resolve()), warnings=warnings)
+    result = dict(led, exec_dir=str(Path(args.exec_dir).resolve()), warnings=warnings)
+    if journal_error:
+        result["journal_error"] = journal_error
+    return result
 
 
 def cmd_ledger_next(args):
@@ -1309,7 +1974,19 @@ def cmd_consent(args):
 
 
 def cmd_run_diff(args):
+    if args.include_fixes and not args.markdown:
+        raise ToolError("include-fixes-needs-markdown: --include-fixes works with --markdown FILE", 2)
+    if args.markdown:
+        return run_diff_markdown(args.exec_dir, args.markdown, journal=args.include_fixes)
     return run_diff(args.exec_dir)
+
+
+def _configure_run_diff(parser):
+    parser.add_argument("exec_dir")
+    parser.add_argument("--markdown", metavar="FILE",
+                        help="write the diff report to FILE (overwritten); the output lists its files")
+    parser.add_argument("--include-fixes", metavar="JOURNAL",
+                        help="chain journal: add the audit's fix files, diffed up to the working tree")
 
 
 def cmd_checkpoint_detect(args):
@@ -1326,13 +2003,13 @@ def _after_restore(exec_dir, workdir, restored_paths=None):
     place by a --paths restore are recorded as accepted, never taken over silently."""
     led = _load(exec_dir)
     old = led.get("expected_tree")
-    current = _worktree_tree(workdir)
+    current = _worktree_tree(workdir, journal=_run_journal(led))
     if restored_paths:
         events = led.setdefault("foreign_events", [])
         events.append({"at": _utc_now(), "paths": restored_paths, "decision": "restored", "note": None})
         names = {entry["path"] for entry in restored_paths}
         kept = [change for change in (_tree_diff(workdir, old, current) if old and current else [])
-                if change["path"] not in names and change["path"] not in _FOREIGN_IGNORED]
+                if change["path"] not in names and not _is_chain_file(change["path"])]
         if kept:
             events.append({"at": _utc_now(), "paths": kept, "decision": "accepted",
                            "note": "kept while restoring other paths"})
@@ -1486,6 +2163,17 @@ def _configure_render_progress(parser):
     parser.add_argument("exec_dir")
 
 
+def _configure_ledger_path(parser):
+    parser.add_argument("plan_path")
+    parser.add_argument("--workdir", required=True, help="the repository the run works in")
+
+
+def _configure_commit_run(parser):
+    parser.add_argument("exec_dir")
+    parser.add_argument("--message-file", required=True, help="commit message; the first line is the subject")
+    parser.add_argument("--journal", help="chain journal (default: the ledger's journal)")
+
+
 _register("accept-changes", cmd_accept_changes, _configure_accept_changes)
 _register("checkpoint-create", cmd_checkpoint_create, _configure_checkpoint_create)
 _register("checkpoint-detect", cmd_checkpoint_detect, _configure_checkpoint_detect)
@@ -1503,10 +2191,12 @@ _register("parse-tasks", cmd_parse_tasks, _configure_parse_tasks)
 _register("recommend-gate", cmd_recommend_gate, _configure_recommend_gate)
 _register("recommend-strategy", cmd_recommend_strategy, _configure_recommend_strategy)
 _register("render-progress", cmd_render_progress, _configure_render_progress)
-_register("run-diff", cmd_run_diff, lambda parser: parser.add_argument("exec_dir"))
+_register("run-diff", cmd_run_diff, _configure_run_diff)
 _register("scope-context", cmd_scope_context, _configure_scope_context)
 _register("unit-begin", cmd_unit_begin, _configure_unit_begin)
 _register("unit-finish", cmd_unit_finish, _configure_unit_finish)
+_register("ledger-path", cmd_ledger_path, _configure_ledger_path)
+_register("commit-run", cmd_commit_run, _configure_commit_run)
 
 
 def build_parser():

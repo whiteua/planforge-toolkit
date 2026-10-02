@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -469,6 +470,63 @@ class BrainstormContractTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(out["task_count"], 3)
         self.assertTrue(any("settings-source-missing" in w for w in out["warnings"]), out["warnings"])
+
+
+@unittest.skipUnless(os.path.isfile(BRAINSTORM), "plan-brainstorming not installed alongside")
+class JournalTest(unittest.TestCase):
+    """plan-check returns the chain journal (brainstorm_tool.journal_path_for) when the file exists."""
+
+    def write_plan(self, tmp, spec_line="**Spec:** demo-spec.md", with_spec=True):
+        if with_spec:
+            with open(os.path.join(tmp, "demo-spec.md"), "w", encoding="utf-8") as fh:
+                fh.write("> Tier: Standard\n\n# Goal\n\nDemo.\n")
+        path = os.path.join(tmp, "demo-impl.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(VALID.replace("**Spec:** plan01-spec.md", spec_line))
+        return path
+
+    def test_journal_null_until_the_file_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = self.write_plan(tmp)
+            code, out = _run(TOOL, "plan-check", plan)
+            self.assertEqual(code, 0, out)
+            self.assertIsNone(out["journal"])
+            journal = os.path.join(tmp, "demo-chain.json")
+            with open(journal, "w", encoding="utf-8") as fh:
+                fh.write("{}\n")
+            code, out = _run(TOOL, "plan-check", plan)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(os.path.normcase(out["journal"]), os.path.normcase(os.path.abspath(journal)))
+
+    def test_plan_without_spec_line_keeps_journal_next_to_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = self.write_plan(tmp, spec_line="", with_spec=False)
+            journal = os.path.join(tmp, "demo-chain.json")
+            with open(journal, "w", encoding="utf-8") as fh:
+                fh.write("{}\n")
+            code, out = _run(TOOL, "plan-check", plan)
+            self.assertEqual(code, 1, out)  # the plan fails the header check, the journal is still reported
+            self.assertEqual(os.path.normcase(out["journal"]), os.path.normcase(os.path.abspath(journal)))
+
+    def test_missing_spec_gives_null(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = self.write_plan(tmp, with_spec=False)
+            code, out = _run(TOOL, "plan-check", plan)
+            self.assertEqual(code, 0, out)
+            self.assertIsNone(out["journal"])
+
+    def test_missing_old_or_failing_module_gives_null(self):
+        class Old:
+            pass
+
+        class Broken:
+            @staticmethod
+            def journal_path_for(path):
+                raise RuntimeError("boom")
+
+        for module in (None, Old(), Broken()):
+            with mock.patch.object(pt, "_load_brainstorm_tool", return_value=module):
+                self.assertIsNone(pt._journal_for(FIXTURE), module)
 
 
 if __name__ == "__main__":

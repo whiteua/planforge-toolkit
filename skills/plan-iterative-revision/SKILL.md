@@ -62,6 +62,9 @@ stdlib only. If `python` is unavailable, stop and tell the user.
 7. External systems: Phase A may run read-only checks only on an environment with `read=run` in
    `B.settings.environments` (references/PHASE-A-AUDIT.md, Step 3); anything else that reaches an
    external system needs the user's explicit permission for that environment.
+8. Besides the review files and `PLAN`, the skill writes only the chain journal (with
+   `BACKLOG.md` and `<goal>-followups.json`), only through `brainstorm_tool.py`, and only between
+   the guard windows of the phases (Chain journal below).
 
 ## Batch mode (a plan-splitter roadmap)
 
@@ -94,6 +97,7 @@ files are uncommitted; that is expected.
 MODE = full-cycle | audit-only; I = interactive | autonomous   (resolved from Inputs)
 B = TOOL bootstrap PLAN [--preset P] [--lenses L] [--rigor R] [--max M] [--stop-policy S]
 if not B.valid: report B.error / B.errors and stop
+journal start (Chain journal below); batch mode or a single part: no stage events, findings only
 if B.config_from_settings is not empty:
     announce preset + stop_policy as taken from the spec settings; do not ask
 elif I == interactive and the user gave neither preset nor stop_policy:
@@ -116,6 +120,7 @@ loop:
                                  +n → MAX += n and re-run the same record command;
                                  stop → re-run it with --user-stop
     TOOL guard-check B.git_root <B.basename>-phase-a <R.review_path or R.completion_path or B.next_review>
+    journal: R.journal_event → journal-event; this audit's code findings → journal-finding (Chain journal below)
 
     if R.action == "stop":       go to Final output
     if R.action == "implement":
@@ -135,6 +140,85 @@ call, a chain run) is `autonomous`: `record --interaction autonomous` stops at t
 A `guard-check` violation means a phase touched a forbidden file: stop and report the paths.
 The guard sees only what `git status` sees (not ignored files, not paths outside the repository).
 Without git, say that the guard is unavailable and list the files you changed yourself.
+
+## Chain journal
+
+`J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py"`. The journal
+`<goal>-chain.json` records the `revision` stage of the plan for the other skills and the chain
+runner. `B.settings` is `null` (plan-brainstorming not installed alongside): no journal, say so
+once. Journal commands never run inside a phase: the guard would report the journal and
+`BACKLOG.md` as changed files.
+
+- **Start** (after `bootstrap`): `<journal>` = `B.journal`; `null` → `J journal-path PLAN --create`
+  (`journal`). `P` = the `plan` field of `J journal-path PLAN` (the master plan; a part leads to
+  it). Every `--plan` below is `P`.
+- **Stage mode.** Only a run on the master plan itself (`P` is the same file as `PLAN`) owns the
+  `revision` stage. Batch mode (a roadmap) and a run on a single part (`PLAN` is a part: its
+  Source line leads `journal-path` to another file, `P`) write no stage events and record no
+  questions: the parts are verified inside the `split` stage of plan-splitter, and the master
+  plan's `revision` stage and its input stay as they are. They skip the `journal-show` step below
+  entirely, so they never stop with `stage-done` or `open-questions`; they only find `<journal>`
+  and record code findings.
+- `J journal-show <journal> --plan P`, stage `revision` (stage mode only; `unknown-plan`, exit `2`:
+  no event of this plan yet, every stage is `pending`):
+  - `pending`, `failed`, `running`, `stopped` without open questions → `J journal-event <journal> --skill plan-iterative-revision --plan P --stage revision --status running`;
+  - `stopped` with open questions → `interactive`: ask each (its `text`, `options`) and record
+    `J journal-answer <journal> <Qn> --answer "<answer>"`; `autonomous`: final output
+    `{"result": null, "error": "open-questions: <ids>"}` and stop. Then apply each answered
+    question:
+    - "accept the plan as it is" → `J journal-answer <journal> <Qn> --applied`, then
+      `J journal-event <journal> --skill plan-iterative-revision --plan P --stage revision --status running`
+      and at once `J journal-event <journal> --skill plan-iterative-revision --plan P --stage revision --status done --input PLAN --artifact verdict=accepted`;
+      then stop without a new audit and without an edit of the plan (`autonomous`: final output
+      `{"result": null, "error": "stage-done: revision (accepted, <Qn>)"}`; `interactive`: say
+      that the plan was accepted as it is);
+    - "resolve by hand and re-run" (the user fixed the plan) or a raised `max` →
+      `J journal-answer <journal> <Qn> --applied`, then `--status running` and the Loop as usual;
+  - `done` → first the drift check: `J journal-reconcile <journal>`, then look in the journal
+    file's `questions` for one of plan `P` whose text starts with `drift: revision` and that is
+    not `applied` (the plan changed after the stage ended):
+    - `open` → `interactive`: ask it (re-audit the changed plan, or keep the earlier result) and
+      record `J journal-answer <journal> <Qn> --answer "<rewrite | keep>"`; `autonomous`: final
+      output `{"result": null, "error": "open-questions: <Qn>"}` and stop;
+    - answered `rewrite` → `J journal-event <journal> --skill plan-iterative-revision --plan P --stage revision --status running --reason drift`,
+      the Loop as usual, and after the stage's `done` event `J journal-answer <journal> <Qn> --applied`;
+    - answered `keep` → `J journal-answer <journal> <Qn> --applied`, then
+      `J journal-event <journal> --skill plan-iterative-revision --plan P --stage revision --status done --input PLAN`
+      (the same status: it binds the stage to the current plan without a new audit), then as
+      without drift;
+    - no such question → say that the revision already passed (`verdict`, `completion` in the
+      stage's artifacts, read from the journal file itself: the `plans` entry with `id` P,
+      `stages.revision.artifacts`; `journal-show` returns statuses only) and name the next stage;
+      run again only when the user asks for it now: `--status running --reason user-request`.
+      `autonomous`: final output `{"result": null, "error": "stage-done: revision"}` and stop.
+    The journal's `done` is authoritative: a plan that was `clean` on its first audit has no
+    review and no completion file, so `journal-reconcile` cannot rebuild that stage from
+    artifacts.
+- **After each `record`** (and its Phase A `guard-check`): `R.journal_event` not `null` and stage
+  mode (in batch mode and on a single part it is never forwarded) →
+  `J journal-event <journal> --skill plan-iterative-revision --plan P --stage revision --status <R.journal_event.status> --artifact <each entry of R.journal_event.artifacts>`,
+  plus `--input <R.journal_event.input>` when `input` is present (only with `done`). The artifact
+  values come relative to the journal's directory with forward slashes; pass them as they are.
+  When it is `stopped` and the run is
+  `autonomous`, then also `J journal-question <journal> --skill plan-iterative-revision --plan P --stage revision --text "<result, stop_reason and the open issue titles>" --option "<resolve by hand and re-run>" --option "<accept the plan as it is>"`
+  and `J journal-export-findings <journal>`. The interactive limit question (`ask_limit`) is
+  recorded with its answer: the same `journal-question` command with `--answer "<+3 | +5 | stop>"`.
+- **Code findings**: defects in the existing code that are not problems of the plan
+  (references/PHASE-A-AUDIT.md, "Findings about the code") are recorded after the Phase A
+  `guard-check`, one command each:
+  `J journal-finding <journal> --skill plan-iterative-revision --plan P --file <path from the repository root> [--line N] --summary "<what is wrong>" --failure-scenario "<what breaks, when>" --backlog-root <root>`,
+  `<root>` = `git -C <dir of PLAN> rev-parse --show-toplevel` (outside git, the working
+  directory). `action: exists` is fine. `backlog: failed` (with `backlog_error`): the finding is
+  still recorded in the journal and exported; only its `BACKLOG.md` line is missing; mention it in
+  the final output (a `user-section:` error means the section is the user's own and is never
+  written, not even by hand).
+- **Errors**: `journal-corrupt` (exit `2`) → say it, propose `J journal-reconcile <journal> --rebuild`,
+  continue without the journal; `journal-locked` (exit `1`) → repeat once; still locked:
+  `interactive` → ask whether to continue without the journal; `autonomous` → final output
+  `{"result": null, "error": "journal-locked"}` and stop; `journal-write-failed` (exit `1`, the
+  file system refused the write, e.g. a read-only journal) → say it in one line with the error
+  text and continue without the journal; `illegal-transition` → do not force a status, mention it
+  in the final output.
 
 ## Stop gates (decided by `record`, first match wins)
 

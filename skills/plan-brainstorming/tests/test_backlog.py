@@ -5,6 +5,7 @@ Run: python -m pytest skills/plan-brainstorming/tests/test_backlog.py -q
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -119,6 +120,73 @@ class BacklogFenceAndBomTest(unittest.TestCase):
             bt.os.replace = real
 
 
+class AtomicWriteTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.path = os.path.join(self.dir, "a.json")
+
+    def _read(self, path):
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    def test_writes_utf8_bytes_and_leaves_no_temp_file(self):
+        bt._atomic_write_text(self.path, "строка\nline\n")
+        self.assertEqual(self._read(self.path), "строка\nline\n".encode("utf-8"))
+        bt._atomic_write_text(self.path, "x\r\n")
+        self.assertEqual(self._read(self.path), b"x\r\n")
+        self.assertEqual(os.listdir(self.dir), ["a.json"])
+
+    def test_failed_replace_keeps_the_file_and_removes_the_temp(self):
+        with open(self.path, "wb") as fh:
+            fh.write(b"old\n")
+        real = bt.os.replace
+
+        def failing_replace(src, dst):
+            raise OSError("disk full")
+
+        bt.os.replace = failing_replace
+        try:
+            with self.assertRaises(OSError):
+                bt._atomic_write_text(self.path, "new\n")
+        finally:
+            bt.os.replace = real
+        self.assertEqual(self._read(self.path), b"old\n")
+        self.assertEqual(os.listdir(self.dir), ["a.json"])
+
+    @unittest.skipIf(os.name == "nt", "file modes are checked on POSIX")
+    def test_existing_mode_is_kept(self):
+        for mode in (0o644, 0o664):
+            with open(self.path, "wb") as fh:
+                fh.write(b"old\n")
+            os.chmod(self.path, mode)
+            bt._atomic_write_text(self.path, "new\n")
+            self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), mode)
+            self.assertEqual(self._read(self.path), b"new\n")
+
+    @unittest.skipIf(os.name == "nt", "file modes are checked on POSIX")
+    def test_new_file_gets_the_umask_mode(self):
+        # os.umask returns the previous mask; the cleanup restores it after the test.
+        self.addCleanup(os.umask, os.umask(0o022))
+        bt._atomic_write_text(self.path, "new\n")
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o644)
+        self.assertEqual(self._read(self.path), b"new\n")
+
+    @unittest.skipIf(os.name == "nt", "symlinks are checked on POSIX")
+    def test_symlink_stays_and_its_target_is_written(self):
+        shared = os.path.join(self.dir, "shared")
+        os.mkdir(shared)
+        target = os.path.join(shared, "a.json")
+        with open(target, "wb") as fh:
+            fh.write(b"old\n")
+        os.symlink(target, self.path)
+        bt._atomic_write_text(self.path, "new\n")
+        self.assertTrue(os.path.islink(self.path))
+        self.assertEqual(self._read(target), b"new\n")
+        self.assertEqual(os.listdir(shared), ["a.json"])
+
+
 class BacklogAppendTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -156,9 +224,11 @@ class BacklogAppendTest(unittest.TestCase):
         ])
 
     def test_user_section_and_bad_input_are_refused(self):
-        for section in ("My notes", "Свои заметки"):
-            with self.assertRaises(bt.InputError):
+        for section in ("My notes", "Свои заметки", "my notes", " MY NOTES ", "свои ЗАМЕТКИ"):
+            with self.assertRaisesRegex(bt.BacklogError, "^user-section: "):
                 bt.backlog_append(self.root, section, "plan-executor, x.md", "a1")
+        self.assertTrue(bt._is_user_section("My Notes"))
+        self.assertFalse(bt._is_user_section("My notes 2"))
         with self.assertRaises(bt.InputError):
             bt.backlog_append(self.root, "alpha", "plan-executor, x.md", "two\nlines")
         with self.assertRaises(bt.InputError):
@@ -175,6 +245,32 @@ class BacklogAppendTest(unittest.TestCase):
         data = self._read()
         self.assertEqual(data.replace(inserted, b"", 1), original.encode("utf-8"))
         self.assertLess(data.index(inserted), data.index(b"## beta"))
+
+    def test_append_writes_through_atomic_write_text(self):
+        calls = []
+        real = bt._atomic_write_text
+        bt._atomic_write_text = lambda path, text: (calls.append((path, text)), real(path, text))[1]
+        try:
+            bt.backlog_append(self.root, "alpha", "p, q", "a1", date="2026-10-01")
+        finally:
+            bt._atomic_write_text = real
+        self.assertEqual(calls, [(os.path.abspath(self.path), self._read().decode("utf-8"))])
+
+    @unittest.skipIf(os.name == "nt", "file modes and symlinks are checked on POSIX")
+    def test_append_keeps_mode_and_symlink(self):
+        shared = os.path.join(self.root, "shared")
+        os.mkdir(shared)
+        target = os.path.join(shared, "BACKLOG.md")
+        with open(target, "wb") as fh:
+            fh.write("# Backlog\n\n## alpha\n\n- [ ] a1 — p, q, 2026-09-01\n".encode("utf-8"))
+        os.chmod(target, 0o644)
+        os.symlink(target, self.path)
+        out = bt.backlog_append(self.root, "alpha", "p, q", "a2", date="2026-10-01")
+        self.assertEqual(out["action"], "appended")
+        self.assertTrue(os.path.islink(self.path))
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o644)
+        self.assertTrue(self._read().decode("utf-8").endswith("2026-09-01\n- [ ] a2 — p, q, 2026-10-01\n"))
+        self.assertEqual(os.listdir(shared), ["BACKLOG.md"])
 
     def test_non_utf8_file_is_not_written(self):
         original = "# Backlog\n\n## alpha\n\n- [ ] старое\n".encode("cp1251")
@@ -240,8 +336,10 @@ class BacklogCliTest(unittest.TestCase):
                          [("проверить таймаут", "plan-resolver, alpha-impl-report-1.md", "2026-10-01")])
 
     def test_exit_codes(self):
-        code, out = _run("backlog-append", self.root, "--section", "My notes", "--source", "s, a", "--item", "x")
-        self.assertEqual((code, out["ok"]), (2, False))
+        code, out = _run("backlog-append", self.root, "--section", "my notes", "--source", "s, a", "--item", "x")
+        self.assertEqual((code, out["ok"]), (1, False))
+        self.assertTrue(out["errors"][0].startswith("user-section: "), out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "BACKLOG.md")))
         code, _ = _run("backlog-parse", os.path.join(self.root, "missing.md"))
         self.assertEqual(code, 2)
         with open(os.path.join(self.root, "BACKLOG.md"), "wb") as fh:

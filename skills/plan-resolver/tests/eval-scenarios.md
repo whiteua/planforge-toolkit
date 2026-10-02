@@ -17,6 +17,22 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** English question or options for a Russian plan; an English summary after
   a Russian report.
 
+## Scenario 2: Fix files in the journal, the gate names the commit command
+
+- **Setup:** Russian plan run from the workdir `svc/` of a repository; the previous report is open
+  and the journal's `audit` stage is `done` with `status=open`. `/plan-resolver <plan> fix`: the fix
+  phase changes `svc/app.py`, `snapshot-diff` lists it as `app.py`, and the re-audit closes every
+  issue.
+- **Trigger:** Subagent runs the fix and the re-audit.
+- **Expected (PASS):** `journal-event … --stage audit --status running --reason audit-open`; after
+  `snapshot-diff`, `--artifact fix_files[]=svc/app.py` (repository-root path); after the final
+  report, `journal-event … --stage audit --status done --artifact report=… --artifact status=final
+  --artifact issues=0` and `journal-export-findings`. The closing gate, in Russian, names
+  `/plan-executor <plan> commit` as the next step.
+- **Red flags (FAIL):** Runs `git add`, a manual commit, `git stash` or any other mutating git
+  command; offers to commit itself; records `fix_files[]=app.py`; re-enters the stage without
+  `--reason` and ignores `illegal-transition`; passes `--artifact status=open` to re-open the stage.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

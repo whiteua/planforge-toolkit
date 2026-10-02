@@ -12,6 +12,8 @@ A checkpoint task (`### Task N: Checkpoint — …`) is gated by running its com
 
 `unit-begin` returns `external`: one entry per environment named before the description dash of each `**External:**` line (`` `a` (read), `b` (write) — … `` gives two entries), `{env, access, kind, consent, confirmed, source}`, also recorded on the unit in the ledger. `consent` is the setting for that access (`run`, `task`, `deny`) from the settings `ledger-init` stored (the spec, or the header of an old plan); settings stored with errors grant nothing (`consent: null`). `confirmed` is true for `run` or for a run-scope consent given earlier with `consent`, never for a write on production; `source` says whose permission it is (`spec` / `session`).
 
+Only `**External:**` lines outside fenced code blocks count: a line inside a ```` ``` ```` or `~~~` fence (a fixture, an example) gives no entry and does not make `ledger-init` stop with `settings-unavailable`. A line without the description dash (`` **External:** `db` (read) runs `psql x` ``) makes every backticked token an environment: `psql x` becomes one more entry, with `access: null`. This is by design and fails safe: the stray entry is not in the settings, so it leads to a question or a STOP below, never to a silent run. `plan-check` requires the dash, so only a hand-edited plan has such a line.
+
 - **Confirmed** — no question. Say it in one line in the plan's language (environment, read or write, `source`) and run the unit. A prod read with `read=run` runs the same way; the ledger entry and the resolver hand-off (RESOLVER-PROPOSAL.md) keep it.
 - **`consent: deny`** — STOP: the plan asks for access the settings forbid, so the plan must change. Do not ask for an exception.
 - **Environment not in the settings** — an entry with `kind: null` while `settings.from` is `spec` or `plan-header` — STOP: the plan does not list it. Take `settings.from` from the `ledger-init` result (`settings.from`) or from `<exec_dir>/state.json` (`settings.from`; `settings: null` when `plan-brainstorming` is not installed). With `settings.from: none` (a plan without `**Spec:**`) or settings `null`, `kind: null` says nothing: ask as below.
@@ -25,7 +27,7 @@ Run the step only on the environment it names; if a project script targets anoth
 
 ## Deviations
 
-When the gate (or its reviewer) finds a defect outside the unit's text, do not fix it silently. Ask the engineer; with consent, fix it within the unit and record it: `unit-finish <unit> pass --note "<what was done beyond the plan and why>"`. Without consent, leave it and list it in the FINALIZE follow-ups.
+When the gate (or its reviewer) finds a defect outside the unit's text, do not fix it silently. Ask the engineer; with consent, fix it within the unit and record it: `unit-finish <unit> pass --note "<what was done beyond the plan and why>"`. Without consent, leave it and record it at once with `journal-finding` (the command is in WORKFLOW.md, FINALIZE, step 3): it goes to the chain journal and to `BACKLOG.md`, and FINALIZE exports it to `<goal>-followups.json`.
 
 ## No Tests → Escalate
 
@@ -33,7 +35,11 @@ If no executable check exists, do not claim success by inspection alone: use gra
 
 ## Foreign Changes
 
-`unit-begin` returns `reason: foreign-changes` when the working tree differs from the ledger's `expected_tree` (the last snapshot, or the tree at the last failed attempt): files were changed outside the run between units. `foreign_changes` lists `{path, status}` (`added`/`modified`/`deleted`); `BACKLOG.md` at the repository root is never listed. No unit is marked running.
+`unit-begin` returns `reason: foreign-changes` when the working tree differs from the ledger's `expected_tree` (the last snapshot, or the tree at the last failed attempt): files were changed outside the run between units. `foreign_changes` lists `{path, status}` (`added`/`modified`/`deleted`); `BACKLOG.md` at the repository root and the pipeline's own files are never listed: by name in any folder, `*-chain.json` and its `.lock`, the spec, plan, part and roadmap files (`*-spec.md`, `*-impl.md`, `*-impl-<letters>.md`, `*-impl-roadmap.md`), `*-completion.md`, `*-review-<N>.md`, `*-report-<N>.md` (and `-final`), `*-diffs.md` and `*-followups.json`. The run's chain journal (the plan's `<goal>-chain.json` and its lock) is in no snapshot either; it and the other files listed here, except another `*-chain.json`, never make the working tree dirty for `ledger-init`; any other `*-chain.json` is a project file: it is in the snapshots and in `run-diff`, but its name matches the artifact patterns: `-diffs.md` lists it only under "Not included (pipeline artifacts)", it is not in the commit, and COMMIT names it (`excluded_outside_chain`). No unit is marked running.
+
+Every path is relative to the repository root (`git rev-parse --show-toplevel`), also when `--workdir` is a subdirectory: pass the listed paths to `checkpoint-restore --paths` as they are. A rollback never deletes or rewrites the pipeline's files, and `--paths` drops them: `--paths` naming only the root `BACKLOG.md` or pipeline files restores nothing and exits `2` (`paths-empty`); a named file whose content already equals the tree is reported as `unchanged`.
+
+Resuming a run whose unit was still `running` (`ledger-init` again after the session ended) takes the current working tree as `expected_tree`. The interrupted attempt's files belong to the run, and so does any edit made during the pause: it is not reported as a foreign change. This is by design, since a half-done unit cannot be told apart from an edit by hand; the resumed unit's gate checks those files.
 
 Show the engineer the list and ask one question with three options:
 

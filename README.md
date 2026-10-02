@@ -299,6 +299,7 @@ The skill will guide you through the full brainstorming → spec → plan cycle.
 
 ```
 /plan-executor docs/plans/plan01-auth-impl.md
+/plan-executor docs/plans/plan01-auth-impl.md commit   # after the audit: commit the run's files and the audit's fixes
 ```
 
 ### Splitting a large plan into parts
@@ -329,7 +330,7 @@ The skill will guide you through the full brainstorming → spec → plan cycle.
 
 No skill touches an external system without you. A database, API or remote service is reached only after you allow it for a named environment, separately for reading and for changes: `read=` and `write=` each take `run` (the whole run), `task` (ask before each task) or `deny`. The permission is never widened to another environment, changes on production are never allowed for a whole run, and an existing project script aimed at production is not permission. The spec records the environments with your own words, tasks that use them are marked `External` with `(read)` or `(write)`, and `plan-executor` asks before such a task unless that access is allowed for the whole run. A read allowed for the whole run also covers the read-only checks of `plan-iterative-revision` and `plan-resolver`.
 
-No skill commits on your branch. `plan-brainstorming` and `plan-writing` write files and leave them uncommitted; `plan-iterative-revision` and `plan-splitter` only add review, roadmap and part files; `plan-resolver`'s fix phase leaves code changes in the working tree for review; `plan-executor` keeps per-unit rollback snapshots in hidden refs (`refs/plan-executor/<run>/<unit>`, removable with `checkpoint-prune`) and never touches your branch. Commit when a block of work is verified, with the message you choose.
+Only `plan-executor` commits on your branch, and only at its commit stage: `/plan-executor <plan> commit` (or the chain, after the audit) commits the run's files and the files the audit fixed, with your hooks; a manual run with audit fixes lists them and waits for your "yes". It never pushes, amends or forces. Everything else stays uncommitted: `plan-brainstorming` and `plan-writing` write files; `plan-iterative-revision` and `plan-splitter` only add review, roadmap and part files; `plan-resolver`'s fix phase leaves code changes in the working tree and runs no git command that changes anything; `plan-executor` keeps per-unit rollback snapshots in hidden refs (`refs/plan-executor/<run>/<unit>`, removable with `checkpoint-prune`). After the run, `<base>-diffs.md` next to the plan shows what changed, file by file. Without git there is no diff report and no commit.
 
 For detailed usage of each skill, see the [`USAGE.md`](skills/plan-brainstorming/USAGE.md) file inside each skill directory, or the full [User Guide](docs/USERGUIDE.md).
 
@@ -550,6 +551,38 @@ Every decision the chain needs is taken once, in the spec dialogue, and written 
 One `BACKLOG.md` at the repository root collects what the chain deferred: Out of Scope items of approved specs, findings of the executor and defects of the resolver outside the plan. Its format belongs to `plan-brainstorming`: `backlog-append` adds one line at the end of a goal's section, verifies that every other byte is unchanged and skips duplicates. The `My notes` section is the user's, and only the user checks items off. `/plan-brainstorming BACKLOG.md` turns the unchecked items into the next task.
 
 **Used in:** `plan-brainstorming`, `plan-executor`, `plan-resolver`
+
+---
+
+### Chain journal
+
+One `<goal>-chain.json` next to the spec records, for each plan of the goal, seven stages (`writing`, `revision`, `split`, `execution`, `diffs`, `audit`, `commit`) with the statuses `pending`, `running`, `done`, `stopped`, `failed`, `skipped`, the artifacts each skill produced and an append-only event log. Every skill marks its own stage through `brainstorm_tool.py journal-event`, which refuses a transition outside the state machine (`illegal-transition`); a finished stage re-opens only for a named reason (`drift`, `audit-open`, `recommit`, `user-request`). The SHA-256 of the stage input stored on `done` turns a changed spec or plan into a drift question; the skill that owns the stage asks it and re-runs the stage (`--reason drift`) or keeps its result for the changed input. A run without a confirmation channel records its question (`Qn`, `open → answered → applied`) and stops; the next run reads `journal-show`, applies the answer and continues. Writes go through a lock file (`journal-locked` after 10 s, takeover of a lock older than 60 s) and an atomic replace; `journal-reconcile` restores the statuses from the artifacts after a crash and `journal-validate` replays the events. Manual runs keep the journal too; a skill without `plan-brainstorming` beside it works without one.
+
+**Used in:** all six pipeline skills
+
+---
+
+### Single findings stream
+
+Defects outside the plan found by the executor's gates, the resolver's audit and the revision's reading of the code go through one command, `journal-finding`: the journal keeps one entry per `file` + `summary`, `BACKLOG.md` gets the line at once (a failed append is recorded, not fatal), and `journal-export-findings` rewrites `<goal>-followups.json` in the input format of `/plan-brainstorming`, so the next cycle starts from that file.
+
+**Used in:** `plan-executor`, `plan-resolver`, `plan-iterative-revision`, `plan-brainstorming`
+
+---
+
+### Run diff report
+
+After the last unit, `run-diff --markdown` writes `<base>-diffs.md` next to the plan: a table of the changed files (status `A`/`M`/`D`/`R`, added and removed lines, a link to the file), then one `diff` block per file between the baseline snapshot and the last unit's snapshot. A fence is one backtick longer than any backtick run inside it, a binary file is listed only, and a file diff is cut at 400 lines with the command for the full diff. Pipeline artifacts (the plan directory, specs, plans, reviews, reports, roadmaps, journals, diff reports, follow-ups, `BACKLOG.md`) are left out and listed in a section of their own, so a project file caught by these rules is visible; an audit fix file that git ignores is listed under "Not included (ignored by git)". The user's git config (colour, prefixes, external diff, textconv) does not change the report. Without git there is no report: the `diffs` stage is `skipped`.
+
+**Used in:** `plan-executor`
+
+---
+
+### Commit stage
+
+Only `plan-executor` commits, through `commit-run`, after the audit: in a chain automatically, by hand with `/plan-executor <plan> commit`. The set is the run's files plus the files the resolver fixed (`fix_files`), minus pipeline artifacts and files already committed. Before anything is written, `commit-run` refuses a non-empty index (`index-not-empty`), files that held uncommitted work before the run and were changed by it (`mixed-files`, judged against `baseline_head`, the HEAD at the start of the run), files changed outside the run (`foreign-changes`), a run with a unit still running (`run-incomplete`), files of a failed unit that differ from the last done snapshot and are not audit fixes (`failed-attempt`: the attempt was not rolled back or the files changed outside the run; they are restored with `checkpoint-restore --paths`) and a `HEAD` that no longer contains `baseline_head` (`head-moved`, another branch checked out). When only the expected tree was garbage-collected, `snapshots-missing` names `accept-changes`, which resets it. The commit runs the repository hooks; a failing hook leaves the index as it was. Push, amend, force and `--no-verify` are never used. A manual run with audit fixes lists them and waits for an explicit "yes"; a later call commits only new fixes, as `fix(<scope>): …`. The resolver stays git-read-only: its gate only names the command. Without git the stage is `skipped`.
+
+**Used in:** `plan-executor`, `plan-resolver`
 
 ---
 

@@ -6,6 +6,7 @@
   that plan-executor and plan-resolver parse (header fields, task headings,
   unique ids, Files / steps / done-state per tier, no commit steps, no
   placeholders), optionally checking Modify paths against the workspace.
+  Also returns `journal`: the chain journal path when that file exists, else null.
 
 Stdlib only. Python 3.8+.
 
@@ -105,6 +106,21 @@ def _plan_settings(plan_path: Optional[str]) -> Tuple[Optional[Dict[str, Any]], 
     warnings = [f"settings: {e}" for e in settings["errors"] if e.startswith(SETTINGS_MISSING)]
     warnings.extend(f"settings: {w}" for w in settings["warnings"])
     return settings, errors, warnings
+
+
+def _journal_for(plan_path: str) -> Optional[str]:
+    """The chain journal of the plan (brainstorm_tool.journal_path_for) when that file exists.
+    None when it does not exist yet, when plan-brainstorming is not installed alongside or
+    predates the journal, and when the path cannot be resolved (e.g. the spec at **Spec:** is
+    missing): the journal is optional and never fails plan-check."""
+    finder = getattr(_load_brainstorm_tool(), "journal_path_for", None)
+    if finder is None:
+        return None
+    try:
+        found = finder(plan_path)
+    except Exception:  # the module's InputError or a read error: no journal, not a failure
+        return None
+    return found["journal"] if found.get("exists") else None
 
 
 def _read(path: str) -> str:
@@ -445,6 +461,7 @@ def cmd_plan_check(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     if args.root is not None and not os.path.isdir(args.root):
         raise InputError(f"root is not a directory: {args.root}")
     result = check_plan(_read(args.plan), args.root, args.plan)
+    result["journal"] = _journal_for(args.plan)
     return (0 if result["ok"] else 1), result
 
 

@@ -126,17 +126,27 @@ severity that is not inflated.
 ## Defects outside the plan
 
 A real defect noticed while tracing that no plan task covers is not an issue and does not change
-any status. Describe it in `## Additional Context` (path, line, what breaks) and append it to the
-shared `BACKLOG.md`:
+any status. Describe it in `## Additional Context` (path, line, what breaks). After
+`assert-readonly` (the journal end, WORKFLOW.md, Chain journal) record each one; the journal
+appends it to the goal's section of the shared `BACKLOG.md` and exports it to
+`<goal>-followups.json`:
 
-`python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" backlog-append <root>
---section <S> --source "plan-resolver, <plan file name>" --item "<path:line — summary>" --lang <bootstrap.language>`
+`python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" journal-finding <journal>
+--skill plan-resolver --plan <P> --file <path from the repository root> [--line N]
+--summary "<what is wrong>" --failure-scenario "<what breaks, and when>" --backlog-root <root>`
 
 - `<root>` = `git -C <PLAN_DIR> rev-parse --show-toplevel`; outside git, the current working directory.
-- `<S>` = `backlog` of `brainstorm_tool.py settings <MASTER_PLAN>`; none → the plan file name
-  without `.md` and `-impl` (the executor's rule).
-- The source names the plan, not the report, so the next pass does not duplicate the line
-  (`action: exists`).
-- The script is missing or exits `1`: append the line by hand at the end of section `<S>` in the
-  same format (`- [ ] <item> — plan-resolver, <plan file name>, <YYYY-MM-DD>`), change nothing
-  else, and say so in the human gate.
+- `action: exists` (the same file and summary, e.g. from the previous pass) is fine: nothing is
+  written twice.
+- `backlog: failed` (with `backlog_error`): the finding is still recorded in the journal and goes
+  into `<goal>-followups.json`; only its `BACKLOG.md` line is missing. Append that line by hand at
+  the end of section `<S>` (`- [ ] <summary> (<path>:<line>) — plan-resolver, <plan file name>, <YYYY-MM-DD>`),
+  change nothing else, and say so in the human gate. Exception: `backlog_error` starting with
+  `user-section:` means `<S>` is the user's own section (`My notes` / `Свои заметки`, any case):
+  it is never written, not even by hand; say so in the human gate instead.
+- No journal but `plan-brainstorming` alongside (`journal-corrupt`): `backlog-append <root>
+  --section <S> --source "plan-resolver, <plan file name>" --item "<path:line — summary>" --lang <bootstrap.language>`
+  with the same script, also after `assert-readonly`. Exit `1` with `user-section:` writes nothing
+  at all; any other exit `1` → by hand as above. The script missing: by hand as above.
+- `<S>` = the journal's `goal`; without a journal, `backlog` of `brainstorm_tool.py settings <MASTER_PLAN>`;
+  none → the plan file name without `.md` and `-impl` (the executor's rule).

@@ -14,8 +14,10 @@ the invariants below hold for every AUDIT pass.
 
 ## Invariants
 
-1. Writable files: the chosen `NEXT_REPORT` and `BACKLOG.md` at the repository root (append-only,
-   through `backlog-append`; defects outside the plan, [AUDIT.md](AUDIT.md)).
+1. Writable files: the chosen `NEXT_REPORT` and `BACKLOG.md` at the repository root (append-only;
+   defects outside the plan, [AUDIT.md](AUDIT.md)); outside the guard windows also the chain
+   journal `<goal>-chain.json` and `<goal>-followups.json`, only through the `journal-*` commands
+   of `brainstorm_tool.py` (Chain journal below).
 2. `MASTER_PLAN` and `REPORTS[]` are read-only (the Fix Log is written only by `mark-fix`).
 3. Project code is read-only in AUDIT: reading, grep/glob and read-only probes only. The tools
    cannot prevent a write; `assert-readonly` detects it afterwards and turns it into a blocker.
@@ -32,14 +34,16 @@ the invariants below hold for every AUDIT pass.
 ```text
 bootstrap <workspace-root> <plan> [reports...]
 preflight <plan-dir> <next-open-name> <next-final-name>
+# journal start (Chain journal): journal-event … --stage audit --status running
 fingerprint-workspace <workspace-root> <start-json>
 # audit pass (AUDIT.md): first | subsequent
 # write NEXT_REPORT
 task-census <plan> <NEXT_REPORT>
 validate-report <NEXT_REPORT> --root <workspace-root> --plan <plan>
-# backlog-append per defect outside the plan (AUDIT.md)
 fingerprint-workspace <workspace-root> <current-json> --base <start-json>
 assert-readonly <start-json> <current-json> <NEXT_REPORT> <BACKLOG.md>
+# journal end (Chain journal): journal-finding per defect outside the plan (AUDIT.md),
+# journal-event … --stage audit --status done, journal-export-findings
 ```
 
 ## Bootstrap
@@ -94,6 +98,73 @@ same invocation.
 `bootstrap.stuck_open` = `{consecutive_if_open, limit: 5, ask_required}`: when `ask_required` is
 true and this pass also ends open, tell the user the audit keeps finding open issues and ask how
 to proceed instead of proposing another pass. In `fix`/`next`/`auto`, `cycle-check` decides.
+
+## Chain journal
+
+`J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py"`. The journal
+`<goal>-chain.json` records the `audit` stage of `MASTER_PLAN` for plan-executor's commit stage and
+the chain runner. Its writes stay outside the guard windows: the start before the start
+fingerprint, the end after `assert-readonly`, the FIX record after `snapshot-diff`. Without
+`plan-brainstorming` alongside there is no journal: say so once and handle defects outside the plan
+as AUDIT.md describes.
+
+- `<journal>`, `P` = the `journal` and `plan` fields of `J journal-path MASTER_PLAN --create`. Every
+  `--plan` below is `P`.
+- **Start** (after `preflight`): `J journal-show <journal> --plan P`, stage `audit` (`unknown-plan`,
+  exit `2`: no event of this plan yet, every stage is `pending`):
+  - `skipped` (plan-executor recorded `resolver=skip`) → a skipped stage cannot be reopened: audit
+    without stage events (no start, end or FIX record) and say so once; the findings are still
+    recorded and exported.
+  - open questions of stage `audit`, whatever its status (`stopped`, and also `done`:
+    `journal-show` then gives the plan `next_action: answer`) → with a confirmation channel ask
+    each and record `J journal-answer <journal> <Qn> --answer "<answer>"`; without one stop and
+    name the ids. Answered questions: apply each, then `J journal-answer <journal> <Qn> --applied`,
+    all before the stage moves to `running`.
+  - `done` with `status=final` → the drift check: `J journal-reconcile <journal>`, then look in the
+    journal file's `questions` for one of `P` whose text starts with `drift: audit` and that is not
+    `applied` (the plan changed after the final audit). `open` → as the open questions above (the
+    answer `rewrite` to audit the changed plan again, or `keep`); answered `rewrite` → the event
+    below with `--reason drift`, and `J journal-answer <journal> <Qn> --applied` after the stage's
+    `done` event; answered `keep` → `J journal-answer <journal> <Qn> --applied`, then
+    `J journal-event <journal> --skill plan-resolver --plan P --stage audit --status done --input MASTER_PLAN`
+    (the same status: it binds the stage to the current plan) and audit only if the user asks.
+  - then `J journal-event <journal> --skill plan-resolver --plan P --stage audit --status running`;
+    add `--reason audit-open` when the stage is `done` with `status=open` (a pass after an open
+    report: `fix`, `next`, `auto`, or a new audit; the stored `status` decides, so never pass
+    `--artifact status=open` to re-open the stage), `--reason drift` after an answered drift
+    question, `--reason user-request` when it is `done` otherwise and the user asked for this
+    audit. A stage already `running` (the FIX of this cycle started it) needs no event.
+- **End** (after `assert-readonly`, also when the report became `probe-mutated-workspace`):
+  1. each defect outside the plan: `J journal-finding … --skill plan-resolver …` (AUDIT.md);
+  2. `J journal-event <journal> --skill plan-resolver --plan P --stage audit --status done --input MASTER_PLAN --artifact report=<NEXT_REPORT relative to the journal's directory> --artifact status=<open|final> --artifact issues=<number of open issues>`;
+  3. `J journal-export-findings <journal>`.
+- **FIX**: after `snapshot-diff` and `mark-fix` (FIX-LOOP.md), every path of `changed` becomes a
+  repository-root path: `<prefix>` = `git -C <workspace-root> rev-parse --show-prefix` (empty at the
+  repository root), then one command for all of them:
+  `J journal-event <journal> --skill plan-resolver --plan P --stage audit --status running --artifact fix_files[]=<prefix><path> ...`
+  (one `--artifact` per file; outside git, the paths as they are). plan-executor's `commit` stage
+  commits exactly these files besides the run's own ones.
+- **Questions without a confirmation channel**: `bootstrap.stuck_open.ask_required` with a report
+  that stayed open, and the gates `ask-user`, `stop-stalled`, `stop-limit` (FIX-LOOP.md). In all
+  four the last report is open and the `audit` stage is already `done`, and a question stops only
+  a `running` stage: first
+  `J journal-event <journal> --skill plan-resolver --plan P --stage audit --status running --reason audit-open`
+  (no event when the stage is already `running`), then
+  `J journal-question <journal> --skill plan-resolver --plan P --stage audit --text "<the decision needed>" [--option "<option>"]...`
+  (the stage becomes `stopped`), then `J journal-export-findings <journal>`, and stop. With a
+  confirmation channel the same question is asked and recorded with `--answer "<answer>"`.
+- **Commit**: every human gate names `/plan-executor <MASTER_PLAN> commit`; it commits the run's
+  files and `fix_files`. The resolver itself never runs a git mutation.
+- **Errors**: `journal-corrupt` (exit `2`) → say it, propose `J journal-reconcile <journal> --rebuild`,
+  continue without the journal; `journal-locked` (exit `1`) → repeat once; still locked: with a
+  confirmation channel ask whether to continue without the journal, without one stop with a
+  short report (no audit runs, so no `fix_files` go unrecorded); `journal-write-failed` (exit `1`,
+  the file system refused the write, e.g. a read-only journal) → say it in one line with the error
+  text and continue without the journal; `illegal-transition` → never force a status, say it in
+  the gate; `open-questions: <ids>` (exit `1`, a `running` event, also with `--reason audit-open`,
+  on a `stopped` stage that still has an open question of `P`) → stop on the open question: with a
+  confirmation channel ask it and record `J journal-answer <journal> <Qn> --answer "<answer>"`,
+  then repeat the event; without one stop and name the ids.
 
 ## Commands
 

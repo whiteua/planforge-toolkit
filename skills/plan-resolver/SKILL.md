@@ -19,9 +19,12 @@ allowed-tools:
 
 Audits the implementation of a master plan against the code. **AUDIT** is read-mostly: it never
 changes code, the plan or past reports, and writes exactly one new report,
-`<base>-report-N.md` or `<base>-report-N-final.md`, in the plan's directory, plus defects outside
-the plan appended to `BACKLOG.md` at the repository root. **FIX** (modes
-`fix`/`next`/`auto`) repairs the **code** from an open report; the plan is never modified.
+`<base>-report-N.md` or `<base>-report-N-final.md`, in the plan's directory; after the read-only
+check it records the `audit` stage and the defects outside the plan in the chain journal
+`<goal>-chain.json` (which appends them to `BACKLOG.md` at the repository root and exports
+`<goal>-followups.json`). **FIX** (modes `fix`/`next`/`auto`) repairs the **code** from an open
+report; the plan is never modified. Committing is not the resolver's job: its gate names
+`/plan-executor <plan> commit`.
 
 ## Modes
 
@@ -63,6 +66,7 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
 1. `TOOL bootstrap <workspace-root> <plan> [reports...]`: exit `64` means the plan is closed;
    say so and write nothing. Copy `report_header` into the report frontmatter as is.
 2. `TOOL preflight <plan-dir> <next-open-name> <next-final-name>`: on failure stop before auditing.
+   Then the journal start (WORKFLOW.md, Chain journal): stage `audit` → `running`.
 3. Start fingerprint: `TOOL fingerprint-workspace <workspace-root> <start-json>` (temp file outside
    the workspace).
 4. One audit pass (AUDIT.md): `first` over the plan, or `subsequent` over the last report plus a
@@ -70,8 +74,9 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
    `path#Lx-Ly` that points at real code; probes are read-only.
 5. Report name: `-final` only when there are no issues and every task is `✅` or
    `not-applicable`; otherwise the open name.
-6. Write exactly one new report (never overwrite an existing one). Append defects outside the
-   plan to `BACKLOG.md` (AUDIT.md, "Defects outside the plan").
+6. Write exactly one new report (never overwrite an existing one). Defects outside the plan go
+   into its Additional Context and are recorded after step 9 (AUDIT.md, "Defects outside the
+   plan").
 7. `TOOL task-census <plan> <report>`: exit `1` → add the uncovered tasks to the same report.
 8. `TOOL validate-report <report> --root <workspace-root> --plan <plan>`: one rewrite of the same
    report is allowed to fix it; copy every `[WARNING]` line into the report's validator-warnings section.
@@ -79,18 +84,25 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
    `TOOL assert-readonly <start-json> <current-json> <report> <BACKLOG.md>` (`BACKLOG.md` only
    when it lies inside the workspace root). Drift → rewrite the same report
    with the single blocker issue `probe-mutated-workspace`, run only the validator again, stop OPEN.
+   Then the journal end (WORKFLOW.md, Chain journal): `journal-finding` per defect outside the
+   plan, `journal-event` stage `audit` `done` with the report's status, `journal-export-findings`.
 10. Human gate: report path, status, counts, next action (audit mode with open issues: suggest
     `/plan-resolver <plan> fix`). Inside `fix`/`next`/`auto` the gate is printed once, when the
     loop stops (FIX-LOOP.md, "Stop and human gate"), not after every audit. If `bootstrap.stuck_open.ask_required` is true and the report
     stayed open, say that five audits in a row ended open and ask how to proceed instead of
-    proposing another pass.
+    proposing another pass. Every gate also names the commit: `/plan-executor <plan> commit`
+    commits the executor run's files and the fixes (the resolver never commits). Without a
+    confirmation channel, a decision the gate needs is recorded with `journal-question` before
+    stopping, after the `audit` stage was moved back to `running` (`--reason audit-open`) so that
+    the question stops it (WORKFLOW.md, Chain journal).
 
 ## FIX phase
 
 Only in `fix`/`next`/`auto`, strictly by [references/FIX-LOOP.md](references/FIX-LOOP.md):
-`open-issues` → `protect` + fix-start fingerprint → minimal code changes in `fix_order` →
-`assert-protected` + `snapshot-diff` (the authoritative list of changed files) → `mark-fix` per
-issue → AUDIT → `cycle-check`.
+`open-issues` → journal stage `audit` → `running` (`--reason audit-open`) → `protect` + fix-start
+fingerprint → minimal code changes in `fix_order` → `assert-protected` + `snapshot-diff` (the
+authoritative list of changed files) → `mark-fix` per issue → the changed files as `fix_files[]`
+in the journal (repository-root paths) → AUDIT → `cycle-check`.
 
 ## Language
 

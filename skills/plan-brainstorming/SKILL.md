@@ -70,6 +70,8 @@ Exit codes: `0` ok, `1` check failed, `2` bad input or I/O error.
 | `backlog-parse <BACKLOG.md> [--section S]` | Backlog mode, step 1. |
 | `backlog-append <root> --section S --source "plan-brainstorming, <spec file>" --item TEXT [--lang ru\|en] [--plain]` | After the user approves the spec (see Backlog). |
 | `settings <file>` | Chain settings, environments and backlog of a spec, plan, roadmap or part (single reading rule; other skills load it as a module). |
+| `journal-path <spec\|plan\|roadmap\|part> [--create]` | Path and goal of the chain journal `<goal>-chain.json` (a roadmap or part leads to its master plan, a plan to its spec). `--create` creates the journal and registers the spec: after the spec is approved (see Chain journal); given a plan, roadmap or part it also registers the master plan (every stage `pending`). |
+| `journal-event`, `journal-unit`, `journal-question`, `journal-answer`, `journal-finding`, `journal-commit`, `journal-export-findings`, `journal-show`, `journal-reconcile [--rebuild]`, `journal-validate` (each takes `<journal>` first) | The journal API of the later skills: stage transitions, unit events, questions and answers, findings outside the plan (appended to `BACKLOG.md`), commits, the `<goal>-followups.json` export, a summary, repair and validation. Format: `assets/chain-journal.schema.json`. |
 
 ## Checklist
 
@@ -85,7 +87,7 @@ item for the whole checklist is enough.
 7. **Close underspecified areas** — ambiguity sweep (`references/clarify-checklist.md`) until `Open Questions` can be `(none)`. If an answer changes the approved design, re-present the affected section and get approval again. Then propose the chain settings in one message (see Chain Settings) and wait for the user to confirm or adjust them.
 8. **Write the spec** — first tell the user in one line what happens next: "Design approved. Writing the spec and running the checks; project code is not changed. I will come back with the file for your approval." Then see Writing the Spec. Run `spec-check` (and `findings-coverage` in findings mode) until both exit `0`.
 9. **Self-review** — see below.
-10. **User review** — ask the user to review the spec file; on approval, append to BACKLOG.md (see Backlog), then invoke `plan-writing`.
+10. **User review** — ask the user to review the spec file; on approval, append to BACKLOG.md (see Backlog), create the chain journal (see Chain journal), then invoke `plan-writing`.
 
 The terminal state is invoking `plan-writing`. Do not invoke any other skill after brainstorming.
 
@@ -186,6 +188,25 @@ After the user approved the spec file, before invoking `plan-writing`:
 4. Report in one line: how many lines were appended, how many already existed (`exists`).
    Exit `1` (the file would change outside the section end, or is not UTF-8): nothing was
    written; show the error and continue. The backlog is not a gate.
+
+## Chain journal
+
+After the user approved the spec file and the Backlog step is done, create the goal's chain
+journal: `journal-path <spec> --create`. It writes `<goal>-chain.json` next to the spec (`<goal>` =
+the spec's `> Backlog:` value, else the spec file name without `-spec.md`) and registers the spec;
+another spec of the same goal joins the same journal. Report the `journal` path in one line.
+
+The dialogue's questions are not recorded: the journal starts with the approved spec. The later
+skills record their stages, questions and findings there with the `journal-*` commands (table
+above); their findings come back as `<goal>-followups.json`, a findings input of this skill.
+
+The journal is not a gate:
+- exit `2` `journal-corrupt` → say it, propose `journal-reconcile <journal> --rebuild`, and invoke
+  `plan-writing` anyway;
+- exit `1` `journal-locked` → repeat the command once; still locked → say it in one line and
+  continue without the journal;
+- exit `1` `journal-write-failed` (the file system refused the write, e.g. a read-only journal) →
+  say it in one line with the error text and continue without the journal.
 
 ## Visual Companion
 

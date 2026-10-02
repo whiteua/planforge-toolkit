@@ -190,5 +190,58 @@ class Guard(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
 
 
+class BootstrapJournal(unittest.TestCase):
+    """bootstrap returns the chain journal (brainstorm_tool.journal_path_for) when the file exists."""
+
+    def test_journal_null_until_the_file_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = write_spec_and_plan(Path(d))
+            self.assertIsNone(json.loads(run("bootstrap", str(plan)).stdout)["journal"])
+            journal = Path(d) / "s-chain.json"  # goal = spec name without -spec.md (no Backlog line)
+            journal.write_text("{}\n", encoding="utf-8")
+            p = run("bootstrap", str(plan))
+            self.assertEqual(p.returncode, 0, p.stdout)
+            self.assertEqual(Path(json.loads(p.stdout)["journal"]).resolve(), journal.resolve())
+
+    def test_part_resolves_the_master_journal(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_spec_and_plan(Path(d))
+            (Path(d) / "s-chain.json").write_text("{}\n", encoding="utf-8")
+            part = Path(d) / "plan-a.md"
+            part.write_text("# Stage a: Часть\n\n> Source: [plan.md](./plan.md)\n\n## Tasks\n1. шаг\n", encoding="utf-8")
+            out = json.loads(run("bootstrap", str(part)).stdout)
+            self.assertEqual(Path(out["journal"]).resolve(), (Path(d) / "s-chain.json").resolve())
+
+    def test_missing_spec_gives_null(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d) / "plan.md"
+            plan.write_text("# Plan\n\n**Spec:** gone-spec.md\n\n### Task 1: x\n", encoding="utf-8")
+            p = run("bootstrap", str(plan))
+            self.assertEqual(p.returncode, 0, p.stdout)
+            self.assertIsNone(json.loads(p.stdout)["journal"])
+
+    def test_old_or_failing_brainstorm_tool_gives_null(self):
+        stubs = {
+            "old": "def resolve_settings(path):\n    return {'errors': [], 'warnings': []}\n",
+            "failing": (
+                "def resolve_settings(path):\n    return {'errors': [], 'warnings': []}\n\n"
+                "def journal_path_for(path):\n    raise RuntimeError('boom')\n"
+            ),
+        }
+        for name, stub in stubs.items():
+            with tempfile.TemporaryDirectory() as d:
+                copy = Path(d) / "skills" / "plan-iterative-revision" / "scripts" / "next_review_index.py"
+                copy.parent.mkdir(parents=True)
+                shutil.copyfile(str(TOOL), str(copy))
+                brainstorm = Path(d) / "skills" / "plan-brainstorming" / "scripts" / "brainstorm_tool.py"
+                brainstorm.parent.mkdir(parents=True)
+                brainstorm.write_text(stub, encoding="utf-8")
+                plan = Path(d) / "plan.md"
+                plan.write_text("# Plan\n", encoding="utf-8")
+                p = subprocess.run([sys.executable, str(copy), "bootstrap", str(plan)], text=True, capture_output=True, encoding="utf-8")
+                self.assertEqual(p.returncode, 0, name + p.stdout + p.stderr)
+                self.assertIsNone(json.loads(p.stdout)["journal"], name)
+
+
 if __name__ == "__main__":
     unittest.main()

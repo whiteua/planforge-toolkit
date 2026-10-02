@@ -44,7 +44,53 @@ skill's directory, absolute). Exit codes: `0` ok, `1` check failed, `2` bad inpu
 | Command | Use |
 |---|---|
 | `plan-path <spec>` | Plan path: `<X>-spec.md` → `<X>-impl.md` next to the spec (user preference overrides). |
-| `plan-check <plan> --root <project>` | Plan format contract, after writing the plan. Also returns `settings` (read by the shared rule: plan header, else the spec at `**Spec:**`), `task_count`, `plan_bytes`. |
+| `plan-check <plan> --root <project>` | Plan format contract, after writing the plan. Also returns `settings` (read by the shared rule: plan header, else the spec at `**Spec:**`), `task_count`, `plan_bytes`, and `journal`: the chain journal the plan leads to, `null` when there is none. |
+
+## Chain journal
+
+The journal `<goal>-chain.json` next to the spec records the `writing` stage for the later skills
+and the chain runner. `J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py"`;
+`<plan>` = the plan path from `plan-path`.
+
+- **Start**, as soon as `spec-check` in 1. Spec Preflight exits `0` (before the old-spec settings
+  question): `J journal-path <spec> --create` → `journal` (it also
+  creates the journal of a spec written before journals existed). Then `J journal-show <journal>`
+  and take the entry of this plan from `plans` (`id` = the plan file name without `.md`); no entry
+  means the stage is `pending`.
+  - `pending`, `failed`, `running`, `stopped` without open questions → `J journal-event <journal> --skill plan-writing --plan <plan> --spec <spec> --stage writing --status running`.
+  - `stopped` with open questions → with a confirmation channel ask each (its `text` and `options`,
+    in the dialogue language) and record `J journal-answer <journal> <Qn> --answer "<answer>"`;
+    without one stop and name the open ids. Answered questions: apply each answer, then
+    `J journal-answer <journal> <Qn> --applied`, then `--status running` as above.
+  - `done` → the plan was already written. First the drift check: `J journal-reconcile <journal>`,
+    then look in the journal file's `questions` for one of this plan whose text starts with
+    `drift: writing` and that is not `applied` (the spec changed after the stage ended):
+    - `open` → with a confirmation channel ask it (rewrite the plan for the changed spec, or keep
+      the plan) and record `J journal-answer <journal> <Qn> --answer "<rewrite | keep>"`; without
+      one stop with a short report naming the question id;
+    - answered `rewrite` (also when the user answered it outside the dialogue with
+      `journal-answer`) → `J journal-event <journal> --skill plan-writing --plan <plan> --stage writing --status running --reason drift`,
+      write the plan as usual, and after the stage's `done` event `J journal-answer <journal> <Qn> --applied`;
+    - answered `keep` → `J journal-answer <journal> <Qn> --applied`, then
+      `J journal-event <journal> --skill plan-writing --plan <plan> --stage writing --status done --input <spec>`
+      (the same status: it binds the stage to the current spec without a rewrite), then as
+      without drift;
+    - no such question → say the plan is already written and go to 7. Execution Handoff; a
+      rewrite the user still asks for runs without stage events (say so in one line).
+- **End**, after 6. Check and Self-Review: `J journal-event <journal> --skill plan-writing --plan <plan> --stage writing --status done --input <spec> --artifact plan=<plan path relative to the journal's directory, forward slashes>`.
+  The `journal` of the last `plan-check` result must be this `<journal>`; `null` or another path
+  means the plan's `**Spec:**` line does not lead to the spec: fix the link and re-run
+  `plan-check`.
+- **Questions.** A decision this skill would ask about (an old spec without settings, the scope
+  check, a deviation) without a confirmation channel: `J journal-question <journal> --skill plan-writing --plan <plan> --stage writing --text "<question>" [--option "<option>"]...`
+  (the stage becomes `stopped`), then `J journal-export-findings <journal>`, then stop with a short
+  report naming the question id. With a confirmation channel ask as usual and record the
+  question with its answer: the same command with `--answer "<answer>"`.
+- **Errors.** `journal-corrupt` (exit `2`): say it, propose `J journal-reconcile <journal> --rebuild`,
+  continue without the journal. `journal-locked` (exit `1`): repeat once; still locked → ask
+  whether to continue without the journal, or stop without a confirmation channel.
+  `journal-write-failed` (exit `1`, the file system refused the write, e.g. a read-only journal):
+  say it in one line with the error text and continue without the journal.
 
 ## 1. Spec Preflight
 
@@ -90,7 +136,7 @@ Before defining tasks, list the files to create or modify and each file's single
 
 **Tier** (from Preflight) decides how much each task expands. See `references/task-tiers.md` for the table and for when to add `Constraints` and `If stuck`. Every tier keeps the core: `Files`, numbered steps, and a verifiable done-state.
 
-**No commit steps.** A plan never runs `git commit`: no skill commits on the engineer's branch; `plan-executor` keeps rollback snapshots in hidden refs, and the final commit is the engineer's.
+**No commit steps.** A plan never commits: `plan-executor` keeps rollback snapshots in hidden refs while it executes, and only its separate `commit` stage (`/plan-executor <plan> commit`, after the audit) commits the run's files and the audit's fixes.
 
 ### Plan header
 
@@ -217,7 +263,7 @@ Take `task_count` and `plan_bytes` from the last `plan-check` result, and the de
 > "Plan complete and saved to `<path>` (<task_count> tasks, <plan_bytes> bytes). Recommended next steps:
 > 1. **Audit (recommended):** run `plan-iterative-revision` to cross-check the plan against the codebase.
 > 2. **Split:** if the plan has more than 15–20 tasks or spans several modules, run `plan-splitter` (it decides with a 5-factor gate).
-> 3. **Execute:** for small, audited plans, run `plan-executor`. The plan has no commit steps; committing the result is up to you.
+> 3. **Execute:** for small, audited plans, run `plan-executor`. The plan has no commit steps; after the audit, `/plan-executor <plan> commit` commits the result.
 >
 > Which step?"
 

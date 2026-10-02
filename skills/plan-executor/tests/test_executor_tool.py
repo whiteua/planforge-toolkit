@@ -1672,5 +1672,162 @@ class TestStrategyKeywords(unittest.TestCase):
         self.assertEqual(self.tool.recommend_strategy("green", "Add OAuth login")["model_depth"], "deep")
 
 
+@unittest.skipUnless(shutil.which("git"), "git required")
+class TestRestorePathsRoot(CheckpointTestCase):
+    PLAN = "# P\n\n### Task 1: A\n\n- [ ] **Step 1:** x\n\n### Task 2: B\n\n- [ ] **Step 1:** x\n"
+
+    def setUp(self):
+        super().setUp()
+        self.init_repo()
+        (self.workdir / "sub").mkdir()
+        for name in ("cli.py", "util.py", "sub/mod.py"):
+            (self.workdir / name).write_text(f"# {name}\n", encoding="utf-8")
+        self.run_git("add", ".")
+        self.run_git("commit", "-m", "base")
+        self.exec_dir = str(Path(self.tmp.name) / "exec")
+        self.plan = Path(self.tmp.name) / "plan01-impl.md"
+        self.plan.write_text(self.PLAN, encoding="utf-8")
+
+    def init_ledger(self, workdir=None):
+        import types
+        return self.tool.cmd_ledger_init(types.SimpleNamespace(
+            plan_path=str(self.plan), exec_dir=self.exec_dir, whole=False,
+            workdir=str(workdir or self.workdir), allow_dirty=False, accept_drift=False))
+
+    def ledger(self):
+        return self.tool._load(self.exec_dir)
+
+    def cli(self, *args):
+        proc = subprocess.run([sys.executable, str(TOOL_PATH), *args], capture_output=True, text=True, encoding="utf-8")
+        return proc.returncode, json.loads(proc.stdout)
+
+    def test_backlog_alone_is_paths_empty(self):
+        led = self.init_ledger()
+        (self.workdir / "BACKLOG.md").write_text("# Backlog\n", encoding="utf-8")
+        code, out = self.cli("checkpoint-restore", str(self.workdir), led["baseline_checkpoint"],
+                             "--paths", "BACKLOG.md", "./BACKLOG.md", "--exec-dir", self.exec_dir)
+        self.assertEqual(code, 2, out)
+        self.assertIn("paths-empty", out["errors"][0])
+        self.assertEqual(self.ledger()["expected_tree"], led["expected_tree"])
+        self.assertEqual(self.ledger()["foreign_events"], [])
+        self.assertTrue((self.workdir / "BACKLOG.md").exists())
+
+    def test_drive_relative_and_pathspec_magic_are_invalid(self):
+        for raw in ("C:cli.py", "c:sub/mod.py", ":(glob)*.py", ":/cli.py"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError) as ctx:
+                    self.tool._safe_rel_path(raw)
+                self.assertIn("invalid-path", str(ctx.exception))
+                self.assertEqual(ctx.exception.code, 2)
+        led = self.init_ledger()
+        code, out = self.cli("checkpoint-restore", str(self.workdir), led["baseline_checkpoint"], "--paths", "C:cli.py")
+        self.assertEqual(code, 2, out)
+        self.assertIn("invalid-path", out["errors"][0])
+
+    def test_identical_file_is_unchanged_not_modified(self):
+        led = self.init_ledger()
+        (self.workdir / "cli.py").write_text("# foreign\n", encoding="utf-8")
+        result = self.tool.checkpoint_restore_paths(str(self.workdir), led["baseline_checkpoint"], ["util.py", "cli.py"])
+        self.assertEqual(result["paths"], [{"path": "cli.py", "status": "modified"},
+                                           {"path": "util.py", "status": "unchanged"}])
+        self.assertEqual(result["restored"], ["cli.py", "util.py"])
+        self.assertEqual((self.workdir / "cli.py").read_text(encoding="utf-8"), "# cli.py\n")
+
+    def test_subdir_workdir_restores_root_relative_paths(self):
+        sub = self.workdir / "sub"
+        self.init_ledger(sub)
+        (sub / "mod.py").write_text("# by hand\n", encoding="utf-8")
+        (self.workdir / "cli.py").write_text("# kept\n", encoding="utf-8")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(begun["foreign_changes"], [{"path": "cli.py", "status": "modified"},
+                                                    {"path": "sub/mod.py", "status": "modified"}])
+        code, out = self.cli("checkpoint-restore", str(sub), begun["expected_tree"],
+                             "--paths", "sub/mod.py", "--exec-dir", self.exec_dir)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["paths"], [{"path": "sub/mod.py", "status": "modified"}])
+        self.assertEqual((sub / "mod.py").read_text(encoding="utf-8"), "# sub/mod.py\n")
+        self.assertEqual((self.workdir / "cli.py").read_text(encoding="utf-8"), "# kept\n")
+        events = self.ledger()["foreign_events"]
+        self.assertEqual([(e["decision"], [p["path"] for p in e["paths"]]) for e in events],
+                         [("restored", ["sub/mod.py"]), ("accepted", ["cli.py"])])
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "ready")
+
+    def test_subdir_workdir_relative_name_is_unknown(self):
+        sub = self.workdir / "sub"
+        led = self.init_ledger(sub)
+        (sub / "mod.py").write_text("# by hand\n", encoding="utf-8")
+        code, out = self.cli("checkpoint-restore", str(sub), led["expected_tree"], "--paths", "mod.py")
+        self.assertEqual(code, 2, out)
+        self.assertIn("unknown-path: mod.py", out["errors"][0])
+        self.assertEqual((sub / "mod.py").read_text(encoding="utf-8"), "# by hand\n")
+
+    def test_subdir_workdir_full_restore_covers_the_repository(self):
+        sub = self.workdir / "sub"
+        led = self.init_ledger(sub)
+        (self.workdir / "cli.py").write_text("# failed attempt\n", encoding="utf-8")
+        (sub / "mod.py").write_text("# failed attempt\n", encoding="utf-8")
+        (self.workdir / "new-root.py").write_text("x = 1\n", encoding="utf-8")
+        code, out = self.cli("checkpoint-restore", str(sub), led["baseline_checkpoint"], "--exec-dir", self.exec_dir)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["removed"], ["new-root.py"])
+        self.assertEqual((self.workdir / "cli.py").read_text(encoding="utf-8"), "# cli.py\n")
+        self.assertEqual((sub / "mod.py").read_text(encoding="utf-8"), "# sub/mod.py\n")
+        self.assertFalse((self.workdir / "new-root.py").exists())
+        self.assertEqual(self.ledger()["expected_tree"], led["expected_tree"])
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "ready")
+
+    def test_nested_backlog_is_not_exempt(self):
+        led = self.init_ledger()
+        (self.workdir / "sub" / "BACKLOG.md").write_text("# not the shared backlog\n", encoding="utf-8")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(begun["foreign_changes"], [{"path": "sub/BACKLOG.md", "status": "added"}])
+        result = self.tool.checkpoint_restore_paths(str(self.workdir), led["expected_tree"], ["sub/BACKLOG.md"])
+        self.assertEqual(result["paths"], [{"path": "sub/BACKLOG.md", "status": "added"}])
+        self.assertFalse((self.workdir / "sub" / "BACKLOG.md").exists())
+
+    def test_paths_restore_leaves_root_backlog_alone(self):
+        led = self.init_ledger()
+        backlog = "# Backlog\n\n## g\n\n- [ ] x — plan-executor, g-impl.md, 2026-10-02\n"
+        (self.workdir / "BACKLOG.md").write_text(backlog, encoding="utf-8")
+        (self.workdir / "cli.py").write_text("# foreign\n", encoding="utf-8")
+        code, out = self.cli("checkpoint-restore", str(self.workdir), led["expected_tree"],
+                             "--paths", "cli.py", "BACKLOG.md", "--exec-dir", self.exec_dir)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["paths"], [{"path": "cli.py", "status": "modified"}])
+        self.assertEqual((self.workdir / "BACKLOG.md").read_text(encoding="utf-8"), backlog)
+        events = self.ledger()["foreign_events"]
+        self.assertEqual([(e["decision"], [p["path"] for p in e["paths"]]) for e in events],
+                         [("restored", ["cli.py"])])
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "ready")
+
+
+class TestExternalOutsideFences(PlanTestCase):
+    FENCED = ("# P\n\n**Spec:** plan01-spec.md\n\n**Tier:** Deep\n\n### Task 1: Fixture\n\n"
+              "```markdown\n**External:** `prod_db` (write) — fixture text\n```\n\n"
+              "**External:** `test_db` (read) — smoke\n\n- [ ] **Step 1:** x\n")
+
+    def test_external_lines_skip_fenced_code(self):
+        self.assertEqual(self.tool._external_lines(self.FENCED), ["`test_db` (read) — smoke"])
+
+    def test_unit_begin_ignores_fenced_external(self):
+        self.plan(TestSettingsConsent.SPEC, name="plan01-spec.md")
+        self.init(self.plan(self.FENCED))
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual([(e["env"], e["access"]) for e in begun["external"]], [("test_db", "read")])
+
+    def test_fenced_external_does_not_need_settings(self):
+        led = self.init(self.plan("# P\n\n**Spec:** gone-spec.md\n\n**Tier:** Deep\n\n### Task 1: A\n\n"
+                                  "~~~\n**External:** `prod_db` (write) — fixture\n~~~\n\n- [ ] **Step 1:** x\n"))
+        self.assertTrue(any(w.startswith("settings-unavailable") for w in led["warnings"]))
+        self.assertEqual(led["units"][0]["id"], "task-1")
+
+    def test_a_shorter_or_other_fence_inside_a_block_does_not_close_it(self):
+        after_block = ("### Task 1\n\n````markdown\nexample:\n```\n````\n\n"
+                       "**External:** `prod_db` (write) — migrate\n")
+        self.assertEqual(self.tool._external_lines(after_block), ["`prod_db` (write) — migrate"])
+        inside_block = "~~~\n```\n**External:** `prod_db` (write) — fixture\n```\n~~~\n"
+        self.assertEqual(self.tool._external_lines(inside_block), [])
+
+
 if __name__ == "__main__":
     unittest.main()

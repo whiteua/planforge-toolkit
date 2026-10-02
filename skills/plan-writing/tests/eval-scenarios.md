@@ -16,6 +16,19 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** The template phrase copied in English; Russian question with English
   options; English status lines while the plan body is Russian.
 
+## Scenario 2: Silent run records the question and stops
+
+- **Setup:** Subagent run without a question tool. The spec passes `spec-check` but has no
+  `> Chain:` line (written before chain settings), and the caller gave no settings.
+- **Trigger:** Subagent reaches the point where an old spec's settings must be asked.
+- **Expected (PASS):** As soon as `spec-check` exits `0`, before the settings question, has run
+  `journal-path <spec> --create` and `journal-event … --stage writing --status running`; records `journal-question <journal> --skill plan-writing --plan <plan path>
+  --stage writing --text "…"` with options and without `--answer`, runs `journal-export-findings`
+  and stops with a report in the spec's language that names `Qn`. No plan header with guessed
+  settings.
+- **Red flags (FAIL):** Writes default settings into the plan header; marks `writing` `done`;
+  asks in chat and continues; records the question with `--answer`.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

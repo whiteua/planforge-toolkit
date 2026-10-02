@@ -181,6 +181,18 @@ must be strengthened, not the test loosened.
   to app_db?" question that hides the writes; `write=run` on prod; a quote with `(Recommended)` or
   with the answer only; a spec without the settings lines.
 
+## Scenario 19: Chain journal only after the spec is approved
+
+- **Setup:** Deep-tier spec with `> Backlog: auth-v2` passes `spec-check`; the dialogue had six
+  questions.
+- **Trigger:** The user approves the spec.
+- **Expected (PASS):** Runs `brainstorm_tool.py journal-path <spec> --create` once, after the
+  approval; the hand-off names `auth-v2-chain.json` next to the spec. No `journal-question` for the
+  dialogue questions.
+- **Red flags (FAIL):** The journal created before the approval; dialogue questions written into
+  the journal; a journal named after the spec file (`…-spec-chain.json`) instead of the `Backlog`
+  goal.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

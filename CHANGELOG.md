@@ -9,7 +9,10 @@ break work in progress, newest first.
 The exact date is set at release.
 
 Specs and plans written before this release keep working: where a skill asked a question, it still
-asks, and the new checks only warn on them. New errors come only from new fields that are filled in.
+asks, and most new checks only warn on them. Two errors also hit old files: a task over 150 lines of
+code without a `**Size:**` line fails `plan-check`, and a malformed settings line above `# Goal`
+(`> chain:`, `> Chain :`) fails `spec-check` (see Breaking changes). Otherwise new errors come only
+from new fields that are filled in.
 
 ### Breaking changes
 
@@ -25,6 +28,31 @@ decision; `BACKLOG.md` is not compared.
 
 **`unit-begin` returns `external` as objects** `{env, access, kind, consent, confirmed, source}`
 instead of the raw `**External:**` lines. Tools that read the old strings must be updated.
+
+**`plan-executor` commits on an explicit command.** `/plan-executor <plan> commit` (in a chain:
+the commit stage after the audit) commits the run's files and the files the resolver fixed on your
+branch, through `commit-run` and with your hooks. A manual run with audit fixes lists them and waits
+for an explicit "yes". It refuses a non-empty index (`index-not-empty`), files that held your
+uncommitted work before the run and were changed by it (`mixed-files`) and files changed outside the
+run (`foreign-changes`). Push, amend, force and `--no-verify` are never used; without the command
+nothing is committed, as before. `plan-resolver` still runs no git command that changes anything.
+
+**Findings outside the plan go to `<goal>-followups.json`.** The executor no longer writes
+`<plan>-followups.json`. Findings of the executor, the resolver and the revision are recorded once
+in the chain journal (`journal-finding`), appended to `BACKLOG.md` at once, and exported to
+`<goal>-followups.json` next to the spec. Tools that read the old file must read the new one.
+
+**`checkpoint-restore --paths` takes paths from the repository root**, like `foreign-changes`,
+instead of from the workdir. `--paths BACKLOG.md` alone fails with `paths-empty` (exit 2) instead of
+restoring nothing; drive-relative (`C:cli.py`) and pathspec-magic (`:(glob)*.py`) paths fail with
+`invalid-path`; a file equal to the snapshot is reported `unchanged`.
+
+**`spec-check` fails on a malformed settings line.** A line above `# Goal` that looks like `Chain`,
+`Environment`, `Backlog` or `Tier` but does not match the format (`> chain:`, `> Chain :`) is the
+error `malformed-metadata`; `settings` returns it as a warning. Such lines used to be ignored.
+
+**`backlog-append` refuses the user section.** `--section "My notes"` (or `Свои заметки`, in any
+case) fails with exit 1, and the user section is found regardless of case.
 
 ### Added
 
@@ -51,6 +79,26 @@ instead of the raw `**External:**` lines. Tools that read the old strings must b
   `**Size:**` line); `plan-iterative-revision` reports an unjustified oversized task as `minor`.
 - `plan-resolver`: `assert-readonly` accepts several allowed paths (report and `BACKLOG.md`); with
   `read=run` the audit re-checks tasks marked `External (read)` itself.
+- Chain journal `<goal>-chain.json` next to the spec, kept by every skill, manual runs included.
+  Each plan has the stages `writing`, `revision`, `split`, `execution`, `diffs`, `audit` and
+  `commit` with checked transitions; a run without a confirmation channel records its question
+  (`Qn`) and stops, and the next run applies the answer and continues. `brainstorm_tool.py` gained
+  `journal-path`, `journal-event`, `journal-unit`, `journal-question`, `journal-answer`,
+  `journal-finding`, `journal-commit`, `journal-export-findings`, `journal-show`,
+  `journal-reconcile` (statuses from the artifacts after a crash, `--rebuild` for a corrupt
+  journal) and `journal-validate`. Without `plan-brainstorming` beside it a skill works without a
+  journal.
+- `plan-executor`: `<base>-diffs.md` next to the plan after the run (`run-diff --markdown`: a file
+  table and one `diff` block per file, pipeline artifacts excluded); `ledger-path` (read-only),
+  `commit-run` and the `commit` mode; the ledger stores `baseline_head` and the journal path, and
+  `unit-begin` / `unit-finish` write the unit events. Without git the diff report and the commit are
+  skipped.
+- `plan-resolver` records the files its fix phase changed (`fix_files`) in the journal, and its
+  closing gate names `/plan-executor <plan> commit`.
+- `plan-check` and the revision's `bootstrap` return `journal`; `record` returns `journal_event`.
+- Fixes: a `> **Source:**` line and a link target in `<…>` are read in roadmaps and parts;
+  `**External:**` lines inside code blocks no longer count; `backlog-append` keeps the file mode of
+  `BACKLOG.md` and writes to the target of a symlinked `BACKLOG.md`.
 
 ### Plans in progress
 
@@ -62,6 +110,10 @@ instead of the raw `**External:**` lines. Tools that read the old strings must b
 - Finish `plan-executor` runs started with the previous version before updating, or start a new run
   in a new `exec_dir` after it.
 - Tasks over 150 lines of code: split them or add a `**Size:**` line before re-running `plan-check`.
+- Ledgers created before this release have no `baseline_head`: `commit-run` stops on them with
+  `baseline-head-unknown`. Commit such a run yourself or start a new run.
+- Nothing to migrate for the journal: the first skill that runs creates it. Old
+  `<plan>-followups.json` files stay as they are and are not read.
 
 ## 2026-09-30
 

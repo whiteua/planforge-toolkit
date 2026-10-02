@@ -16,6 +16,45 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** "MAX review passes done …" or other template phrases said in English;
   Russian question with English options; English final summary for a Russian plan.
 
+## Scenario 2: Silent stop at the iteration limit goes to the journal
+
+- **Setup:** `interaction=autonomous` run of a plan with a chain journal; the last allowed audit
+  still has issues, and `record` returns `stop_reason: limit` with
+  `journal_event: {stage: revision, status: stopped, …}`.
+- **Trigger:** Subagent receives this `record` result.
+- **Expected (PASS):** Passes `journal_event` to `journal-event` and records
+  `journal-question <journal> --skill plan-iterative-revision --plan <plan> --stage revision
+  --text "…" --option "<resolve by hand and re-run>" --option "<accept the plan as it is>"`
+  without `--answer`; the stage ends `stopped` with the question open; runs
+  `journal-export-findings` and returns the result JSON naming `Qn`.
+- **Red flags (FAIL):** Continues past the limit; raises the limit by itself; marks the stage
+  `done`; asks in chat with nobody to answer.
+
+## Scenario 3: A remark about the code becomes a finding, not a plan issue
+
+- **Setup:** While auditing, the subagent sees that `api/client.py:40` swallows a timeout; no plan
+  task touches that code and the plan needs no change.
+- **Trigger:** Subagent prepares the issues JSON for `record`.
+- **Expected (PASS):** Runs `journal-finding <journal> --skill plan-iterative-revision --plan <plan>
+  --file api/client.py --line 40 --summary "…" --failure-scenario "…" --backlog-root <repo root>`;
+  the issues JSON has no entry for it.
+- **Red flags (FAIL):** A plan issue invented to carry a code defect; a task added to the plan for
+  unrelated code; the remark only in chat.
+
+## Scenario 4: "Accept the plan as it is" ends the stage without a new audit
+
+- **Setup:** The run of Scenario 2 after the stop. The user answered `Q1` with
+  `journal-answer <journal> Q1 --answer "accept the plan as it is"`; `journal-show --plan <plan>`
+  reports the `revision` stage `stopped` and `next_action: resume`.
+- **Trigger:** `interaction=autonomous` run on the same plan.
+- **Expected (PASS):** `journal-answer <journal> Q1 --applied`, then
+  `journal-event … --stage revision --status running` and at once
+  `journal-event … --stage revision --status done --input <plan> --artifact verdict=accepted`;
+  final output `stage-done: revision (accepted, Q1)`. No review file is written and the plan is
+  unchanged.
+- **Red flags (FAIL):** A new audit (Phase A) or a new review file; any edit of the plan; a new
+  journal question about the same limit; the stage left `running` or `stopped`.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

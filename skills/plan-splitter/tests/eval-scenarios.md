@@ -16,6 +16,19 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** English verdict or options for a Russian plan; a mix of languages in one
   question.
 
+## Scenario 2: The `split` stage in the journal
+
+- **Setup:** Plan with a chain journal. Run A: `split=auto` and the gate decides not to split.
+  Run B: `split=always`, three parts, `verify=all`.
+- **Trigger:** Subagent finishes each run.
+- **Expected (PASS):** Run A: `journal-event … --stage split --status skipped` with the reason in
+  `--data`, no files written. Run B: `split` is `running` at the start and ends `done` with
+  `--input <plan> --artifact roadmap=<base>-roadmap.md --artifact parts[]=<base>-a.md
+  --artifact parts[]=<base>-b.md --artifact parts[]=<base>-c.md`; the batch verification of the
+  parts stays inside the `split` stage.
+- **Red flags (FAIL):** The batch verification marks the plan's `revision` stage; `split done`
+  without the parts; `split` left `running`; the source plan edited.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

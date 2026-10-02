@@ -236,5 +236,112 @@ class DecideUnit(unittest.TestCase):
         self.assertEqual(d["action"], "implement")
 
 
+class RevisionJournalEventUnit(unittest.TestCase):
+    """Every way decide() ends a run maps to one journal status; the loop states map to None."""
+
+    def issues(self, *fps, severity="major"):
+        return [{"fingerprint": fp, "severity": severity} for fp in fps]
+
+    def decide(self, history, issues, max_iter=9, policy="pragmatic", mode="full-cycle",
+               interaction="autonomous", user_stop=False):
+        return nri.decide(history, issues, max_iter, policy, mode, interaction, user_stop)
+
+    def test_every_gate_is_mapped(self):
+        cases = {
+            "clean": (self.decide([], []), "done"),
+            "converged": (self.decide([{"a"}], []), "done"),
+            "drain": (self.decide([], self.issues("a", severity="nit")), "done"),
+            "audit-only": (self.decide([], self.issues("a"), mode="audit-only"), "done"),
+            "user-stop": (self.decide([], self.issues("a"), user_stop=True), "stopped"),
+            "regression": (self.decide([{"a"}, {"b"}], self.issues("a", "c")), "stopped"),
+            "unchanged": (self.decide([{"a"}], self.issues("a")), "stopped"),
+            "churn": (self.decide([{"a"}, {"a", "b"}], self.issues("a", "b", "c")), "stopped"),
+            "stuck": (self.decide([{"a", "b"}, {"a", "c"}], self.issues("a", "d")), "stopped"),
+            "limit": (self.decide([{"a"}], self.issues("b"), max_iter=1), "stopped"),
+        }
+        self.assertEqual(set(cases), set(nri.REVISION_JOURNAL_STATUS))
+        for verdict, (decision, status) in cases.items():
+            event = nri.revision_journal_event(decision, "p.md", None, None, None)
+            self.assertEqual(event["stage"], "revision", verdict)
+            self.assertEqual(event["status"], status, verdict)
+            self.assertEqual(event["artifacts"], [f"verdict={verdict}"], verdict)
+            self.assertEqual("input" in event, status == "done", verdict)
+
+    def test_loop_states_give_none(self):
+        implement = self.decide([], self.issues("a"))
+        ask = self.decide([{"a"}], self.issues("b"), max_iter=1, interaction="interactive")
+        self.assertEqual((implement["action"], ask["action"]), ("implement", "ask_limit"))
+        for decision in (implement, ask):
+            self.assertIsNone(nri.revision_journal_event(decision, "p.md", "r.md", None, None))
+
+    def test_paths_relative_to_the_journal(self):
+        with tempfile.TemporaryDirectory() as d:
+            journal = Path(d) / "docs" / "goal-chain.json"
+            review = Path(d) / "docs" / "plans" / "p-review-2.md"
+            completion = Path(d) / "docs" / "plans" / "p-completion.md"
+            event = nri.revision_journal_event(self.decide([{"a"}], []), str(Path(d) / "p.md"),
+                                               str(review), str(completion), str(journal))
+            self.assertEqual(event["artifacts"], ["review=plans/p-review-2.md",
+                                                  "completion=plans/p-completion.md", "verdict=converged"])
+            self.assertEqual(event["input"], str(Path(d) / "p.md"))
+            self.assertEqual(nri.journal_ref(str(review), None), str(review))
+
+
+class RecordJournalEvent(RecordBase):
+    """record returns journal_event: done on clean/converged, stopped on gates, None in the loop."""
+
+    def with_journal(self):
+        # demo.md has no **Spec:** line: its journal lies next to it as demo-chain.json.
+        (self.dir / "demo-chain.json").write_text("{}\n", encoding="utf-8")
+
+    def test_loop_has_no_event(self):
+        out = self.ok([issue("Fix A")])
+        self.assertEqual(out["action"], "implement")
+        self.assertIsNone(out["journal_event"])
+        asked = self.ok([issue("Fix B")], "--interaction", "interactive", max_iter=1)
+        self.assertEqual(asked["action"], "ask_limit")
+        self.assertIsNone(asked["journal_event"])
+
+    def test_clean_is_done_without_review(self):
+        out = self.ok([])
+        self.assertEqual(out["journal_event"], {
+            "stage": "revision", "status": "done", "artifacts": ["verdict=clean"], "input": str(self.plan),
+        })
+
+    def test_converged_names_review_and_completion_relative_to_journal(self):
+        self.with_journal()
+        self.ok([issue("Fix A")])
+        out = self.ok([])
+        self.assertEqual(out["journal_event"]["status"], "done")
+        self.assertEqual(out["journal_event"]["artifacts"],
+                         ["review=demo-review-1.md", "completion=demo-completion.md", "verdict=converged"])
+
+    def test_without_journal_paths_are_absolute(self):
+        self.ok([issue("Fix A")])
+        out = self.ok([])
+        self.assertEqual(out["journal_event"]["artifacts"][:2], [
+            "review=" + str(self.dir / "demo-review-1.md"), "completion=" + str(self.dir / "demo-completion.md"),
+        ])
+
+    def test_drain_is_done_with_the_final_review(self):
+        self.with_journal()
+        out = self.ok([issue("Fix A", "nit")])
+        self.assertEqual((out["journal_event"]["status"], out["journal_event"]["artifacts"]),
+                         ("done", ["review=demo-review-1.md", "verdict=drain"]))
+
+    def test_stuck_and_limit_are_stopped(self):
+        self.with_journal()
+        self.ok([issue("Fix A"), issue("Fix B")])
+        self.ok([issue("Fix A"), issue("Fix C")])
+        out = self.ok([issue("Fix A"), issue("Fix D")])
+        self.assertEqual(out["journal_event"], {
+            "stage": "revision", "status": "stopped", "artifacts": ["review=demo-review-3.md", "verdict=stuck"],
+        })
+        out = self.ok([issue("Fix E")], run_start=4, max_iter=0)
+        self.assertEqual(out["result"], "limit")
+        self.assertEqual(out["journal_event"]["artifacts"], ["review=demo-review-4.md", "verdict=limit"])
+        self.assertEqual(out["journal_event"]["status"], "stopped")
+
+
 if __name__ == "__main__":
     unittest.main()

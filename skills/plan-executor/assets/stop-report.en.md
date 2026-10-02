@@ -28,6 +28,12 @@ Restore to: `{{restore_to}}`
 
 After confirmation: `executor_tool.py checkpoint-restore <repo> {{restore_to}}`. Without git, roll back manually.
 
+## Chain journal
+
+Open question `{{question_id}}` in `{{journal_path}}`: {{question_text}}
+
+Answer it with `brainstorm_tool.py journal-answer {{journal_path}} {{question_id}} --answer "<answer>"`, then resume. Defects outside the plan: `{{followups_path}}`.
+
 ## How to resume
 
 Run:

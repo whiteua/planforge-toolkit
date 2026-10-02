@@ -45,7 +45,8 @@ loop:
 ## FIX phase
 
 1. `open-issues <LAST_REPORT>` → `fix_order` (critical → low) and compact issue fields; the JSON is
-   enough, do not re-read the whole report.
+   enough, do not re-read the whole report. Then, before any fingerprint, the journal start
+   (WORKFLOW.md, Chain journal): stage `audit` → `running` with `--reason audit-open`.
 2. `protect <tmp-json> <plan> <all reports>` and `fingerprint-workspace <workspace-root> <fix-start-json>`
    (temp paths outside the workspace; `--base <last audit's current snapshot>` is optional and
    only saves rehashing).
@@ -61,6 +62,8 @@ loop:
    reported to the user.
 6. `mark-fix <LAST_REPORT> <id> <state> --files <paths from the diff> [--note ...]` per issue: the
    only allowed change to a past report, and it touches only the Fix Log.
+7. Record every path of the diff as `fix_files` of the `audit` stage, as a repository-root path
+   (WORKFLOW.md, Chain journal, FIX), so plan-executor's `commit` stage commits these fixes.
 
 `needs-user`, not a fix, when: the issue means the plan itself is wrong or contradictory; the fix
 needs a product or architecture choice the plan does not make; it needs dependency installs,
@@ -94,3 +97,12 @@ audit inline, re-reading the code rather than relying on memory of the edits.
 Order of precedence: `complete` → `ask-user` → `stop-stalled` → `stop-limit` → `continue`.
 The summary always lists the reports created, closed and open issues, and the changed files from
 the Fix Log.
+
+Every gate names the commit: `/plan-executor <plan> commit` commits the executor run's files and
+the recorded `fix_files`; the resolver itself never commits. Without a confirmation channel,
+`ask-user`, `stop-stalled` and `stop-limit` are recorded as a `journal-question` with the
+decision they need (WORKFLOW.md, Chain journal): the audit that ended the cycle already set the
+stage `done`, so first `journal-event … --stage audit --status running --reason audit-open` (the
+report is open), then the question (the stage becomes `stopped`), then
+`journal-export-findings`, then stop. The next start answers or stops on that question before
+anything else.

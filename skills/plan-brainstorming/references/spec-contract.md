@@ -62,7 +62,7 @@ tokens are English; quotes are in the language of the dialogue.
 - `` > Environment: `app_test` (test) — read=run, write=run — "Tests and migrations on app_test? — Yes, app_test only" (2026-10-01) ``
   — one line per external system: the name in backticks; the kind `test` or `prod`; both
   `read=` and `write=`, each `run` (for the whole run), `task` (ask before each task) or `deny`
-  (forbidden); the quote; the date. The dash may be `—` or `-`; the quote may use `"…"`, `«…»`
+  (forbidden); the quote; the date. The dash may be `—`, `–` or `-`; the quote may use `"…"`, `«…»`
   or `“…”`.
   - `prod` with `write=run` is an error: changes on prod are `task` or `deny` only. `read=run` on
     prod is allowed when the user's answer says exactly that.
@@ -70,13 +70,23 @@ tokens are English; quotes are in the language of the dialogue.
     that a question UI adds to an option (`(Recommended)`, `(рекомендую)`) are not the user's
     words and are an error.
   - A line without `read=` or `write=` is an error: a spec has no old form.
-- `> Backlog: <section name>` — the section of `BACKLOG.md` for this goal.
+- `> Backlog: <section name>` — the section of `BACKLOG.md` for this goal. It also names the
+  chain journal `<section name>-chain.json`, so it must be a file name: no `\`, `/`, `:`, `*`,
+  `?`, `"`, `<`, `>`, `|` or control characters, and not `.` or `..` (`spec-check`:
+  `backlog-not-a-file-name`).
+- A line above `# Goal` (outside code fences) that starts like one of these lines or the Tier line
+  (`> Chain`, `> Environment`, `> Backlog`, `> Tier`, bold forms included, any case) but does not
+  match its format — `> chain: …`, `> Chain : …` — is the `spec-check` error
+  `malformed-metadata: <line>`. `settings` (and every skill that reads settings) only warns with
+  the same text and reads the other lines.
 
 **Reading rule.** The spec is the single source of these settings; the plan does not copy them.
 Skills read them with `brainstorm_tool.py settings <file>` (or `resolve_settings`, loaded as a
-module): a roadmap or a part follows its `> Source:` / `> Источник:` link to the master plan; a
-plan uses settings in its own header when present, else the spec named by `**Spec:**`; a spec
-reads its own lines. Settings in a plan header (`**Chain:**`, `**Environments:**` with rights,
+module): a roadmap or a part follows its Source link to the master plan (`> Source: [x](a.md)`,
+also bold, `> **Source:** …` or `> **Source**: …`, the same for `Источник`; a link target with
+spaces in angle brackets, `[x](<a b/p.md>)`); a plan uses settings in its own header when present,
+else the spec named by `**Spec:**`; a spec reads its own lines.
+Settings in a plan header (`**Chain:**`, `**Environments:**` with rights,
 `**Backlog:**`) exist only for an old spec without these lines: the spec is never rewritten
 (hand-off rule 3), so `plan-writing` asks and records the answers there. A missing `**Spec:**`
 or `Source` target gives `ok: false` and `settings-source-missing: <path>`.
@@ -105,8 +115,11 @@ an external system there still needs the user's explicit permission.
 | goal / idea | goal file or chat input | user |
 | spec | `<plan-root>-spec.md`, next to the goal file | `plan-brainstorming` |
 | plan | `<plan-root>-impl.md`, same directory (`plan_tool.py plan-path`) | `plan-writing` |
-| execution result | code in the working tree; the engineer commits | `plan-executor` |
-| backlog | `BACKLOG.md` at the repository root (`git rev-parse --show-toplevel` of the spec's or plan's directory; outside git the working directory) | `plan-brainstorming` (format, `backlog-append`, `backlog-parse`); writers: `plan-brainstorming`, `plan-executor`, `plan-resolver` |
+| execution result | code in the working tree; committed by the `commit` stage, `/plan-executor <plan> commit` after the audit (only the run's files and the audit's fixes; never push, amend or force) | `plan-executor` |
+| backlog | `BACKLOG.md` at the repository root (`git rev-parse --show-toplevel` of the spec's or plan's directory; outside git the working directory) | `plan-brainstorming` (format, `backlog-append`, `backlog-parse`); writers: `plan-brainstorming`, `plan-executor`, `plan-resolver`, `plan-iterative-revision` (through `journal-finding`) |
+| diff report | `<plan base>-diffs.md` next to the plan (`<plan base>` = the plan file name without `-impl.md`; one per source plan of a split), rebuilt with the audit's fixes before the commit | `plan-executor` |
+| chain journal | `<goal>-chain.json` next to the spec (a plan without `**Spec:**`: next to the plan, goal = the plan file name without `-impl.md`); `<goal>` = the spec's `> Backlog:` value, else the spec file name without `-spec.md`. Stages, questions, findings and commits of every plan of the goal; it points at the other artifacts and never copies them | `plan-brainstorming` (format, `journal-*` commands); writers: every pipeline skill, each for its own stage |
+| follow-ups | `<goal>-followups.json` next to the journal: findings outside the plan as a findings input (`file`, `line`, `summary`, `failure_scenario`), rewritten from the journal by `journal-export-findings` | `plan-brainstorming` (format); writers: `plan-executor`, `plan-resolver`, `plan-iterative-revision` through `journal-finding` |
 
 `<plan-root>` = the goal file name without extension and without any descriptive suffix after
 the numeric segment: `plan01.md` → `plan01-spec.md`; `plan02-goal.md` → `plan02-spec.md`;

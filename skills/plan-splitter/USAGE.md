@@ -57,6 +57,7 @@ All files are created next to the original plan, which is never modified:
 | `<base>-a.md`, `<base>-b.md`, … (`aa`, `ab` after `z`) | Self-contained parts |
 | `<base>-verify-baseline.json`, `<base>-verify-ledger.json` | Deep-verification snapshot and ledger |
 | `<base>-<id>-review-N.md`, `<base>-<id>-completion.md` | Review trail per part (written by plan-iterative-revision) |
+| `<goal>-chain.json` (next to the spec) | Chain journal: the `split` stage, `done` with the roadmap and the parts, or `skipped` when the plan stays whole |
 
 ## Deep Verification
 

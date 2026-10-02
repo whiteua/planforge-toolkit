@@ -104,6 +104,16 @@ Reuse inside a run: the skill never changes code, so a claim you verified in an 
 stays verified while its text in the plan is unchanged. Always re-check claims that were
 `not found` or `ambiguous`, and raise the depth to at least `read` for them.
 
+## Findings about the code
+
+A real defect in the existing code that the plan neither causes nor fixes (a bug next to a
+symbol you checked, a broken test, a wrong config) is not an issue of the plan: keep it out of
+the issues JSON, so it never reaches the review or Phase B. Note it with `file` (path from the
+repository root), `line`, `summary` and `failure_scenario` (what breaks, and when). After the
+Phase A `guard-check` the loop records each one with `journal-finding` (SKILL.md, Chain journal);
+it is appended to `BACKLOG.md` and exported to `<goal>-followups.json`. When a step of the plan
+builds on the broken code, that is also an issue of the plan and goes into the JSON as usual.
+
 ## Severity
 
 - **blocker**: the plan cannot be implemented as written (contradiction, reference to missing

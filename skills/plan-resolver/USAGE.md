@@ -49,26 +49,29 @@ the reports are discovered next to the plan.
 ```
 Audit pass
 1. BOOTSTRAP      — validate the plan and reports, next report number (exit 64: plan already closed)
-2. PREFLIGHT      — the report file can be created
+2. PREFLIGHT      — the report file can be created; the chain journal marks the audit stage running
 3. FINGERPRINT    — workspace snapshot before the audit
 4. AUDIT          — trace every task and known issue to real code lines (read-only probes allowed)
-5. WRITE REPORT   — exactly one new report; defects outside the plan also go to BACKLOG.md (backlog-append)
+5. WRITE REPORT   — exactly one new report; defects outside the plan go to its Additional Context
 6. CENSUS + VALIDATE — every plan task covered; structure, statuses and evidence anchors verified against the code
 7. ASSERT-READONLY — nothing but the report and BACKLOG.md changed
-8. NEXT ACTION    — status, counts, suggested command
+8. JOURNAL        — defects outside the plan → journal + BACKLOG.md (journal-finding); audit stage done with the report's status; <goal>-followups.json rewritten
+9. NEXT ACTION    — status, counts, suggested command; the commit command /plan-executor <plan> commit
 
 Fix cycle (fix / next / auto)
 1. DISCOVER       — reports of the plan; closed → stop, none → audit first
 2. OPEN-ISSUES    — open issues, critical → low
 3. PROTECT        — plan and reports hashed; fix-start snapshot
 4. FIX            — minimal code changes per issue (applied / needs-user / skipped)
-5. DIFF           — changed files from the snapshot diff, plan and reports untouched
+5. DIFF           — changed files from the snapshot diff, plan and reports untouched; recorded as the audit's fix_files in the journal
 6. MARK-FIX       — outcome per issue in the report's Fix Log
 7. AUDIT          — subsequent pass → next report
 8. CYCLE-CHECK    — complete / ask-user / stop-stalled / stop-limit / continue (auto)
 ```
 
-Code changes stay uncommitted in the working tree for your review.
+Code changes stay uncommitted in the working tree for your review. The resolver never commits:
+`/plan-executor <plan-path> commit` commits the executor run's files together with these fixes
+(it asks before committing the fixes).
 
 ## Report Types
 
@@ -92,8 +95,9 @@ Code changes stay uncommitted in the working tree for your review.
 The resolver never edits the plan; never edits previous reports except the Fix Log via `mark-fix`;
 never edits code during an audit pass; never runs installers, migrations, project-wide formatters or
 git-mutating commands; never writes more than one report per pass or overwrites an existing one;
-never writes any other file except appended lines of `BACKLOG.md` at the repository root
-(`backlog-append`); never delegates fixes to other skills.
+never writes any other file except appended lines of `BACKLOG.md` at the repository root and the
+chain journal `<goal>-chain.json` with `<goal>-followups.json` (through `brainstorm_tool.py`, after
+the read-only check); never delegates fixes to other skills.
 
 ## Prerequisites
 
@@ -117,8 +121,8 @@ never writes any other file except appended lines of `BACKLOG.md` at the reposit
 ## Pipeline Position
 
 ```
-plan-brainstorming → plan-writing → plan-iterative-revision → plan-splitter → plan-executor → [YOU ARE HERE]
+plan-brainstorming → plan-writing → plan-iterative-revision → plan-splitter → plan-executor → [YOU ARE HERE] → plan-executor commit
 ```
 
 **Previous:** `plan-executor` (its hand-off names the master plan and any units it did not finish)
-**Next:** none; fix with `fix`/`auto` or by hand and re-run
+**Next:** `/plan-executor <plan> commit` (commit the run and the fixes); open issues: fix with `fix`/`auto` or by hand and re-run

@@ -428,6 +428,19 @@ class ParseMetadataChainTest(unittest.TestCase):
             "line 6: duplicate Backlog line",
         ])
 
+    def test_malformed_metadata_lines(self):
+        result = self.meta("> chain: split=never", "> Chain : split=never", "> **backlog:** x", "> tier: Deep",
+                           "> Environment `db` (test)", "> Tiers and chains are prose here")
+        self.assertEqual(result["errors"], [
+            "line 2: malformed-metadata: > chain: split=never",
+            "line 3: malformed-metadata: > Chain : split=never",
+            "line 4: malformed-metadata: > **backlog:** x",
+            "line 5: malformed-metadata: > tier: Deep",
+            "line 6: malformed-metadata: > Environment `db` (test)",
+        ])
+        self.assertEqual((result["chain"], result["backlog"]), (None, None))
+        self.assertEqual(self.meta(FENCE, "> chain: split=never", FENCE)["errors"], [])
+
     def test_fenced_lines_and_old_spec(self):
         self.assertEqual(self.meta(FENCE, "> Chain: split=bogus", FENCE)["errors"], [])
         empty = {"chain": None, "environments": [], "backlog": None, "errors": [], "warnings": []}
@@ -533,6 +546,25 @@ class SpecCheckMetadataTest(unittest.TestCase):
             "line 3: environment `app_test` is prod: write=run is not allowed (prod changes are task or deny only)"
         ])
         self.assertEqual(out["chain"], {"revision": "deep"})
+
+    def test_malformed_metadata_fails_the_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m-spec.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(META_SPEC.replace("> Chain: revision=deep", "> chain: revision=deep"))
+            code, out = _run("spec-check", path)
+        self.assertEqual((code, out["ok"], out["chain"]), (1, False, None))
+        self.assertEqual(out["errors"], ["line 2: malformed-metadata: > chain: revision=deep"])
+
+    def test_backlog_that_is_not_a_file_name_fails_the_cli(self):
+        for value in ("a/b", "ops:infra", ".."):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "m-spec.md")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(META_SPEC.replace("> Backlog: values-fix", "> Backlog: " + value))
+                code, out = _run("spec-check", path)
+            self.assertEqual((code, out["ok"], out["backlog"]), (1, False, value))
+            self.assertEqual(out["errors"], ["line 4: backlog-not-a-file-name: " + value])
 
 
 class PlanEnvironmentTest(unittest.TestCase):
@@ -677,6 +709,20 @@ class ResolveSettingsTest(unittest.TestCase):
         for path in (self.spec, self.plan, roadmap, part):
             self.assert_from_spec(ft.resolve_settings(path))
 
+    def test_source_line_forms(self):
+        for line in ("> Source: [x](x-impl.md)", "> **Source:** [x](x-impl.md)", "> **Source**: [x](x-impl.md)",
+                     "> Источник: [x](x-impl.md)", "> **Источник:** [x](x-impl.md)", "> **Источник**: [x](x-impl.md)",
+                     "> Source: [x](<x-impl.md>)"):
+            match = ft.SOURCE_RE.match(line)
+            self.assertIsNotNone(match, line)
+            self.assertEqual(match.group("target"), "x-impl.md", line)
+        self.assertEqual(ft.SOURCE_RE.match("> Source: [p](<a b/p.md>)").group("target"), "a b/p.md")
+        self.assertIsNone(ft.SOURCE_RE.match("> Source: [p](a b/p.md)"))
+        os.mkdir(os.path.join(self.dir, "a b"))
+        self.write(os.path.join("a b", "x-impl.md"), "# X\n\n**Spec:** ../x-spec.md\n\n**Tier:** Quick\n\n### Task 1: A\n")
+        roadmap = self.write("x-impl-roadmap.md", "# Roadmap\n\n> **Source:** [x-impl.md](<a b/x-impl.md>)\n")
+        self.assert_from_spec(ft.resolve_settings(roadmap))
+
     def test_plan_header_settings_win(self):
         plan = self.write("y-impl.md", PLAN_HEADER.replace("./x-spec.md", "./missing-spec.md"))
         result = ft.resolve_settings(plan)
@@ -724,6 +770,16 @@ class SettingsCliTest(unittest.TestCase):
                 fh.write(META_SPEC.replace("revision=deep", "revision=huge"))
             code, out = _run("settings", spec)
             self.assertEqual((code, out["ok"], out["chain_explicit"]), (1, False, True))
+
+    def test_malformed_metadata_is_a_settings_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = os.path.join(tmp, "x-spec.md")
+            with open(spec, "w", encoding="utf-8") as fh:
+                fh.write(META_SPEC.replace("> Chain: revision=deep", "> Chain : revision=deep"))
+            code, out = _run("settings", spec)
+        self.assertEqual((code, out["ok"], out["errors"]), (0, True, []))
+        self.assertEqual(out["warnings"], ["malformed-metadata: > Chain : revision=deep"])
+        self.assertEqual((out["chain_explicit"], out["chain"]["revision"], out["backlog"]), (False, "quick", "values-fix"))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 # ----- Working directories (not for publication) -----
 docs/.*/
-.github/
+# .github is private except the CI workflows
+.github/*
+!.github/workflows/
 
 # ----- Python -----
 __pycache__/
@@ -46,3 +48,4 @@ Desktop.ini
 *.log
 .env
 .env.local
+BACKLOG.md

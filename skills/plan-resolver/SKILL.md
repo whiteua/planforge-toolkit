@@ -19,7 +19,8 @@ allowed-tools:
 
 Audits the implementation of a master plan against the code. **AUDIT** is read-mostly: it never
 changes code, the plan or past reports, and writes exactly one new report,
-`<base>-report-N.md` or `<base>-report-N-final.md`, in the plan's directory. **FIX** (modes
+`<base>-report-N.md` or `<base>-report-N-final.md`, in the plan's directory, plus defects outside
+the plan appended to `BACKLOG.md` at the repository root. **FIX** (modes
 `fix`/`next`/`auto`) repairs the **code** from an open report; the plan is never modified.
 
 ## Modes
@@ -69,12 +70,14 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
    `path#Lx-Ly` that points at real code; probes are read-only.
 5. Report name: `-final` only when there are no issues and every task is `✅` or
    `not-applicable`; otherwise the open name.
-6. Write exactly one new report (never overwrite an existing one).
+6. Write exactly one new report (never overwrite an existing one). Append defects outside the
+   plan to `BACKLOG.md` (AUDIT.md, "Defects outside the plan").
 7. `TOOL task-census <plan> <report>`: exit `1` → add the uncovered tasks to the same report.
 8. `TOOL validate-report <report> --root <workspace-root> --plan <plan>`: one rewrite of the same
    report is allowed to fix it; copy every `[WARNING]` line into the report's validator-warnings section.
 9. `TOOL fingerprint-workspace <workspace-root> <current-json> --base <start-json>` and
-   `TOOL assert-readonly <start-json> <current-json> <report>`. Drift → rewrite the same report
+   `TOOL assert-readonly <start-json> <current-json> <report> <BACKLOG.md>` (`BACKLOG.md` only
+   when it lies inside the workspace root). Drift → rewrite the same report
    with the single blocker issue `probe-mutated-workspace`, run only the validator again, stop OPEN.
 10. Human gate: report path, status, counts, next action (audit mode with open issues: suggest
     `/plan-resolver <plan> fix`). Inside `fix`/`next`/`auto` the gate is printed once, when the
@@ -93,6 +96,17 @@ issue → AUDIT → `cycle-check`.
 
 The report language is `bootstrap.language`: `ru` when more than 5% of the plan's letters are
 Cyrillic, otherwise `en` (empty or unreadable plan → `en`). Instructions in this skill are English.
+
+**Dialogue language.** Everything the user sees is in the language of the primary task (the
+goal, idea or findings in `plan-brainstorming`, the plan in every later skill): questions, option
+labels and option descriptions in a question UI, status lines, confirmations, human gates, final
+summaries and stop reports. Only tokens that parsers match stay in English: `### Task N:`,
+`**Files:**`, `> Tier:`, command names and JSON field names. Sample phrases quoted in these
+instructions ("Spec written to …", "MAX review passes done …", "I'm using the plan-writing
+skill …") are templates: say them in the dialogue language, not verbatim. The language is
+detected, not guessed: `ru` when more than 5% of the letters are Cyrillic, otherwise `en`.
+
+In this skill: `bootstrap.language`.
 
 ## Forbidden
 

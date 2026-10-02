@@ -24,6 +24,18 @@ spec. Keep these tokens in English verbatim, because parsers match them:
 `- Modify:` / `- Test:`, `**Preconditions:**`, `**Postconditions:**`,
 `**Done when:**`, `- [ ] **Step N:**`.
 
+**Dialogue language.** Everything the user sees is in the language of the primary task (the
+goal, idea or findings in `plan-brainstorming`, the plan in every later skill): questions, option
+labels and option descriptions in a question UI, status lines, confirmations, human gates, final
+summaries and stop reports. Only tokens that parsers match stay in English: `### Task N:`,
+`**Files:**`, `> Tier:`, command names and JSON field names. Sample phrases quoted in these
+instructions ("Spec written to …", "MAX review passes done …", "I'm using the plan-writing
+skill …") are templates: say them in the dialogue language, not verbatim. The language is
+detected, not guessed: `ru` when more than 5% of the letters are Cyrillic, otherwise `en`.
+
+In this skill: the `lang` field of the `spec-check` result (section 1); `plan-check` reports the
+written plan's `lang` by the same rule.
+
 ## Tool
 
 `python "<SKILL_DIR>/scripts/plan_tool.py" <command>` (`<SKILL_DIR>` = this
@@ -32,7 +44,7 @@ skill's directory, absolute). Exit codes: `0` ok, `1` check failed, `2` bad inpu
 | Command | Use |
 |---|---|
 | `plan-path <spec>` | Plan path: `<X>-spec.md` → `<X>-impl.md` next to the spec (user preference overrides). |
-| `plan-check <plan> --root <project>` | Plan format contract, after writing the plan. |
+| `plan-check <plan> --root <project>` | Plan format contract, after writing the plan. Also returns `settings` (read by the shared rule: plan header, else the spec at `**Spec:**`), `task_count`, `plan_bytes`. |
 
 ## 1. Spec Preflight
 
@@ -43,6 +55,8 @@ Run `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" spec-
 - Exit `2`: STOP. The spec cannot be read.
 
 Tier: the `tier` field of the result. `Quick` / `Standard` / `Deep` are used as-is. Missing or unknown: use **Standard** and announce "Spec has no Tier line; defaulting to Standard."
+
+**Settings.** `spec-check` also returns the chain settings: `chain`, `environments`, `backlog` (the spec's `> Chain:`, `> Environment:`, `> Backlog:` lines). They stay in the spec: do not copy them into the plan; `**Spec:**` is how every later skill finds them. An old spec has none of these lines (`chain` and `backlog` empty, `environments` empty). It cannot be rewritten (one owner per artifact), so ask as now: when steps touch external systems, which environments and with which rights, changes named first and separately from reads; in the same message propose the chain defaults from `spec-contract.md` and the backlog section (default: the plan name without `-impl`) for the user to confirm or edit. Write the answers into the plan header: `**Chain:**` with all four keys, `**Environments:**` with `read=`/`write=`, `**Backlog:**`. Settings in the plan header replace the spec's settings as a whole, so never add them to a plan whose spec has settings: if such a spec lacks an environment the steps need, stop and send the user back to `plan-brainstorming`.
 
 ## 2. Scope Check
 
@@ -61,18 +75,18 @@ Before defining tasks, list the files to create or modify and each file's single
 - The test command in a step must exist in the project (runner, script, config). Run the project's test suite once before writing tasks and record the command and result in the plan header (`**Baseline:** pytest -q → 128 passed`); a red baseline is reported to the user before planning continues.
 - `plan-check --root` reports `Create:` targets that exist, `Test:`/`Modify:` targets and referenced paths that do not, and line ranges beyond the file; every warning is resolved or explained in the plan.
 
-**External systems.** Investigation means reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action. This applies to writing the plan (the baseline run uses offline tests only) and to the plan's own steps:
+**External systems.** Investigation means reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action. Pre-approved reads (`read=run` in the spec's `> Environment:` line, production included) cover the plan's steps and the read-only checks of plan-iterative-revision and plan-resolver; changes on production are never pre-approved. This applies to writing the plan (the baseline run uses offline tests only) and to the plan's own steps:
 
-- The header lists every permitted environment under `**Environments:**`, one per line: `` - `name` (test|prod) — "the user's permission, quoted verbatim" (date) ``. An environment without a quote is not permitted.
-- A task whose steps run anything on an environment carries `` **External:** `name` — what it does there `` after its `Files` block. `plan-executor` asks the engineer before running such a task.
+- Permissions are settings. They live in the spec (`> Environment:` lines with `read=` and `write=`, written by `plan-brainstorming`) and are not copied into the plan: every skill finds them through `**Spec:**`. Only for an old spec without settings does the plan header carry them (see 1. Spec Preflight): `**Environments:**`, one per line, `` - `name` (test|prod; read=run|task|deny, write=run|task|deny) — "the user's question and answer, quoted verbatim" (date) ``. An environment without a quote is not permitted; prod never gets `write=run`.
+- A task whose steps run anything on an environment carries `` **External:** `name` (read|write) — what it does there `` after its `Files` block: `(read)` when the steps only read there, `(write)` when anything there changes. `plan-executor` runs it without a question when the settings say `run` for that access and asks otherwise.
 - A project script that targets another environment is redirected to a permitted one in the step's command (or the user is asked); it is never run as it is.
-- `plan-check` rejects an environment without a quote, an `External` line that names an unlisted environment, and a task that mentions a listed environment without an `External` line.
+- `plan-check` reads the settings by the shared rule (plan header if it has settings, else the spec at `**Spec:**`) and rejects: an environment without a quote, an `External` line that names an environment missing from the settings, a task that mentions a known environment without an `External` line, an `External` line without `(read)`/`(write)` when the environment has rights (an old header entry without rights: warning), `(write)` on `write=deny` or `(read)` on `read=deny`, and `External` lines when the settings cannot be read (spec missing, no settings in the plan header).
 
 **Deviations from the spec.** The plan follows the spec. A deviation is allowed only by the user's explicit decision and is recorded in the header under `**Deviations from spec:**` (what the spec says → what the plan does → whose decision, when). A deviation that changes the spec's Goal, Components or Out of Scope is not a deviation: stop and send the user back to `plan-brainstorming`.
 
 ## 4. Tasks
 
-**Size.** A task fits **10 minutes of work OR 100 lines of new code**, whichever comes first. Otherwise split it into `Task N.1`, `Task N.2`, … recursively. Warning signs: more than ~5 implementation steps, new logic in more than 2-3 files, "and then" chains in the title. A **step** is one action of 2-5 minutes: write the failing test, run it, implement, run again.
+**Size.** A task fits **10 minutes of work OR 100 lines of new code**, whichever comes first. Otherwise split it into `Task N.1`, `Task N.2`, … recursively. When a task cannot be split without breaking it (a migration and the test that checks the schema after it, a generated data table), keep it whole and add `**Size:** <N> lines — <why it cannot be split>` after its `Files` block; the reason is in the plan's language. `plan-check` warns about a task with more than 100 lines of code and no `**Size:**` line, fails above 150, and lists justified tasks as `oversized`. Size is never a question to the user, in an interactive or a silent run: split the task or justify it. Warning signs: more than ~5 implementation steps, new logic in more than 2-3 files, "and then" chains in the title. A **step** is one action of 2-5 minutes: write the failing test, run it, implement, run again.
 
 **Tier** (from Preflight) decides how much each task expands. See `references/task-tiers.md` for the table and for when to add `Constraints` and `If stuck`. Every tier keeps the core: `Files`, numbered steps, and a verifiable done-state.
 
@@ -97,8 +111,13 @@ Before defining tasks, list the files to create or modify and each file's single
 
 **Baseline:** [test command → result before this plan]
 
+<!-- Settings below: only for an old spec without settings (see 1. Spec Preflight); all four Chain keys, defaults for the ones the user did not choose -->
+**Chain:** split=[auto|always|never]; revision=[quick|standard|deep]; stop=[pragmatic|strict]; resolver=[audit|auto|skip]
+
+**Backlog:** [goal section in BACKLOG.md]
+
 **Environments:** (only when steps touch external systems)
-- `[name]` ([test|prod]) — "[the user's permission, verbatim]" ([date])
+- `[name]` ([test|prod]; read=[run|task|deny], write=[run|task|deny]) — "[the user's question and answer, verbatim]" ([date])
 
 **Deviations from spec:** (only when the user decided to deviate)
 - [spec says] → [plan does] — [who decided, when]
@@ -181,23 +200,31 @@ Every step contains what the engineer needs. Plan failures:
 
 ## 6. Check and Self-Review
 
-1. Run `plan-check <plan> --root <project>` until it exits `0`. It enforces the header fields, task headings and unique ids, the task core per tier, backticked file paths, no commit steps, no placeholders, and the `Environments`/`External` rules. Review its `warnings`: a missing `Modify:` target is fine only if an earlier task creates it, and a code-size warning means the task needs splitting.
+1. Run `plan-check <plan> --root <project>` until it exits `0`. It enforces the header fields, task headings and unique ids, the task core per tier, backticked file paths, no commit steps, no placeholders, and the `Environments`/`External` rules. Review its `warnings`: a missing `Modify:` target is fine only if an earlier task creates it, and a code-size warning (or the error above 150 lines) is closed by splitting the task or by a `**Size:** <N> lines — <reason>` line, never by asking the user.
 2. Then check what the tool cannot:
    - **Spec coverage:** every spec requirement maps to a task. Add a task for each gap.
    - **Grounding:** every `path:line` citation was actually read; `Create:` targets are new; the test command exists.
    - **Consistency:** names, types and signatures match across tasks (`clearLayers()` in Task 3 and `clearFullLayers()` in Task 7 is a bug).
-   - **Size:** each task fits the limit. Split it if not.
+   - **Size:** each task fits the limit. Split it if not; a task that cannot be split carries a `**Size:**` line whose reason names what splitting would break.
 3. On the Deep tier, if the host supports subagents, also dispatch a reviewer with `plan-document-reviewer-prompt.md` and fix what it reports.
 
 Fix issues inline and re-run `plan-check`.
 
 ## 7. Execution Handoff
 
-> "Plan complete and saved to `<path>`. Recommended next steps:
+Take `task_count` and `plan_bytes` from the last `plan-check` result, and the decisions from its `settings`: with `chain_explicit: true` the values `settings.chain.split` and `settings.chain.resolver` are decisions, including keys the defaults filled in; with `chain_explicit: false` or `settings: null` no decision is recorded: treat `split` as `auto` and do not announce `resolver`. Speak in the plan's language.
+
+> "Plan complete and saved to `<path>` (<task_count> tasks, <plan_bytes> bytes). Recommended next steps:
 > 1. **Audit (recommended):** run `plan-iterative-revision` to cross-check the plan against the codebase.
 > 2. **Split:** if the plan has more than 15–20 tasks or spans several modules, run `plan-splitter` (it decides with a 5-factor gate).
 > 3. **Execute:** for small, audited plans, run `plan-executor`. The plan has no commit steps; committing the result is up to you.
 >
 > Which step?"
 
-Do not invoke any skill automatically. Wait for the user's choice.
+Settings change this message:
+
+- `split` is `auto` (a decision with `chain_explicit: true`, or treated as `auto` because `chain_explicit` is false or `settings` is `null`) and `task_count` > 15: the split recommendation goes first, with the numbers: "<task_count> tasks, <plan_bytes> bytes: split with `plan-splitter` before execution (its gate decides)." Audit and Execute follow.
+- `chain_explicit: true` and `split` is `always` or `never`: do not offer the split as an option; state the decision instead: "Settings: split=always, `plan-splitter` runs after the audit." / "Settings: split=never, the plan runs whole."
+- `chain_explicit: true`: state the resolver choice after the steps: "After execution: resolver=<value> (from the settings)." Do not ask about it later. With `chain_explicit: false` or `settings: null` say nothing about the resolver here.
+
+Do not invoke any skill automatically. Wait for the user's choice of the remaining options.

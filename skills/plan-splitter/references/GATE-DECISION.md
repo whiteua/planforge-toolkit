@@ -2,6 +2,12 @@
 
 Before decomposing, decide whether the plan needs splitting at all.
 
+## Settings
+
+`split` from the chain settings of the source plan (SKILL.md, Inputs) comes first: `always` →
+split without scoring; `never` → the splitter is not needed; `auto`, or no settings → score the
+factors below.
+
 ## Factors
 
 | Factor | Points to "split" | Points to "keep" |

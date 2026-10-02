@@ -6,6 +6,10 @@ Run orchestration (used by SKILL.md):
   bootstrap <plan> [--preset P] [--lenses L] [--rigor R] [--max M] [--stop-policy S]
       One-shot start: paths, lang, run_start (first review number of this run), prev review,
       resolved config, write probe, git root. Exit 0 ok, 1 not writable, 2 bad input.
+      settings: chain settings by the shared reading rule (plan header, else the spec at
+      **Spec:**; a part or roadmap via Source); null without plan-brainstorming alongside.
+      An explicit Chain supplies --preset/--stop-policy the caller did not pass
+      (config_from_settings lists them).
 
   record <plan> --run-start N0 --max M --issues <file|-> [--stop-policy S]
          [--mode full-cycle|audit-only] [--interaction interactive|autonomous] [--user-stop] [--lang ru|en]
@@ -73,11 +77,13 @@ Stdlib only. Python 3.8+.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
@@ -995,11 +1001,49 @@ def probe_writable(directory: str, basename: str) -> Optional[str]:
     return None
 
 
+def _load_brainstorm_tool():
+    path = Path(__file__).resolve().parents[2] / "plan-brainstorming" / "scripts" / "brainstorm_tool.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("brainstorm_tool", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def plan_settings(plan: str) -> Tuple[Optional[Dict[str, object]], List[str]]:
+    """Chain settings by the shared reading rule: the plan header, else the spec at **Spec:**;
+    a part or roadmap goes through its Source line (brainstorm_tool.resolve_settings)."""
+    tool = _load_brainstorm_tool()
+    if tool is None:
+        return None, ["plan-brainstorming not installed alongside; settings unavailable"]
+    settings = tool.resolve_settings(os.path.abspath(plan))
+    warnings = [f"settings: {item}" for item in settings.get("errors", [])]
+    warnings += [f"settings: {item}" for item in settings.get("warnings", [])]
+    return settings, warnings
+
+
+def settings_config_args(settings: Optional[Dict[str, object]], config_args: List[str]) -> List[str]:
+    """resolve-config flags from an explicit Chain (spec `> Chain:` or plan `**Chain:**`).
+    A flag the caller passed wins; without an explicit Chain nothing is added."""
+    if not settings or not settings.get("chain_explicit"):
+        return []
+    chain = settings.get("chain") or {}
+    extra: List[str] = []
+    if "--preset" not in config_args and chain.get("revision"):
+        extra += ["--preset", str(chain["revision"])]
+    if "--stop-policy" not in config_args and chain.get("stop"):
+        extra += ["--stop-policy", str(chain["stop"])]
+    return extra
+
+
 def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
     if not os.path.isfile(plan):
         print_json({"valid": False, "error": f"plan not found: {plan}"})
         return 2
-    config = resolve_config(config_args)
+    settings, settings_warnings = plan_settings(plan)
+    from_settings = settings_config_args(settings, config_args)
+    config = resolve_config(list(config_args) + from_settings)
     if "error" in config:
         print_json({"valid": False, "error": config["error"], "config": config})
         return 2
@@ -1010,6 +1054,7 @@ def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
     if probe_error:
         errors.append(probe_error)
     warnings: List[str] = []
+    warnings.extend(settings_warnings)
     if not plan.lower().endswith(".md"):
         warnings.append("plan file does not have .md extension")
     git_root = git_root_of(directory)
@@ -1030,6 +1075,8 @@ def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
             "completion_path": os.path.join(directory, f"{basename}-completion.md"),
             "git_root": git_root,
             "config": config,
+            "settings": settings,
+            "config_from_settings": [flag[2:].replace("-", "_") for flag in from_settings[0::2]],
         }
     )
     return 0 if not errors else 1

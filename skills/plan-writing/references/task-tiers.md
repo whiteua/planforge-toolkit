@@ -19,6 +19,11 @@ Every task, regardless of tier, MUST have:
 
 A task missing any of these is a plan failure. Tier never excuses the core.
 
+Size is not a tier element: every tier keeps the limit from `SKILL.md` §4
+(10 minutes or 100 lines of new code). A task that cannot be split carries
+`**Size:** <N> lines — <reason>` after `Files`; without it `plan-check` warns
+above 100 lines of code and fails above 150.
+
 ## Tier → task format
 
 | Element | Quick | Standard | Deep |

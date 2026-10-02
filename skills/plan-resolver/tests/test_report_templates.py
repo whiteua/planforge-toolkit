@@ -48,7 +48,7 @@ class TemplateContractTests(unittest.TestCase):
                 language_dir = Path(tmp) / language
                 language_dir.mkdir(parents=True, exist_ok=True)
                 report_path = language_dir / "main-plan-report-1-final.md"
-                report_path.write_text(rendered, encoding="utf-8", newline="\n")
+                report_path.write_bytes(rendered.encode("utf-8"))
                 process = subprocess.run(
                     [sys.executable, str(TOOL), "validate-report", str(report_path)],
                     text=True,

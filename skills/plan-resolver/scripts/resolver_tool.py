@@ -584,7 +584,7 @@ def cmd_assert_readonly(args: argparse.Namespace) -> int:
         start = load_snapshot(args.start_json)
         current = load_snapshot(args.current_json)
         root = os.path.abspath(str(start.get("root") or current.get("root") or "."))
-        allowed = normalize_allowed_path(args.allowed_path, root)
+        allowed = [normalize_allowed_path(raw, root) for raw in args.allowed_paths]
         start_files = dict(start["files"])
         current_files = dict(current["files"])
     except (OSError, json.JSONDecodeError, ToolError) as exc:
@@ -595,12 +595,13 @@ def cmd_assert_readonly(args: argparse.Namespace) -> int:
     removed = sorted(path for path in start_files if path not in current_files)
     modified = sorted(path for path in current_files if path in start_files and current_files[path] != start_files[path])
     changed = sorted(set(added + removed + modified))
-    violations = [path for path in changed if path != allowed]
+    violations = [path for path in changed if path not in allowed]
     valid = not violations
     print_json(
         {
             "valid": valid,
-            "allowed_path": allowed,
+            "allowed_path": allowed[0],
+            "allowed_paths": allowed,
             "added": added,
             "removed": removed,
             "modified": modified,
@@ -1620,7 +1621,7 @@ def build_parser() -> argparse.ArgumentParser:
     readonly = subparsers.add_parser("assert-readonly")
     readonly.add_argument("start_json")
     readonly.add_argument("current_json")
-    readonly.add_argument("allowed_path")
+    readonly.add_argument("allowed_paths", nargs="+")
     readonly.set_defaults(func=cmd_assert_readonly)
 
     census = subparsers.add_parser("task-census")

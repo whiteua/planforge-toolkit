@@ -34,6 +34,12 @@ gates, review rendering, validation) is done by the script; you do the audit and
 - `interaction`: `auto` (default) | `interactive` | `autonomous`. `auto` means `interactive` when a
   question tool (AskUserQuestion, vscode_askQuestions, ...) is available, otherwise `autonomous`.
   Callers such as `plan-splitter` run you as a subagent: that is `autonomous`.
+- Chain settings: `bootstrap` returns `settings`, read from the plan header or, when the header has
+  none, from the spec named by `**Spec:**`; a part or a roadmap goes through its `Source` line to
+  the master plan. An explicit `Chain` (`settings.chain_explicit`) supplies `preset` =
+  `chain.revision` and `stop_policy` = `chain.stop` unless the user passed them;
+  `config_from_settings` lists what it supplied. `settings: null` means `plan-brainstorming` is not
+  installed next to this skill: the run works as without settings.
 
 ## Tool
 
@@ -53,6 +59,9 @@ stdlib only. If `python` is unavailable, stop and tell the user.
 5. Gate decisions come only from `record`. Never continue after `action: "stop"` and never stop
    on your own while it says `implement` (except when the user interrupts).
 6. Wrap each phase in the diff guard when `git_root` is not null.
+7. External systems: Phase A may run read-only checks only on an environment with `read=run` in
+   `B.settings.environments` (references/PHASE-A-AUDIT.md, Step 3); anything else that reaches an
+   external system needs the user's explicit permission for that environment.
 
 ## Batch mode (a plan-splitter roadmap)
 
@@ -85,8 +94,13 @@ files are uncommitted; that is expected.
 MODE = full-cycle | audit-only; I = interactive | autonomous   (resolved from Inputs)
 B = TOOL bootstrap PLAN [--preset P] [--lenses L] [--rigor R] [--max M] [--stop-policy S]
 if not B.valid: report B.error / B.errors and stop
-if I == interactive and the user gave neither preset nor stop_policy:
+if B.config_from_settings is not empty:
+    announce preset + stop_policy as taken from the spec settings; do not ask
+elif I == interactive and the user gave neither preset nor stop_policy:
     ask once to confirm preset + stop_policy (then no more questions until the limit gate)
+if B.settings and not B.settings.ok and PLAN has `**External:**` lines:
+    interactive → ask which environments the audit may read
+    autonomous  → final output {"result": null, "error": "<B.settings.errors>"} and stop
 MAX = B.config.max; S = B.config.stop_policy; k = 1
 
 loop:
@@ -113,6 +127,10 @@ loop:
 
 `MAX` limits the number of reviews that go to Phase B in this run: with `MAX = 5`, audits 1-5 can
 be implemented and audit 6 hits the limit gate if issues remain.
+
+The limit question needs a confirmation channel. A run without one (no question tool, a subagent
+call, a chain run) is `autonomous`: `record --interaction autonomous` stops at the limit with
+`result: limit` and never asks.
 
 A `guard-check` violation means a phase touched a forbidden file: stop and report the paths.
 The guard sees only what `git status` sees (not ignored files, not paths outside the repository).
@@ -150,6 +168,17 @@ The pragmatic `drain` never hides real problems: it fires only when every open i
 
 All artifacts and all issue text are written in the plan's language, `B.lang` (`ru` when more than
 5% of letters are Cyrillic, else `en`). Instructions in this skill are in English regardless.
+
+**Dialogue language.** Everything the user sees is in the language of the primary task (the
+goal, idea or findings in `plan-brainstorming`, the plan in every later skill): questions, option
+labels and option descriptions in a question UI, status lines, confirmations, human gates, final
+summaries and stop reports. Only tokens that parsers match stay in English: `### Task N:`,
+`**Files:**`, `> Tier:`, command names and JSON field names. Sample phrases quoted in these
+instructions ("Spec written to …", "MAX review passes done …", "I'm using the plan-writing
+skill …") are templates: say them in the dialogue language, not verbatim. The language is
+detected, not guessed: `ru` when more than 5% of the letters are Cyrillic, otherwise `en`.
+
+In this skill: `B.lang` from `bootstrap`.
 
 ## References
 

@@ -43,12 +43,17 @@ the plan, and repeat until the plan is clean or a stop gate fires.
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | Plan file path | **Yes** | — | Path to the master plan `.md` file |
-| `preset` | No | `standard` | `quick` / `standard` / `deep`: lenses, code rigor, max iterations |
+| `preset` | No | `standard`, or `revision` of an explicit `Chain` setting | `quick` / `standard` / `deep`: lenses, code rigor, max iterations |
 | `lenses` / `rigor` / `max` | No | from preset | Override one preset dial |
-| `stop_policy` | No | `pragmatic` | `pragmatic` (stop when only nits remain) / `strict` (zero issues) |
+| `stop_policy` | No | `pragmatic`, or `stop` of an explicit `Chain` setting | `pragmatic` (stop when only nits remain) / `strict` (zero issues) |
 | `interaction` | No | `auto` | `auto` / `interactive` / `autonomous` |
 | `audit-only` | No | off | Audit once, write the review, do not change the plan |
 | `parts` | No | all | Batch mode: which parts of a roadmap to verify (`a,c`) |
+
+With a `> Chain:` line in the spec (or `**Chain:**` in an old plan header), `bootstrap` takes
+`preset` and `stop_policy` from it and the skill does not ask; an argument you pass still wins.
+A run without a confirmation channel stops at the iteration limit without a question. A read
+allowed for the whole run (`read=run`) lets the audit check that environment, read-only.
 
 ## Presets
 

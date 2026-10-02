@@ -1,6 +1,7 @@
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 from json import JSONDecodeError
 import os
@@ -431,7 +432,36 @@ def _drift(led, units):
     }
 
 
-def ledger_init(exec_dir, plan_path, input_type, units, source_sha256=None, accept_drift=False):
+_SETTINGS_KEYS = ("tier", "chain", "environments", "backlog")
+
+
+def _apply_settings(led, settings, accept_drift=False):
+    """Store resolve_settings output and its source file on the ledger; True when it changed.
+
+    settings None means plan-brainstorming is not installed: the ledger keeps what it has."""
+    if settings is None:
+        changed = "settings" not in led
+        led.setdefault("settings", None)
+        led.setdefault("settings_source", None)
+        return changed
+    source = {"path": settings["source"], "sha256": settings.get("source_sha256")} if settings.get("source") else None
+    if not settings.get("ok", True) and not settings.get("source") and led.get("settings_source"):
+        # The source cannot be read on resume (e.g. the spec was removed): not a drift. Keep the
+        # stored settings; cmd_ledger_init reports settings-unavailable (warning or error).
+        return False
+    old_sha = (led.get("settings_source") or {}).get("sha256")
+    if old_sha and old_sha != (source or {}).get("sha256") and not accept_drift:
+        old = led.get("settings") or {}
+        changed_keys = [key for key in _SETTINGS_KEYS if old.get(key) != settings.get(key)]
+        raise ToolError("settings-drift: the settings source changed since the ledger was created; ask the engineer",
+                        1, changed_keys=changed_keys, settings_source=source)
+    changed = led.get("settings") != settings or led.get("settings_source") != source
+    led["settings"] = settings
+    led["settings_source"] = source
+    return changed
+
+
+def ledger_init(exec_dir, plan_path, input_type, units, source_sha256=None, accept_drift=False, settings=None):
     raw_units = units.get("units", []) if isinstance(units, dict) else units
     path = ledger_path(exec_dir)
     if path.exists():
@@ -450,14 +480,30 @@ def ledger_init(exec_dir, plan_path, input_type, units, source_sha256=None, acce
             led["units"] = [done.get(unit["id"], unit) for unit in rebuilt]
             led["source_sha256"] = source_sha256
             changed = True
+        interrupted = False
         for unit in led["units"]:
             if unit["status"] == "running":
                 unit["status"] = "pending"
                 changed = True
+                interrupted = True
+        if interrupted and led.get("workdir"):
+            # The interrupted attempt's files are the run's own state, as after unit-finish fail:
+            # the next unit-begin must not report them as foreign.
+            try:
+                led["expected_tree"] = _worktree_tree(led["workdir"])
+            except ToolError:
+                led["expected_tree"] = None
+        if led.get("consents"):
+            led["consents"] = {}  # run-scope consents last one session
+            changed = True
+        changed = _apply_settings(led, settings, accept_drift) or changed
         if changed:
             _save(exec_dir, led)
         return led
-    return _save(exec_dir, build_ledger(plan_path, input_type, raw_units, source_sha256))
+    led = build_ledger(plan_path, input_type, raw_units, source_sha256)
+    led["consents"] = {}
+    _apply_settings(led, settings)
+    return _save(exec_dir, led)
 
 
 def _find_unit(led, unit_id):
@@ -598,7 +644,10 @@ def checkpoint_detect(workdir):
     except (FileNotFoundError, NotADirectoryError):
         return {"vcs": "none", "dirty": None}
     if result.returncode == 0 and result.stdout.strip() == "true":
-        dirty = bool(_git(workdir, "status", "--porcelain").strip())
+        # BACKLOG.md at the repository root is the shared backlog the skills append to between
+        # runs: it never makes the working tree dirty (same set as the foreign-change check).
+        excluded = [f":(top,exclude){path}" for path in sorted(_FOREIGN_IGNORED)]
+        dirty = bool(_git(workdir, "status", "--porcelain", "--", ":/", *excluded).strip())
         return {"vcs": "git", "dirty": dirty}
     return {"vcs": "none", "dirty": None}
 
@@ -613,6 +662,48 @@ def _with_temp_index(workdir, callback):
     finally:
         if os.path.exists(index_path):
             os.unlink(index_path)
+
+
+# Never a foreign change: BACKLOG.md at the repository root is the shared workspace backlog
+# that the skills themselves append to.
+_FOREIGN_IGNORED = {"BACKLOG.md"}
+_TREE_STATUS = {"A": "added", "D": "deleted"}
+
+
+def _worktree_tree(workdir):
+    """Tree sha of the working tree, built exactly like a snapshot (temp index: HEAD, then
+    add -A) but without commit-tree or a ref. None outside git."""
+    if not workdir or checkpoint_detect(workdir)["vcs"] != "git":
+        return None
+
+    def build(env):
+        try:
+            _git(workdir, "rev-parse", "--verify", "-q", "HEAD", env=env)
+            _git(workdir, "read-tree", "HEAD", env=env)
+        except ToolError:
+            pass
+        _git(workdir, "add", "-A", env=env)
+        return _git(workdir, "write-tree", env=env).strip()
+
+    return _with_temp_index(workdir, build)
+
+
+def _commit_tree(workdir, sha):
+    """Tree sha of a snapshot commit; None when there is no snapshot."""
+    if not workdir or not sha:
+        return None
+    return _git(workdir, "rev-parse", f"{sha}^{{tree}}").strip()
+
+
+def _tree_diff(workdir, old_tree, new_tree):
+    """[{path, status: added|modified|deleted}] between two trees, sorted by path."""
+    if old_tree == new_tree:
+        return []
+    out = _git(workdir, "diff-tree", "-r", "--no-renames", "--name-status", "-z", old_tree, new_tree)
+    items = [item for item in out.split("\0") if item]
+    changes = [{"path": path, "status": _TREE_STATUS.get(status[:1], "modified")}
+               for status, path in zip(items[0::2], items[1::2])]
+    return sorted(changes, key=lambda change: change["path"])
 
 
 def checkpoint_create(workdir, label, run_id="manual"):
@@ -650,7 +741,8 @@ def checkpoint_restore(workdir, checkpoint_id):
         raise ToolError("not a git repository", 1)
     snapshot_files = _z_list(_git(workdir, "ls-tree", "-r", "-z", "--name-only", checkpoint_id))
     current_files = _z_list(_git(workdir, "ls-files", "-z", "--cached", "--others", "--exclude-standard"))
-    removed = sorted(current_files - snapshot_files)
+    # The shared backlog is not part of a rollback (skills append to it, the user checks items off).
+    removed = sorted(current_files - snapshot_files - _FOREIGN_IGNORED)
     for rel in removed:
         target = Path(workdir) / rel
         if target.is_file() or target.is_symlink():
@@ -658,10 +750,48 @@ def checkpoint_restore(workdir, checkpoint_id):
 
     def checkout(env):
         _git(workdir, "read-tree", checkpoint_id, env=env)
+        _git(workdir, "rm", "--cached", "-f", "-q", "--ignore-unmatch", "--", *sorted(_FOREIGN_IGNORED), env=env)
         _git(workdir, "checkout-index", "-a", "-f", env=env)
 
     _with_temp_index(workdir, checkout)
     return {"restored_to": checkpoint_id, "removed": removed}
+
+
+def _safe_rel_path(raw):
+    rel = str(raw).replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    if not rel or rel.startswith("/") or os.path.isabs(str(raw)) or ".." in rel.split("/"):
+        raise ToolError(f"invalid-path: {raw} (expected a path relative to the repository root)", 2)
+    return rel
+
+
+def checkpoint_restore_paths(workdir, tree_ish, paths):
+    """Restore only `paths` from a snapshot or tree: changed and deleted files come back from it,
+    files absent from it are deleted. Every path is checked before anything is written."""
+    if checkpoint_detect(workdir)["vcs"] != "git":
+        raise ToolError("not a git repository", 1)
+    wanted = sorted({_safe_rel_path(raw) for raw in paths} - _FOREIGN_IGNORED)
+    in_tree = _z_list(_git(workdir, "ls-tree", "-r", "-z", "--name-only", tree_ish, "--", *wanted))
+    present = {rel for rel in wanted if (Path(workdir) / rel).is_file() or (Path(workdir) / rel).is_symlink()}
+    unknown = [rel for rel in wanted if rel not in in_tree and rel not in present]
+    if unknown:
+        raise ToolError("unknown-path: " + ", ".join(unknown) + " (neither in the snapshot nor in the working tree)",
+                        2, unknown=unknown)
+    restored = [rel for rel in wanted if rel in in_tree]
+    removed = [rel for rel in wanted if rel not in in_tree]
+    statuses = [{"path": rel, "status": "added" if rel in removed else "modified" if rel in present else "deleted"}
+                for rel in wanted]
+    for rel in removed:
+        (Path(workdir) / rel).unlink()
+
+    def checkout(env):
+        _git(workdir, "read-tree", tree_ish, env=env)
+        _git(workdir, "checkout-index", "-f", "--", *restored, env=env)
+
+    if restored:
+        _with_temp_index(workdir, checkout)
+    return {"restored_to": tree_ish, "restored": restored, "removed": removed, "paths": statuses}
 
 
 def checkpoint_prune(workdir, run_id):
@@ -805,23 +935,62 @@ def _check_exec_dir(exec_dir, workdir, allow_temp=False):
         raise ToolError(f"exec-dir-inside-workdir: {exec_dir} is inside {workdir} and not git-ignored", 2)
 
 
+def _set_expected_tree(exec_dir, tree):
+    led = _load(exec_dir)
+    led["expected_tree"] = tree
+    _save(exec_dir, led)
+    return tree
+
+
+def _foreign_check(led):
+    """Compare the working tree with the ledger's expected_tree.
+
+    foreign_changes is None, with a one-line warning, when the check cannot run: no git working
+    tree, or a ledger written before expected_tree existed (the next unit-finish sets it)."""
+    workdir = led.get("workdir")
+    current = _worktree_tree(workdir)
+    expected = led.get("expected_tree")
+    result = {"foreign_changes": None, "expected_tree": expected, "current_tree": current, "warning": None}
+    if current is None:
+        result["warning"] = "foreign-change check is off: the working tree is not a git repository"
+    elif not expected:
+        result["warning"] = "foreign-change check starts after the next finished unit (old ledger)"
+    else:
+        try:
+            changes = _tree_diff(workdir, expected, current)
+        except ToolError:
+            # A tree without a ref can be pruned by git gc during a long pause (Known limitation).
+            result["warning"] = (f"expected_tree {expected} is missing from the object store; "
+                                 "accept-changes resets it")
+        else:
+            result["foreign_changes"] = [change for change in changes if change["path"] not in _FOREIGN_IGNORED]
+    return result
+
+
 def unit_begin(exec_dir):
     nxt = ledger_next(exec_dir)
     if nxt["reason"] not in {"ready", "retry-available"}:
         return nxt
+    # Files changed outside the run since the last unit (J11): report them and mark nothing running.
+    check = _foreign_check(_load(exec_dir))
+    if check["foreign_changes"]:
+        return {"reason": "foreign-changes", "unit": nxt["unit"], "foreign_changes": check["foreign_changes"],
+                "expected_tree": check["expected_tree"], "current_tree": check["current_tree"]}
     unit = nxt["unit"]
     text = unit_text(unit) or ""
     strategy = recommend_strategy(unit["weight"], unit["title"])
     running = ledger_mark(exec_dir, unit["id"], "running")
     return {
         "reason": nxt["reason"],
+        "foreign_changes": check["foreign_changes"],
+        "foreign_warning": check["warning"],
         "unit": running,
         "strategy": strategy,
         "text": text or None,
         "files": extract_files(text),
-        # `**External:** <environment> — ...` lines: the unit touches an external system and
-        # needs the engineer's confirmation before it runs (GATE.md).
-        "external": _EXTERNAL_RE.findall(text),
+        # `**External:** `env` (read|write) — ...` lines with the consent that covers each one;
+        # recorded on the unit in the ledger. Unconfirmed entries need the engineer (GATE.md).
+        "external": _record_external(exec_dir, running, text),
     }
 
 
@@ -841,6 +1010,95 @@ def _add_note(exec_dir, unit_id, note):
     unit.setdefault("notes", []).append(" ".join(str(note).split()))
     _save(exec_dir, led)
     return unit
+
+
+def _environments(led):
+    settings = led.get("settings") or {}
+    return {env["name"]: env for env in settings.get("environments") or [] if isinstance(env, dict) and env.get("name")}
+
+
+def _external_items(line):
+    """Every `env` (read|write) item before the description dash, whatever separates them
+    (comma, semicolon, "and", spaces); backticked commands after the dash are not environments."""
+    head, in_code = line, False
+    for index, char in enumerate(line):
+        if char == "`":
+            in_code = not in_code
+        elif not in_code and (char in "—–" or line[index:index + 3] == " - "):
+            head = line[:index]
+            break
+    return [(m.group(1), m.group(2).lower() if m.group(2) else None)
+            for m in re.finditer(r"`([^`]+)`\s*(?:\((read|write)\))?", head, re.IGNORECASE)]
+
+
+def _external_entries(text, led):
+    """One entry per environment of each `**External:**` line: the consent from the stored settings
+    (run|task|deny) and whether it may run without a question (run, or a run-scope consent).
+    Settings stored with errors grant nothing, and a production write is never confirmed."""
+    valid = (led.get("settings") or {}).get("ok", True)
+    environments = _environments(led)
+    consents = led.get("consents") or {}
+    entries = []
+    for line in _EXTERNAL_RE.findall(text):
+        for env, access in _external_items(line) or [(None, None)]:
+            setting = environments.get(env) or {}
+            consent = setting.get(access) if access and valid else None
+            session = bool(valid and access and consent != "deny" and (consents.get(env) or {}).get(access))
+            confirmed = consent == "run" or session
+            if setting.get("kind") == "prod" and access == "write":
+                confirmed = False
+            source = None if not confirmed else ("spec" if consent == "run" else "session")
+            entries.append({"env": env, "access": access, "kind": setting.get("kind"), "consent": consent,
+                            "confirmed": confirmed, "source": source})
+    return entries
+
+
+def _record_external(exec_dir, unit, text):
+    """Compute the unit's external entries and record them on the unit in the ledger."""
+    led = _load(exec_dir)
+    entries = _external_entries(text, led)
+    _find_unit(led, unit["id"])["external"] = entries
+    _save(exec_dir, led)
+    unit["external"] = entries
+    return entries
+
+
+def record_consent(exec_dir, env, access):
+    """Run-scope consent the engineer gave during execution ("the whole run", GATE.md)."""
+    led = _load(exec_dir)
+    environments = _environments(led)
+    setting = environments.get(env)
+    if setting is None:
+        raise ToolError(f"consent-unknown-environment: `{env}` is not in the run's settings", 1,
+                        environments=sorted(environments))
+    if setting.get("kind") == "prod" and access == "write":
+        raise ToolError(f"consent-prod-write: changes on prod `{env}` are confirmed task by task, never for the run", 1)
+    if setting.get(access) == "deny":
+        raise ToolError(f"consent-denied: {access}=deny for `{env}` in the settings; the plan must change", 1)
+    led.setdefault("consents", {}).setdefault(env, {})[access] = True
+    _save(exec_dir, led)
+    return {"ok": True, "env": env, "access": access, "consents": led["consents"]}
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def accept_changes(exec_dir, note=None):
+    """The engineer keeps the foreign changes: the current tree becomes the expected one."""
+    led = _load(exec_dir)
+    check = _foreign_check(led)
+    if check["current_tree"] is None:
+        raise ToolError("accept-changes-unavailable: the run has no git working tree", 1)
+    accepted = check["foreign_changes"] or []
+    event = None
+    if accepted:
+        event = {"at": _utc_now(), "paths": accepted, "decision": "accepted",
+                 "note": " ".join(str(note).split()) if note else None}
+        led.setdefault("foreign_events", []).append(event)
+    led["expected_tree"] = check["current_tree"]
+    _save(exec_dir, led)
+    return {"expected_tree": led["expected_tree"], "accepted": accepted, "event": event}
 
 
 def run_diff(exec_dir):
@@ -884,11 +1142,19 @@ def unit_finish(exec_dir, unit_id, outcome, error=None, note=None):
                 outcome, error = "fail", f"checkpoint-failed: {exc}"
         if outcome == "pass":
             unit = ledger_mark(exec_dir, unit_id, "done", checkpoint=checkpoint)
-            if note:
-                unit = _add_note(exec_dir, unit_id, note)
+            if workdir:
+                _set_expected_tree(exec_dir, _commit_tree(workdir, checkpoint))
+            for text in ([note] if isinstance(note, str) else note or []):
+                unit = _add_note(exec_dir, unit_id, text)
             progress = render_progress(exec_dir)
             return {"status": "done", "unit": unit, "checkpoint_id": checkpoint, "progress": progress["path"]}
     unit = ledger_mark(exec_dir, unit_id, "failed", error=error or "gate failed")
+    if workdir:
+        # The failed attempt's files are the run's own state: a retry must not see them as foreign.
+        try:
+            _set_expected_tree(exec_dir, _worktree_tree(workdir))
+        except ToolError:
+            _set_expected_tree(exec_dir, None)
     stop = _stop_reason(unit)
     progress = render_progress(exec_dir)
     return {
@@ -945,6 +1211,30 @@ def cmd_detect_lang(args):
     return detect_lang(_read_text(args.path))
 
 
+BRAINSTORM_MISSING = ("plan-brainstorming not installed alongside: settings are not read; "
+                      "every External unit needs the engineer's confirmation")
+
+
+def _load_brainstorm_tool():
+    path = Path(__file__).resolve().parents[2] / "plan-brainstorming" / "scripts" / "brainstorm_tool.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("brainstorm_tool", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _resolve_settings(plan_path):
+    """Chain settings by the shared reading rule of plan-brainstorming (plan header, else the
+    spec named by **Spec:**; a roadmap goes through its Source link). Returns (settings, warning);
+    settings is None when plan-brainstorming is not installed alongside."""
+    module = _load_brainstorm_tool()
+    if module is None or not hasattr(module, "resolve_settings"):
+        return None, BRAINSTORM_MISSING
+    return module.resolve_settings(str(Path(plan_path).resolve())), None
+
+
 def cmd_ledger_init(args):
     detected = detect_input(args.plan_path, force_whole=args.whole)
     if detected["input_type"] == "staged":
@@ -972,14 +1262,26 @@ def cmd_ledger_init(args):
         detected_vcs = checkpoint_detect(workdir)
         if detected_vcs["dirty"] and not getattr(args, "allow_dirty", False):
             raise ToolError("dirty-worktree: uncommitted changes in workdir; ask the engineer (commit/stash or --allow-dirty)", 1)
+    settings, warning = _resolve_settings(args.plan_path)
+    warnings = [warning] if warning else list((settings or {}).get("warnings") or [])
+    if settings is not None and not settings.get("ok", True):
+        raw_units = units.get("units", []) if isinstance(units, dict) else units
+        problems = "; ".join(settings.get("errors") or [])
+        if any(_EXTERNAL_RE.search(unit_text(unit) or "") for unit in raw_units):
+            raise ToolError("settings-unavailable: the plan has External units but its settings cannot be read ("
+                            + problems + "); ask the engineer", 1, settings_errors=settings.get("errors") or [])
+        warnings.append(f"settings-unavailable: {problems}; Chain defaults apply")
     led = ledger_init(args.exec_dir, args.plan_path, detected["input_type"], units,
-                      source_sha256=source_sha256, accept_drift=getattr(args, "accept_drift", False))
+                      source_sha256=source_sha256, accept_drift=getattr(args, "accept_drift", False),
+                      settings=settings)
     if workdir and fresh:
         led["workdir"] = os.path.abspath(workdir)
         led["baseline_checkpoint"] = checkpoint_create(workdir, "baseline", led["run_id"])["checkpoint_id"]
+        led["expected_tree"] = _commit_tree(workdir, led["baseline_checkpoint"])
+        led["foreign_events"] = []
         _save(args.exec_dir, led)
     # exec_dir is reported, not stored: tell the engineer where the ledger lives.
-    return dict(led, exec_dir=str(Path(args.exec_dir).resolve()))
+    return dict(led, exec_dir=str(Path(args.exec_dir).resolve()), warnings=warnings)
 
 
 def cmd_ledger_next(args):
@@ -1002,6 +1304,10 @@ def cmd_unit_finish(args):
     return unit_finish(args.exec_dir, args.unit_id, args.outcome, error=args.error, note=args.note)
 
 
+def cmd_consent(args):
+    return record_consent(args.exec_dir, args.env, args.access)
+
+
 def cmd_run_diff(args):
     return run_diff(args.exec_dir)
 
@@ -1014,8 +1320,42 @@ def cmd_checkpoint_create(args):
     return checkpoint_create(args.workdir, args.label, args.run_id)
 
 
+def _after_restore(exec_dir, workdir, restored_paths=None):
+    """Record a restore the executor made: expected_tree becomes the restored tree, so the next
+    unit-begin does not report the restore itself as a foreign change. Foreign changes left in
+    place by a --paths restore are recorded as accepted, never taken over silently."""
+    led = _load(exec_dir)
+    old = led.get("expected_tree")
+    current = _worktree_tree(workdir)
+    if restored_paths:
+        events = led.setdefault("foreign_events", [])
+        events.append({"at": _utc_now(), "paths": restored_paths, "decision": "restored", "note": None})
+        names = {entry["path"] for entry in restored_paths}
+        kept = [change for change in (_tree_diff(workdir, old, current) if old and current else [])
+                if change["path"] not in names and change["path"] not in _FOREIGN_IGNORED]
+        if kept:
+            events.append({"at": _utc_now(), "paths": kept, "decision": "accepted",
+                           "note": "kept while restoring other paths"})
+    led["expected_tree"] = current
+    _save(exec_dir, led)
+    return current
+
+
 def cmd_checkpoint_restore(args):
-    return checkpoint_restore(args.workdir, args.checkpoint_id)
+    exec_dir = getattr(args, "exec_dir", None)
+    if exec_dir:
+        _load(exec_dir)  # a missing or broken ledger fails before any file is touched
+    if getattr(args, "paths", None):
+        result = checkpoint_restore_paths(args.workdir, args.checkpoint_id, args.paths)
+    else:
+        result = checkpoint_restore(args.workdir, args.checkpoint_id)
+    if exec_dir:
+        result["expected_tree"] = _after_restore(exec_dir, args.workdir, result.get("paths"))
+    return result
+
+
+def cmd_accept_changes(args):
+    return accept_changes(args.exec_dir, note=args.note)
 
 
 def cmd_checkpoint_prune(args):
@@ -1092,7 +1432,14 @@ def _configure_unit_finish(parser):
     parser.add_argument("unit_id")
     parser.add_argument("outcome", choices=["pass", "fail"])
     parser.add_argument("--error")
-    parser.add_argument("--note", help="deviation from the unit's text agreed with the engineer (pass only)")
+    parser.add_argument("--note", action="append",
+                        help="deviation agreed with the engineer, or a per-task External confirmation (pass only; repeatable)")
+
+
+def _configure_consent(parser):
+    parser.add_argument("exec_dir")
+    parser.add_argument("env")
+    parser.add_argument("access", choices=["read", "write"])
 
 
 def _configure_checkpoint_detect(parser):
@@ -1107,7 +1454,14 @@ def _configure_checkpoint_create(parser):
 
 def _configure_checkpoint_restore(parser):
     parser.add_argument("workdir")
-    parser.add_argument("checkpoint_id")
+    parser.add_argument("checkpoint_id", help="snapshot sha or tree sha (expected_tree)")
+    parser.add_argument("--paths", nargs="+", help="restore only these repository-relative files")
+    parser.add_argument("--exec-dir", help="ledger to update: expected_tree becomes the restored tree")
+
+
+def _configure_accept_changes(parser):
+    parser.add_argument("exec_dir")
+    parser.add_argument("--note", help="why the engineer keeps the changes")
 
 
 def _configure_checkpoint_prune(parser):
@@ -1132,10 +1486,12 @@ def _configure_render_progress(parser):
     parser.add_argument("exec_dir")
 
 
+_register("accept-changes", cmd_accept_changes, _configure_accept_changes)
 _register("checkpoint-create", cmd_checkpoint_create, _configure_checkpoint_create)
 _register("checkpoint-detect", cmd_checkpoint_detect, _configure_checkpoint_detect)
 _register("checkpoint-prune", cmd_checkpoint_prune, _configure_checkpoint_prune)
 _register("checkpoint-restore", cmd_checkpoint_restore, _configure_checkpoint_restore)
+_register("consent", cmd_consent, _configure_consent)
 _register("detect-input", cmd_detect_input, _configure_detect_input)
 _register("detect-lang", cmd_detect_lang, lambda parser: parser.add_argument("path"))
 _register("ledger-init", cmd_ledger_init, _configure_ledger_init)

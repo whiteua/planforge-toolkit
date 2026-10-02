@@ -14,12 +14,13 @@ the invariants below hold for every AUDIT pass.
 
 ## Invariants
 
-1. Exactly one writable file: the chosen `NEXT_REPORT`.
+1. Writable files: the chosen `NEXT_REPORT` and `BACKLOG.md` at the repository root (append-only,
+   through `backlog-append`; defects outside the plan, [AUDIT.md](AUDIT.md)).
 2. `MASTER_PLAN` and `REPORTS[]` are read-only (the Fix Log is written only by `mark-fix`).
 3. Project code is read-only in AUDIT: reading, grep/glob and read-only probes only. The tools
    cannot prevent a write; `assert-readonly` detects it afterwards and turns it into a blocker.
-4. Preflight before the audit; start/current fingerprint around it; the only allowed diff is
-   `NEXT_REPORT`.
+4. Preflight before the audit; start/current fingerprint around it; the only allowed diffs are
+   `NEXT_REPORT` and `BACKLOG.md`.
 5. One AUDIT pass = one report. Code fixes belong to FIX, never to AUDIT.
 6. The report schema is [REPORT-FORMAT.md](REPORT-FORMAT.md); the language is `bootstrap.language`.
 7. `task-census` must pass before hand-off: an uncovered task (exit 1) blocks the report.
@@ -36,8 +37,9 @@ fingerprint-workspace <workspace-root> <start-json>
 # write NEXT_REPORT
 task-census <plan> <NEXT_REPORT>
 validate-report <NEXT_REPORT> --root <workspace-root> --plan <plan>
+# backlog-append per defect outside the plan (AUDIT.md)
 fingerprint-workspace <workspace-root> <current-json> --base <start-json>
-assert-readonly <start-json> <current-json> <NEXT_REPORT>
+assert-readonly <start-json> <current-json> <NEXT_REPORT> <BACKLOG.md>
 ```
 
 ## Bootstrap
@@ -69,7 +71,9 @@ stop and ask the user to narrow the scope.
 Snapshot files live outside the workspace: `tempfile.mkstemp(prefix="fp-", suffix=".json",
 dir=tempfile.gettempdir())`, close the fd, pass the path.
 
-`assert-readonly <start> <current> <NEXT_REPORT>` allows exactly one changed path. Any other
+`assert-readonly <start> <current> <NEXT_REPORT> <BACKLOG.md>` allows exactly the paths given
+after the two snapshots. Pass `BACKLOG.md` as an absolute path when it lies inside
+`WORKSPACE_ROOT`; outside it is not fingerprinted, leave it out. Any other
 added/removed/modified path is the blocker `probe-mutated-workspace`: rewrite the same report with
 that single issue, run only `validate-report` again, stop with status OPEN. No second guard in the
 same invocation.
@@ -98,7 +102,7 @@ bootstrap <workspace-root> <plan> [reports...]
 preflight <plan-dir> <next-open-name> <next-final-name>
 fingerprint-workspace <root> <out-json> [--base <prev-json>]
 snapshot-diff <before-json> <after-json>
-assert-readonly <start-json> <current-json> <allowed-path>
+assert-readonly <start-json> <current-json> <allowed-path>...
 parse-report <report.md>
 validate-report <report.md> [--root <workspace-root>] [--plan <plan>]
 task-census <plan> <report>

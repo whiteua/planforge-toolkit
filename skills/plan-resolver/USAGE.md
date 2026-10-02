@@ -52,9 +52,9 @@ Audit pass
 2. PREFLIGHT      — the report file can be created
 3. FINGERPRINT    — workspace snapshot before the audit
 4. AUDIT          — trace every task and known issue to real code lines (read-only probes allowed)
-5. WRITE REPORT   — exactly one new report
+5. WRITE REPORT   — exactly one new report; defects outside the plan also go to BACKLOG.md (backlog-append)
 6. CENSUS + VALIDATE — every plan task covered; structure, statuses and evidence anchors verified against the code
-7. ASSERT-READONLY — nothing but the report changed
+7. ASSERT-READONLY — nothing but the report and BACKLOG.md changed
 8. NEXT ACTION    — status, counts, suggested command
 
 Fix cycle (fix / next / auto)
@@ -92,7 +92,8 @@ Code changes stay uncommitted in the working tree for your review.
 The resolver never edits the plan; never edits previous reports except the Fix Log via `mark-fix`;
 never edits code during an audit pass; never runs installers, migrations, project-wide formatters or
 git-mutating commands; never writes more than one report per pass or overwrites an existing one;
-never delegates fixes to other skills.
+never writes any other file except appended lines of `BACKLOG.md` at the repository root
+(`backlog-append`); never delegates fixes to other skills.
 
 ## Prerequisites
 

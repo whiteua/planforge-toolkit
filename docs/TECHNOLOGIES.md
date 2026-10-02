@@ -17,6 +17,10 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Visual companion | Miro/FigJam facilitation; EventStorming (Alberto Brandolini, 2013) | Real-time visual feedback during exploration |
 | Findings triage and traceability | Defect triage (IEEE 1044 anomaly classification); requirements traceability matrix | JSON review findings are validated by a CLI, verified against code, and each id is traced to a fix or to Out of Scope by a coverage gate |
 | Fidelity check | Requirements traceability; goal-question-metric (Basili, 1994) | The request is restated in one sentence at the start and compared with the spec's Goal and Out of Scope before hand-off; drift is named and asked about |
+| Chain settings decided up front | Single source of truth; configuration as code | Decisions for the whole chain and environment access are written into the spec, validated by `spec-check` and read by every later skill through one rule (`settings`) |
+| Separate read and change consent | Least privilege; change approval (ITIL change enablement) | `read=` / `write=` per environment with `run`, `task` or `deny`; production changes are never allowed for a whole run |
+| Shared append-only backlog | Product backlog (Scrum); append-only log | `backlog-append` adds one line at the end of a goal's section and verifies that every other byte is unchanged |
+| Deterministic language detection | Unicode block heuristics | `detect-lang`: Cyrillic letters over 5% of all letters → Russian; every user-facing message of every skill follows it |
 
 ---
 
@@ -26,7 +30,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 |---|---|---|
 | TDD cycle per task | Test-Driven Development (Kent Beck, 2002); Extreme Programming (1999) | Every task writes the failing test, runs it, implements, runs it again |
 | Codebase grounding | Fact-checking / citation requirements; reproducible baselines in CI | Existing symbols are cited as `path:line`, `Create:` targets must be new, and the plan header records the test baseline; `plan-check --root` verifies paths against the repository |
-| Strict size limit (10 min / 100 lines) | PSP (Watts Humphrey, 1995); INVEST criteria — "Small" (Bill Wake, 2003); Pomodoro Technique | Recursive splitting when a step exceeds the limit |
+| Strict size limit (10 min / 100 lines) with justified exceptions | PSP (Watts Humphrey, 1995); INVEST criteria — "Small" (Bill Wake, 2003); Pomodoro Technique; deviation records with a rationale (MISRA Compliance) | Recursive splitting when a task exceeds the limit; a task that cannot be split carries `**Size:** <N> lines — <reason>`, and `plan-check` fails above 150 lines without it |
 | Full code, no placeholders | Literate Programming (Donald Knuth, 1984); Jupyter Notebooks (Fernando Pérez, 2001) | Plan steps contain complete, executable code |
 | Spec Contract Preflight | Design by Contract (Bertrand Meyer, 1988); Type-system interface contracts | `brainstorm_tool.py spec-check` validates the spec before any plan is written |
 | Plan format contract check | Schema validation / linting (lint, Stephen Johnson, 1978) | `plan_tool.py plan-check` enforces the header, task headings, unique ids and task core that the executor and resolver parse |
@@ -72,6 +76,12 @@ This document maps the engineering techniques, methodologies, and prior art that
 |---|---|---|
 | 10-class taxonomy with per-class sweep | CWE (MITRE, ~2006); OWASP Top 10 (~2003); IEEE 1044 (1993) | Agent reads the plan once and checks one class at a time to prevent attention scattering |
 
+### Chain integration
+
+| Technique | Origin | How it's applied |
+|---|---|---|
+| Settings from the spec | Single source of truth | `bootstrap` returns the chain settings; preset and stop policy are taken from them without a question, and `read=run` allows read-only checks of that environment during the audit |
+
 ---
 
 ## plan-splitter
@@ -85,6 +95,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Roadmap file | Project Charter (PMBOK) | `<base>-roadmap.md` holds the dependency table and parallel groups; parts are `<base>-a.md`, `-b.md`, … |
 | Three-level verification | Three Lines of Defense (Basel Committee, ~2000s); Multi-tier code review (Google, Microsoft) | A: formal checks (`validate-all`), B: cross-validation (task coverage, origin hash), C: the agent re-reads every part for self-sufficiency and handoff |
 | Deep verification with a machine gate | Red Team / Blue Team (military, cybersecurity, ~1990s); Independent QA team; Quality Gates (SonarQube) | One `plan-iterative-revision` run audits every part in turn; `verify-status` accepts a claimed result only when the review files and part hashes prove it |
+| Task properties carried verbatim | Lossless transformation; traceability | `**External:**` and `**Size:**` lines move into the parts unchanged; the `split` setting replaces the gate in a chain |
 
 ---
 
@@ -100,7 +111,10 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Destructive operation confirmation | Terraform plan output with confirmation prompt (2014) | Irreversible actions require explicit approval |
 | Retry-first ordering with stagnation stop | Circuit breaker (Nygard, *Release It!*, 2007); bounded retry with backoff | A failed unit is retried before anything else runs; 3 attempts or the same error signature twice stops the run |
 | Drift detection on resume | Terraform state refresh / plan drift (HashiCorp); lockfile hashes (npm, Cargo) | The ledger stores the plan's SHA-256; a changed plan stops the run until the engineer decides |
-| Confirmation for external units | Change approval for production access (ITIL change enablement); least privilege | A unit marked `External` runs only after the engineer confirms it for the named environment |
+| Confirmation for external units | Change approval for production access (ITIL change enablement); least privilege; standard changes pre-approved | A unit marked `External` runs without a question only when its access is `run` in the settings or consented for the run (`consent`); `unit-begin` reports `confirmed` and the `source` of the consent, and run consents are cleared on resume |
+| Foreign-change detection | File integrity monitoring (Tripwire, 1992); expected-state comparison | `unit-begin` compares the working tree with the ledger's `expected_tree` and stops with `foreign-changes` (added, modified, deleted paths) before the next unit |
+| Per-file restore | Partial rollback; `git checkout <tree> -- <paths>` | `checkpoint-restore --paths` restores only the listed files; `--exec-dir` moves the expected tree so a retry raises no false alarm |
+| Settings drift | Terraform plan drift; lockfile hashes | The ledger stores the SHA-256 of the settings' source; a changed spec stops the run with `settings-drift` until the engineer accepts it |
 | Risk-scaled gate per unit | Risk-based testing (ISTQB) | Checkpoint, documentation-only and test-only tasks get a lighter gate than the plan tier |
 | Stop report on failure | CI/CD failure notifications (Jenkins, GitHub Actions, GitLab CI) | Structured report explains why execution halted |
 
@@ -110,7 +124,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 
 | Technique | Origin | How it's applied |
 |---|---|---|
-| Read-only audit invariant | Financial audit (centuries); Separation of Duties (SOX, PCI-DSS, ISO 27001); Security audit / penetration testing (OWASP) | An audit pass never modifies the plan or codebase |
+| Read-only audit invariant | Financial audit (centuries); Separation of Duties (SOX, PCI-DSS, ISO 27001); Security audit / penetration testing (OWASP) | An audit pass never modifies the plan or codebase; it writes only its report and appended lines of `BACKLOG.md`, and `assert-readonly` allows exactly these paths |
 | Separated fix → re-audit loop | Separation of Duties (maker–checker); PDCA cycle (Deming, 1950s); bounded retry / circuit breaker | `fix`/`auto` repair code in a separate phase under SHA-256 protection of the plan and reports; only an independent re-audit closes an issue; the loop stops on final, cycle limit (default 2), stall, or issues needing a user decision |
 | SHA-256 workspace snapshot | WORM storage (SEC Rule 17a-4, ~1990s); Reproducible Builds (Debian, ~2013); in-toto / SLSA (Google/NYU, ~2020) | Cryptographic proof that nothing changed during audit |
 | Multi-pass with memory | Regression testing with known-bug suites; SonarQube historical analysis (~2008) | Each pass remembers previously found issues |
@@ -121,6 +135,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Executor-reported marker | Reliance on the work of others (ISA 600, audit standard) | Tasks the audit cannot re-verify are closed on the executor's record and listed separately |
 | Verified evidence anchors | Citation checking; link validation | `validate-report --root` checks that every `path#Lx-Ly` on a closed task or in issue evidence points at existing lines |
 | Authoritative fix diff | Reproducible builds; before/after snapshots | The fix phase is bracketed by workspace fingerprints and `snapshot-diff` lists the changed files, which the Fix Log must account for |
+| Re-verification under a run-scope read | Reliance limited to what cannot be re-performed (ISA 500) | With `read=run`, tasks marked `External (read)` are re-checked by the audit instead of being closed as `executor-reported` |
 
 ---
 

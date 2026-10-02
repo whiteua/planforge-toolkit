@@ -32,7 +32,8 @@ def read_json(process: subprocess.CompletedProcess[str]) -> dict:
 
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="\n")
+    # write_bytes keeps "\n" as written; Path.write_text(newline=...) needs Python 3.10
+    path.write_bytes(content.encode("utf-8"))
 
 
 def write_json(path: Path, data: dict) -> None:
@@ -485,6 +486,44 @@ class VerifyRecordTests(unittest.TestCase):
             process = run_status(directory, base, baseline_path, ledger_path, stages="A b")
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
             self.assertEqual(set(read_json(process)["stages"]), {"a", "b"})
+
+
+TASK_LINES_PLAN = (
+    "# Plan\n\n### Task 1: one\n\n**External:** `db_test` (read) — select count(*)\n\n"
+    "**Size:** 140 lines — the migration and its schema test cannot be split\n\n"
+    "```markdown\n**External:** `fenced` (write) — example only\n```\n"
+)
+EXTERNAL_LINE = "**External:** `db_test` (read) — select count(*)"
+SIZE_LINE = "**Size:** 140 lines — the migration and its schema test cannot be split"
+
+
+class ValidateAllTaskLineTests(unittest.TestCase):
+    def test_task_lines_copied_verbatim_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            make_stage_dir(directory)
+            write(directory / "plan.md", TASK_LINES_PLAN)
+            write(directory / "plan-a.md", stage_text("Stage a").replace(
+                "1. Do the focused task.\n",
+                "1. Do the focused task.\n   " + EXTERNAL_LINE + "\n   " + SIZE_LINE + "\n",
+            ))
+            process = run_tool("validate-all", str(directory), "plan")
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            self.assertEqual(read_json(process)["task_lines"], {"missing": [], "original": 2})
+
+    def test_task_lines_lost_in_parts_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            make_stage_dir(directory)
+            write(directory / "plan.md", TASK_LINES_PLAN)
+            write(directory / "plan-a.md", stage_text("Stage a").replace(
+                "1. Do the focused task.\n", "1. Do the focused task.\n   " + EXTERNAL_LINE + "\n",
+            ))
+            process = run_tool("validate-all", str(directory), "plan")
+            data = read_json(process)
+            self.assertEqual(process.returncode, 1)
+            self.assertEqual(data["task_lines"]["missing"], [SIZE_LINE])
+            self.assertTrue(any("not copied verbatim" in error for error in data["errors"]))
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ class ValidatorTolerance(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as d:
             target = Path(d) / "injected-review.md"
-            target.write_text(text, encoding="utf-8", newline="\n")
+            target.write_bytes(text.encode("utf-8"))
             p = validate(target)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertTrue(json.loads(p.stdout)["valid"])

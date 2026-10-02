@@ -58,7 +58,12 @@ Run `lenses` passes; each one has a focus:
 
 ## Step 3: Code cross-check (mandatory)
 
-A plan that is not checked against the code is fiction. The cross-check means reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action.
+A plan that is not checked against the code is fiction. The cross-check means reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action. Pre-approved reads (`read=run` in the spec's `> Environment:` line, production included) cover the plan's steps and the read-only checks of plan-iterative-revision and plan-resolver; changes on production are never pre-approved.
+
+The rights come from `B.settings.environments`. On an environment with `read=run` the cross-check
+may run read-only queries (no writes, no migrations, no project script that changes state) and
+cites the query and its result in `code_cross_check`. With `read=task`, `read=deny` or no rights,
+the claim stays `ambiguous` unless the user allows the check.
 
 Depth depends on `rigor`:
 
@@ -84,10 +89,11 @@ Explore prompt for a large module:
 > methods with signatures, related DB tables, current behavior in 3-5 bullets. Do not edit anything.
 
 Environments: a step that runs on an environment not listed under `**Environments:**` in the plan
-header, or on production when only a test environment is permitted, is a `blocker` of category
-`ops`, even when the command itself is harmless. A "user decision" stated in the plan without the
-user's quoted words is `major`. Differences from the spec listed under `**Deviations from spec:**`
-are agreed; unlisted ones are issues.
+header or in the spec's `> Environment:` lines (`B.settings.environments`), or on production when
+only a test environment is permitted, is a `blocker` of category `ops`, even when the command
+itself is harmless. Pre-approved reads (`read=run` in the spec's `> Environment:` line, production included) cover the plan's steps and the read-only checks of plan-iterative-revision and plan-resolver; changes on production are never pre-approved.
+A "user decision" stated in the plan without the user's quoted words is `major`. Differences from
+the spec listed under `**Deviations from spec:**` are agreed; unlisted ones are issues.
 
 Every checked claim gets one status: `verified`, `not found`, `ambiguous`, `not applicable`.
 `not found` and `ambiguous` usually become issues when the plan depends on the object.

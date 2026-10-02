@@ -18,10 +18,12 @@ Exit codes: 0 ok, 1 contract violation, 2 usage or I/O error.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -57,12 +59,52 @@ ENVIRONMENTS_RE = re.compile(r"^\*\*Environments:\*\*\s*$")
 ENV_ENTRY_RE = re.compile(r"^\s*[-*]\s+`(?P<name>[^`]+)`(?P<rest>.*)$")
 ENV_QUOTE_RE = re.compile(r"\"[^\"]+\"|«[^»]+»|“[^”]+”")
 EXTERNAL_RE = re.compile(r"^\*\*External:\*\*\s*(?P<rest>.*)$")
+# Access after the name: **External:** `dev_db` (write) — what the task does there
+EXTERNAL_ACCESS_RE = re.compile(r"^`[^`]+`\s*\((?P<access>read|write)\)")
 BACKTICKED_RE = re.compile(r"`([^`]+)`")
 MAX_CODE_LINES = 100
+MAX_CODE_LINES_ERROR = 150
+# Task line:  **Size:** 140 lines — why the task cannot be split
+SIZE_PREFIX_RE = re.compile(r"^\*\*Size:\*\*")
+SIZE_RE = re.compile(r"^\*\*Size:\*\*\s*(\d+)\s+lines\s*[—-]\s*\S")
+# Same Cyrillic range and threshold as brainstorm_tool.py, executor_tool.py, splitter_tool.py
+# and resolver_tool.py.
+CYRILLIC_RE = re.compile("[Ѐ-ӿ]")
+LANG_THRESHOLD = 0.05
 
 
 class InputError(Exception):
     """Unreadable input (exit 2)."""
+
+
+SETTINGS_MISSING = "settings-source-missing"
+
+
+def _load_brainstorm_tool():
+    path = Path(__file__).resolve().parents[2] / "plan-brainstorming" / "scripts" / "brainstorm_tool.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("brainstorm_tool", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _plan_settings(plan_path: Optional[str]) -> Tuple[Optional[Dict[str, Any]], List[str], List[str]]:
+    """Chain settings by the shared reading rule: the plan header if it has settings, else
+    the spec at **Spec:** (brainstorm_tool.resolve_settings). Returns (settings, errors,
+    warnings). Text-only calls (no path) resolve nothing. A missing settings source is a
+    warning here; check_plan makes it an error when the plan has External lines."""
+    if plan_path is None:
+        return None, [], []
+    tool = _load_brainstorm_tool()
+    if tool is None:
+        return None, [], ["plan-brainstorming not installed alongside"]
+    settings = tool.resolve_settings(plan_path)
+    errors = [f"settings: {e}" for e in settings["errors"] if not e.startswith(SETTINGS_MISSING)]
+    warnings = [f"settings: {e}" for e in settings["errors"] if e.startswith(SETTINGS_MISSING)]
+    warnings.extend(f"settings: {w}" for w in settings["warnings"])
+    return settings, errors, warnings
 
 
 def _read(path: str) -> str:
@@ -109,7 +151,16 @@ def _split_lines(text: str) -> List[Tuple[int, str, bool]]:
     return result
 
 
-def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
+def detect_lang_text(text: str) -> str:
+    """`ru` when more than 5% of the letters are Cyrillic, otherwise `en` (no letters -> `en`)."""
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return "en"
+    cyrillic = sum(1 for ch in letters if CYRILLIC_RE.match(ch))
+    return "ru" if cyrillic / len(letters) > LANG_THRESHOLD else "en"
+
+
+def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] = None) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
     lines = _split_lines(text)
@@ -149,6 +200,16 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
                 )
         elif line.strip() and not line.startswith(" "):
             in_env_block = False
+    # Chain settings by the shared reading rule (plan header, else the spec at **Spec:**).
+    # Their environments join the header's list; `rights` maps a name to its read/write.
+    settings, settings_errors, settings_warnings = _plan_settings(plan_path)
+    errors.extend(settings_errors)
+    warnings.extend(settings_warnings)
+    rights: Dict[str, Dict[str, Any]] = {}
+    for env in (settings or {}).get("environments", []):
+        rights[env["name"]] = env
+        if env["name"] not in environments:
+            environments.append(env["name"])
 
     if not any(not fenced and line.startswith("# ") for _, line, fenced in lines):
         errors.append("missing plan title ('# <Feature> Implementation Plan')")
@@ -207,6 +268,7 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
     # a file an earlier task creates.
     line_counts: Dict[str, Optional[int]] = {}
     created: set = set()
+    oversized: List[str] = []
     for index, task in enumerate(tasks):
         start = task["line"]
         end = tasks[index + 1]["line"] if index + 1 < len(tasks) else None
@@ -253,8 +315,24 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
                     declared.append(name)
                     if name not in environments:
                         errors.append(
-                            f"line {n}: environment `{name}` is not listed under '**Environments:**' in the plan header"
+                            f"line {n}: environment `{name}` is not listed in the settings "
+                            "(plan header '**Environments:**' or the spec's '> Environment:' lines)"
                         )
+                    env = rights.get(name)
+                    if env is None:
+                        continue
+                    access_match = EXTERNAL_ACCESS_RE.match(external.group("rest").strip())
+                    access = access_match.group("access") if access_match else None
+                    if access is None:
+                        if env.get("read") or env.get("write"):
+                            errors.append(
+                                f"line {n}: '**External:** `{name}`' needs the access type (read) or (write): "
+                                "the environment has read/write rights"
+                            )
+                        else:
+                            warnings.append(f"line {n}: '**External:** `{name}`' has no access type (read) or (write)")
+                    elif env.get(access) == "deny":
+                        errors.append(f"line {n}: `{name}` ({access}) is not allowed: {access}=deny in the settings")
         task["external"] = declared
         body_text = "\n".join(line for _, line, _ in body)
         for name in environments:
@@ -310,18 +388,52 @@ def check_plan(text: str, root: Optional[str] = None) -> Dict[str, Any]:
                         continue
                     warnings.append(f"line {n}: referenced path not found under root: {rel}")
 
+        # Size: a task over the limit is split or justified with '**Size:** <N> lines — <reason>'.
+        sized = False
+        for n, line, fenced in body:
+            if fenced or not SIZE_PREFIX_RE.match(line):
+                continue
+            if SIZE_RE.match(line):
+                sized = True
+            else:
+                errors.append(f"line {n}: malformed size line, expected '**Size:** <N> lines — <reason>': {line.strip()}")
+        if sized:
+            oversized.append(task["id"])
         code_lines = sum(1 for _, line, fenced in body if fenced and not FENCE_RE.match(line))
-        if code_lines > MAX_CODE_LINES:
+        if code_lines > MAX_CODE_LINES_ERROR and not sized:
+            errors.append(
+                f"{label}: {code_lines} lines of code (limit {MAX_CODE_LINES}, error above {MAX_CODE_LINES_ERROR}) "
+                "without a '**Size:** <N> lines — <reason>' line"
+            )
+        elif code_lines > MAX_CODE_LINES and not sized:
             warnings.append(f"{label}: {code_lines} lines of code in steps; check the 100-lines-of-new-code limit")
 
+    # Dialogue language: the plan text outside code fences.
+    lang = detect_lang_text("\n".join(line for _, line, fenced in lines if not fenced))
+    # External lines need settings: without the spec and without header settings nothing
+    # says which environments the user permitted. Same source as the executor (Task 43):
+    # resolve_settings could not read its source and found no environments.
+    settings_missing = settings is not None and not settings["environments"] and any(
+        e.startswith(SETTINGS_MISSING) for e in settings["errors"]
+    )
+    if settings_missing and any(task["external"] for task in tasks):
+        errors.append(
+            "plan has '**External:**' lines but settings are unavailable: the spec at '**Spec:**' "
+            "cannot be read and the plan header has no settings"
+        )
     return {
         "ok": not errors,
         "spec": spec,
         "tier": tier,
+        "lang": lang,
         "environments": environments,
         "tasks": [{k: task.get(k, []) for k in ("id", "title", "checkpoint", "external")} for task in tasks],
+        "settings": settings,
+        "task_count": len(tasks),
+        "plan_bytes": len(text.encode("utf-8")),
         "errors": errors,
         "warnings": warnings,
+        "oversized": oversized,
     }
 
 
@@ -332,7 +444,7 @@ def cmd_plan_path(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 def cmd_plan_check(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     if args.root is not None and not os.path.isdir(args.root):
         raise InputError(f"root is not a directory: {args.root}")
-    result = check_plan(_read(args.plan), args.root)
+    result = check_plan(_read(args.plan), args.root, args.plan)
     return (0 if result["ok"] else 1), result
 
 

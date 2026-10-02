@@ -29,6 +29,14 @@ the part files next to the source plan and **never edits the plan itself**.
 - `verify_depth`: `quick` | `standard` (default) | `deep`: the `preset` passed to
   `plan-iterative-revision`.
 - `verify_mode`: `full-cycle` (default) | `audit-only`: whether verification may edit the parts.
+- Chain settings: `S` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" settings PLAN`
+  (the plan header, else the spec named by `**Spec:**`). `S.chain.split` decides step 2:
+  `always` skips the gate, `never` means the splitter is not needed, `auto` runs the gate. In a
+  run without a confirmation channel (a chain run, a subagent call) `verify` defaults to `none`:
+  plan-iterative-revision has already audited the whole plan. An interactive run keeps
+  `verify=ask` and asks, whatever `S.chain_explicit` says; an explicit `verify` argument always
+  wins. Without `plan-brainstorming` next to this skill, or with `S.ok` false, run the gate and
+  keep `verify` as given.
 
 Derived: `DIR` = the plan's directory; `BASE` = file name without `.md`;
 `LANG` = `TOOL detect-lang PLAN` (`ru` when more than 5% of letters are Cyrillic, else `en`).
@@ -67,17 +75,24 @@ parse the same ids.
    verify JSONs, and the review/completion files of the verified parts.
 9. A verified part is "done" only when `TOOL verify-status` exits 0. `missing` → one re-dispatch,
    then stop; `inconsistent` → stop immediately; never downgrade to a warning.
+10. Every `**External:**` and `**Size:**` line of a source task is copied verbatim into the part
+    task that holds it (references/STAGE-FORMAT.md §6); `validate-all` fails when one is missing.
+    The part header does not change.
 
 ## Algorithm
 
 ```
 1. BOOTSTRAP
    LANG = TOOL detect-lang PLAN
+   S = brainstorm_tool.py settings PLAN   # Inputs, "Chain settings"
    P = TOOL preflight DIR BASE     # writable? existing split artifacts?
    if not P.writable: stop and report
 
 2. GATE DECISION (references/GATE-DECISION.md)
-   Score the 5 factors, tell the user the verdict.
+   S.chain.split == always → verdict "split" without scoring; say it comes from the settings.
+   S.chain.split == never  → the splitter is not needed: without a confirmation channel exit
+                             without files; interactively ask whether to split anyway.
+   otherwise: score the 5 factors, tell the user the verdict.
    "do not split" → print assets/gate-pass.<LANG>.md and exit (a normal outcome).
 
 3. ANALYSIS (references/STAGE-FORMAT.md §4-5, references/ROADMAP-FORMAT.md)
@@ -95,15 +110,16 @@ parse the same ids.
 
 6. VERIFY (three levels, at most 3 rounds)
    A/B: TOOL validate-all DIR BASE   # files, sections, DAG, depends, groups, task coverage,
-                                     # original hash; also run TOOL validate-stage per part
+                                     # External/Size lines copied verbatim, original hash;
+                                     # also run TOOL validate-stage per part
                                      # for the granularity warning (> 15 tasks)
    C:   re-read every part: self-sufficiency, context, handoff (outputs of X cover the
         inputs of every Y that depends on X), consistency with the roadmap.
    Fix defects and repeat; after 3 failed rounds exit with a warning, files kept.
 
 7. DONE NOTICE / VERIFY CHOICE
-   Scope comes from `verify`; only when it is `ask` (interactive), print
-   assets/verify-prompt.<LANG>.md and ask.
+   Scope comes from `verify` (`none` by default without a confirmation channel, see Inputs);
+   only when it is `ask` (interactive), print assets/verify-prompt.<LANG>.md and ask.
    scope = none → print assets/completion.<LANG>.md and exit.
    Otherwise do not announce "done" for the selected parts before step 8 passes.
 
@@ -116,6 +132,19 @@ parse the same ids.
    exit 0 → (full-cycle: re-run validate-all, parts were edited) → print assets/verify-summary.<LANG>.md, then completion.
    missing → re-dispatch those parts once and repeat; still missing or any inconsistent → stop.
 ```
+
+## Language
+
+**Dialogue language.** Everything the user sees is in the language of the primary task (the
+goal, idea or findings in `plan-brainstorming`, the plan in every later skill): questions, option
+labels and option descriptions in a question UI, status lines, confirmations, human gates, final
+summaries and stop reports. Only tokens that parsers match stay in English: `### Task N:`,
+`**Files:**`, `> Tier:`, command names and JSON field names. Sample phrases quoted in these
+instructions ("Spec written to …", "MAX review passes done …", "I'm using the plan-writing
+skill …") are templates: say them in the dialogue language, not verbatim. The language is
+detected, not guessed: `ru` when more than 5% of the letters are Cyrillic, otherwise `en`.
+
+In this skill: `LANG` from `TOOL detect-lang PLAN` (see Inputs).
 
 ## References
 

@@ -29,12 +29,20 @@ What the hand-off adds is read from the executor's ledger (`exec_dir`), not from
   `## Additional Context`; they are not `‼️ deviates`.
 - **Checkpoint and verification tasks** leave no code: re-run the task's command when it is a
   permitted read-only probe and close the task with `evidence_probe: <command> → <result>`.
+- **Settings**: `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" settings MASTER_PLAN`
+  (`resolve_settings`: the plan header, else the spec named by the master plan's `**Spec:**`)
+  gives the environments and their rights. Without `plan-brainstorming` next to this skill, or
+  with `ok: false`, no environment is pre-approved.
 - **Tasks that need an external system**: the audit does not go there without permission (Probes).
-  Close them on the executor's recorded result with `evidence_probe: …` and
-  `verification: executor-reported`, and list them in the human gate as not re-verified.
-- **Environments**: a step that ran on an environment the plan does not list with the user's
-  quoted permission, or on production when only a test environment is permitted, is an issue
-  (`ops`, `high`), even when its result was correct.
+  A task whose `**External:**` line says `(read)` on an environment with `read=run` is
+  re-verified by the audit itself with a read-only query and closed with
+  `evidence_probe: <query> → <result>`, without `verification: executor-reported`. Every other
+  external task (`(write)`, `read=task` or `read=deny`, no access kind) is closed on the
+  executor's recorded result with `evidence_probe: …` and `verification: executor-reported`, and
+  listed in the human gate as not re-verified.
+- **Environments**: a step that ran on an environment the plan or its spec does not list with the
+  user's quoted permission, or on production when only a test environment is permitted, is an
+  issue (`ops`, `high`), even when its result was correct.
 
 ## Subsequent pass (`subsequent`)
 
@@ -79,7 +87,7 @@ cross-reference the covering test).
 
 ## Probes
 
-Probes are extra checks, allowed only when read-only for the project. A probe is reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action.
+Probes are extra checks, allowed only when read-only for the project. A probe is reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action. Pre-approved reads (`read=run` in the spec's `> Environment:` line, production included) cover the plan's steps and the read-only checks of plan-iterative-revision and plan-resolver; changes on production are never pre-approved.
 
 - Allowed: `python -m unittest`, `pytest`, `npm test -- --runInBand`, `go test`, `cargo test`,
   `dotnet test` when they write no tracked or generated files; static checks (`py_compile`,
@@ -114,3 +122,21 @@ Categories: `logic`, `contract`, `code`, `tests`, `security`, `perf`, `ops`, `db
 Every new issue names the affected task or phase, has evidence with files and lines or an honest
 `not found`, says why it breaks the plan, gives an action-oriented recommendation, and carries a
 severity that is not inflated.
+
+## Defects outside the plan
+
+A real defect noticed while tracing that no plan task covers is not an issue and does not change
+any status. Describe it in `## Additional Context` (path, line, what breaks) and append it to the
+shared `BACKLOG.md`:
+
+`python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" backlog-append <root>
+--section <S> --source "plan-resolver, <plan file name>" --item "<path:line — summary>" --lang <bootstrap.language>`
+
+- `<root>` = `git -C <PLAN_DIR> rev-parse --show-toplevel`; outside git, the current working directory.
+- `<S>` = `backlog` of `brainstorm_tool.py settings <MASTER_PLAN>`; none → the plan file name
+  without `.md` and `-impl` (the executor's rule).
+- The source names the plan, not the report, so the next pass does not duplicate the line
+  (`action: exists`).
+- The script is missing or exits `1`: append the line by hand at the end of section `<S>` in the
+  same format (`- [ ] <item> — plan-resolver, <plan file name>, <YYYY-MM-DD>`), change nothing
+  else, and say so in the human gate.

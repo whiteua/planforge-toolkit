@@ -43,11 +43,14 @@ Each skill is an independent module with a well-defined input, output, and invar
 | **Spec** | Design document — *what* to build and *why*. Produced by `plan-brainstorming`. |
 | **Plan** | Implementation document — *how* to build it, step by step. Produced by `plan-writing`. |
 | **Part** | Self-contained slice of a large plan (`<base>-a.md`, `<base>-b.md`, …). Produced by `plan-splitter`. |
-| **Task** | Plan unit that fits ~10 minutes or ~100 lines of new code. |
+| **Task** | Plan unit that fits ~10 minutes or ~100 lines of new code; a task that cannot be split carries a `**Size:**` line with the reason. |
 | **Step** | Single action inside a task (2–5 minutes). |
 | **Ledger** | Progress tracking file (`state.json`) maintained by `plan-executor`, stored outside the repository. |
 | **Review** | Audit file produced by `plan-iterative-revision` listing errors in the plan. |
 | **Report** | Audit file produced by `plan-resolver` listing implementation vs. plan findings. |
+| **Chain settings** | Decisions for the whole chain (`split`, `revision`, `stop`, `resolver`), external environments with read/write rights and the backlog section. Recorded in the spec by `plan-brainstorming`; later skills read them instead of asking. |
+| **Backlog** | `BACKLOG.md` at the repository root: what the skills deferred, one section per goal. Only you check items off. |
+| **Dialogue language** | The language of your first task statement. Every question, option and summary of every skill uses it. |
 
 ---
 
@@ -95,6 +98,7 @@ plan-iterative-revision  — use at any stage to clean up a plan before executio
 ```
 /plan-brainstorming <goal-file-or-inline-description>
 /plan-brainstorming <findings.json>   # JSON list of code-review findings
+/plan-brainstorming BACKLOG.md        # unchecked items of the shared backlog become the task
 ```
 
 With a findings JSON (`file`, `line`, `summary`, `failure_scenario` per item), the skill validates the list, checks each finding against the code, and writes a fix spec. The spec traces every finding id to a fix or to Out of Scope.
@@ -110,7 +114,17 @@ With a findings JSON (`file`, `line`, `summary`, `failure_scenario` per item), t
 8. Writes the spec file, checks the contract with `brainstorm_tool.py spec-check`, runs the self-review including a fidelity check against your original request
 9. Hands off to `plan-writing` after you approve the spec (the spec is not committed)
 
-The dialogue and the spec body follow the language of your input; section headings stay in English.
+Every message you see (questions, answer options, summaries) and the spec body follow the language of your input (goal file, findings JSON or message; `brainstorm_tool.py detect-lang`); section headings and format tokens stay in English. The same rule holds in every skill of the pipeline.
+
+**Chain settings.** Before writing the spec, the skill proposes in one message the settings the rest of the chain will use, and you confirm or edit them. They are written above `# Goal`, next to `> Tier:`:
+
+- `> Chain: split=auto; revision=deep; stop=pragmatic; resolver=audit` — `split` is `auto|always|never`, `revision` is `quick|standard|deep` (default: the tier), `stop` is `pragmatic|strict`, `resolver` is `audit|auto|skip`.
+- `` > Environment: `app_test` (test) — read=run, write=task — "question — your answer" (date) `` — one line per external system. Changes are asked first and separately from reading: `run` allows the access for the whole run, `task` asks before each task, `deny` forbids it. Production changes are only `task` or `deny`.
+- `> Backlog: <section>` — the section of `BACKLOG.md` for this goal.
+
+`spec-check` rejects unknown keys, an environment line without `read=` or `write=`, `write=run` on prod, and interface labels such as "(Recommended)" in the quote.
+
+**Backlog.** After you approve the spec, its Out of Scope items (and, when one task is split into several specs, the spec map) are appended to `BACKLOG.md` at the repository root, in the section of this goal. Several specs of one goal are numbered `<root>-1-spec.md`, `<root>-2-spec.md` unless you ask for descriptive names.
 
 **Output:** `*-spec.md` in the same directory as the goal file.
 
@@ -122,7 +136,7 @@ The dialogue and the spec body follow the language of your input; section headin
 | Standard | Feature touching 2–5 components | Short paragraph per section |
 | Deep | New subsystem, external integrations, complex failure modes | Full paragraphs, tables |
 
-> **Dependency:** `plan-writing` reads contract files from this skill. Both must be installed in the same parent directory.
+> **Dependency:** `plan-writing` reads contract files from this skill, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through its `brainstorm_tool.py`; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it. Install them in the same parent directory.
 
 ---
 
@@ -146,6 +160,10 @@ Each task in the plan specifies:
 
 Plans contain no `git commit` steps; committing the result is up to you. An optional `### Task N: Checkpoint — …` task smoke-tests a group of tasks (Standard/Deep).
 
+Settings are not copied into the plan: `plan-check` reads them from the spec named by `**Spec:**`. For an older spec without settings, the skill asks as before and records the answers in the plan header (`**Chain:**`, `**Environments:**` with `read=`/`write=` rights, `**Backlog:**`). Tasks on external systems carry `` **External:** `name` (read|write) — what ``, and `plan-check` rejects an access the environment denies.
+
+**Task size.** A task over 100 lines of code is split; if it cannot be split, it carries `**Size:** <N> lines — <reason>`. Without that line `plan-check` warns above 100 lines and fails above 150. With `split=auto` and more than 15 tasks, the hand-off recommends `plan-splitter` first, with the task count and the plan size.
+
 ---
 
 ### plan-splitter
@@ -160,6 +178,8 @@ Plans contain no `git commit` steps; committing the result is up to you. An opti
 With `verify`, the skill runs `plan-iterative-revision` once over the roadmap (every selected part in turn, one review trail each) and accepts the result only through the machine gate `verify-status`. Requires `plan-iterative-revision` installed next to it.
 
 **Gate decision:** The skill evaluates 5 factors and may decide the plan does NOT need splitting. This is a valid outcome — you'll get a `gate-pass` notice and can proceed directly to `plan-executor`.
+
+In a chain, the `split` setting decides: `always` skips the gate, `never` means no split. `**External:**` lines of tasks are copied into the parts verbatim.
 
 **Output** (alongside the original plan, which is never modified):
 
@@ -187,9 +207,9 @@ With `verify`, the skill runs `plan-iterative-revision` once over the roadmap (e
 | Whole plan (with `### Task N:` headings) | Task headings outside code blocks | Executes tasks strictly in order; a failed task is retried before anything else |
 
 **Phases:**
-1. **BOOTSTRAP** — `ledger-init <exec_dir> <plan> --workdir <repo>`: parse units, create or resume the ledger in `exec_dir` (outside the repository or git-ignored; stops on a dirty repo or a changed plan/part), baseline snapshot
-2. **LOOP** — `unit-begin` (unit text + files) → execute → gate → `unit-finish` (snapshot + done, or retry/stop)
-3. **FINALIZE** — propose `plan-resolver` (audit, or `auto` to audit and fix)
+1. **BOOTSTRAP** — `ledger-init <exec_dir> <plan> --workdir <repo>`: parse units, create or resume the ledger in `exec_dir` (outside the repository or git-ignored; stops on a dirty repo, on a changed plan/part (`plan-drift`) or on changed chain settings (`settings-drift`, continue with `--accept-drift`)), store the chain settings and the expected file tree, baseline snapshot
+2. **LOOP** — `unit-begin` (checks for files changed since the last unit, returns the unit text, files and external accesses) → execute → gate → `unit-finish` (snapshot + done, or retry/stop)
+3. **FINALIZE** — findings outside the plan go to `BACKLOG.md`; `plan-resolver` is proposed (audit, or `auto` to audit and fix), or the `resolver=` setting is announced instead of asked
 
 **Invariants:**
 - Never edits source plan or part files.
@@ -197,9 +217,10 @@ With `verify`, the skill runs `plan-iterative-revision` once over the roadmap (e
 - Nothing is committed to your branch: snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`; the final commit is yours.
 - Destructive operations (restore) require explicit engineer confirmation.
 - A gate cannot pass silently when checks are absent.
-- A task marked `**External:** <environment>` runs only after you confirm it.
+- A task marked `` **External:** `env` (read|write) `` runs without a question only when that access is `run` in the settings or you allowed it for this run (`consent`); `task` asks "this task only / the whole run / stop", `deny` stops, and a run without a confirmation channel stops with a report. Consents given during a run are cleared when the run resumes.
+- Files changed between tasks by someone else are reported (`foreign-changes`) before the next task starts: accept them (`accept-changes`), restore those files (`checkpoint-restore --paths … --exec-dir …`), or stop. A run without a confirmation channel stops with the list.
 
-The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent tells you the path at the start. At the end it shows what the run changed (`run-diff`, separate from work that was uncommitted before) and writes defects it noticed but did not fix to `<plan>-followups.json`, which `plan-brainstorming` accepts as input.
+The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent tells you the path at the start. At the end it shows what the run changed (`run-diff`, separate from work that was uncommitted before) and appends defects it noticed but did not fix to `BACKLOG.md` (section from the `Backlog` setting, else the plan name without `-impl`) and to `<plan>-followups.json`, which `plan-brainstorming` accepts as input.
 
 **Prerequisites:** Python ≥ 3.8 in PATH.
 
@@ -235,6 +256,8 @@ The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent t
 - Only nits remain (`pragmatic` policy) → stop
 
 Stop decisions use only the reviews of the current run.
+
+In a chain, the preset and the stop policy come from the `Chain` setting of the spec and are not asked; a run without a confirmation channel stops at the iteration limit. A read allowed for the whole run (`read=run`) lets the audit check that environment, read-only.
 
 **Output:** `<plan-basename>-review-N.md` per iteration; `<plan-basename>-completion.md` on convergence.
 
@@ -273,7 +296,7 @@ In audit mode, always provide the full list of previous reports for delta analys
 | ‼️ | Deviates from the plan |
 | `not-applicable` | Explanatory item, nothing to implement |
 
-**Invariants:** The resolver never edits the plan. An audit pass never edits code or previous reports and creates exactly one report, validated with `validate-report --root` (structure, statuses, anchors pointing at real lines) and `task-census` (every plan task covered). The fix phase edits code only; previous reports change only through the Fix Log (`mark-fix`).
+**Invariants:** The resolver never edits the plan. An audit pass never edits code or previous reports and creates exactly one report (plus appended lines in `BACKLOG.md` for defects outside the plan; `assert-readonly` allows only these two paths), validated with `validate-report --root` (structure, statuses, anchors pointing at real lines) and `task-census` (every plan task covered). The fix phase edits code only; previous reports change only through the Fix Log (`mark-fix`). With `read=run` in the settings, tasks marked `External (read)` are re-checked by the audit itself instead of being closed on the executor's record.
 
 **Prerequisites:** Python ≥ 3.8 in PATH.
 
@@ -457,7 +480,7 @@ for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-re
 done
 ```
 
-> **Note:** `plan-writing` reads contract files from `plan-brainstorming`. Both must be installed in the **same parent directory**.
+> **Note:** `plan-writing` reads contract files from `plan-brainstorming`, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through it; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it. Install them in the **same parent directory**.
 
 ---
 
@@ -512,7 +535,11 @@ done
 
 ### External systems
 
-No skill reaches a database, API or remote service without your explicit permission for a named environment. The permission is not widened to other environments, and an existing project script aimed at production is not permission. A plan lists the permitted environments in its header with your words quoted, marks the tasks that use them with `**External:**`, and the executor asks before each of them. The audits flag a step that ran somewhere it was not permitted, and mark tasks they could not re-verify as closed on the executor's report.
+No skill reaches a database, API or remote service without your explicit permission for a named environment, given separately for reading and for changes (`read=` / `write=`: `run`, `task` or `deny`). The permission is not widened to other environments, production changes are never allowed for a whole run, and an existing project script aimed at production is not permission. The spec lists the environments with your words quoted, tasks that use them are marked `**External:**` with `(read)` or `(write)`, and the executor asks before each of them unless that access is allowed for the whole run. The audits flag a step that ran somewhere it was not permitted; a read allowed for the run lets them re-check such tasks themselves.
+
+### Next cycle from the backlog
+
+`BACKLOG.md` at the repository root collects Out of Scope items, the executor's findings and the resolver's defects outside the plan, one section per goal; your own notes go into `My notes` (`Свои заметки`), which the skills never touch. Check items off yourself; `/plan-brainstorming BACKLOG.md` starts the next cycle from the unchecked ones.
 
 ### Version control
 
@@ -525,6 +552,8 @@ No skill commits on your branch: specs, plans, reviews, roadmaps and parts are w
 | Pattern | Produced by | Description |
 |---|---|---|
 | `<base>-spec.md` | `plan-brainstorming` | Design spec |
+| `<root>-1-spec.md`, `<root>-2-spec.md`, … | `plan-brainstorming` | Several specs of one goal |
+| `BACKLOG.md` (repository root) | `plan-brainstorming`, `plan-executor`, `plan-resolver` | Shared backlog; skills only append |
 | `<base>-impl.md` | `plan-writing` | Implementation plan |
 | `<base>-roadmap.md` | `plan-splitter` | Part roadmap |
 | `<base>-a.md`, `<base>-b.md`, … | `plan-splitter` | Individual part |
@@ -547,3 +576,7 @@ No skill commits on your branch: specs, plans, reviews, roadmaps and parts are w
 | `plan-resolver`: `anchor file not found` / `beyond end of file` | The report cites code that is not there | The audit must cite real lines; fix the report |
 | `plan-resolver` `auto` stops with ask-user / stop-stalled | Issues need a decision, or a cycle closed nothing | Answer the questions or fix by hand, then `/plan-resolver next` |
 | `plan-writing` cannot find contract files | `plan-brainstorming` not installed in same directory | Install both skills side-by-side |
+| `plan-check`: `lines of code (limit 100, error above 150)` | A task is too large and has no justification | Split the task, or add `**Size:** <N> lines — <reason>` |
+| `plan-executor` stops with `foreign-changes` | Files changed between tasks outside the run | Accept them, restore the listed files, or stop |
+| `plan-executor` stops with `settings-drift` | The spec (or plan header) with the settings changed since the last session | Check the changed keys, then resume with `--accept-drift` |
+| `spec-check` / `plan-check` reject `write=run` | Production changes cannot be allowed for a whole run | Use `write=task` or `write=deny` |

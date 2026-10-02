@@ -41,6 +41,46 @@ recognised). It is metadata, not a heading. `plan-brainstorming` writes the conf
 `plan-writing` reads it and defaults to Standard when it is missing or unknown
 (`../../plan-writing/references/task-tiers.md`).
 
+## Chain, Environment and Backlog lines
+
+Next to the Tier line, above `# Goal`, the spec records the decisions the rest of the chain
+would otherwise ask about. `plan-brainstorming` writes them after the user confirmed them;
+`spec-check` validates them and returns them as `chain`, `environments` and `backlog`. Format
+tokens are English; quotes are in the language of the dialogue.
+
+- `> Chain: split=auto; revision=deep; stop=pragmatic; resolver=audit` — `key=value` pairs
+  separated by `;`, in any order. An unknown key or value is an error. A missing key takes its
+  default:
+
+| Key | Values | Default | Replaces |
+|---|---|---|---|
+| `split` | `auto` / `always` / `never` | `auto` (the splitter's gate decides) | the "Which step?" question after the plan |
+| `revision` | `quick` / `standard` / `deep` | the tier: Quick → `quick`, Standard → `standard`, Deep → `deep` | the preset confirmation of `plan-iterative-revision` |
+| `stop` | `pragmatic` / `strict` | `pragmatic` | the stop-policy confirmation |
+| `resolver` | `audit` / `auto` / `skip` | `audit` | the choice offered after execution |
+
+- `` > Environment: `app_test` (test) — read=run, write=run — "Tests and migrations on app_test? — Yes, app_test only" (2026-10-01) ``
+  — one line per external system: the name in backticks; the kind `test` or `prod`; both
+  `read=` and `write=`, each `run` (for the whole run), `task` (ask before each task) or `deny`
+  (forbidden); the quote; the date. The dash may be `—` or `-`; the quote may use `"…"`, `«…»`
+  or `“…”`.
+  - `prod` with `write=run` is an error: changes on prod are `task` or `deny` only. `read=run` on
+    prod is allowed when the user's answer says exactly that.
+  - The quote is a short question and the user's answer, in the user's words. Interface markers
+    that a question UI adds to an option (`(Recommended)`, `(рекомендую)`) are not the user's
+    words and are an error.
+  - A line without `read=` or `write=` is an error: a spec has no old form.
+- `> Backlog: <section name>` — the section of `BACKLOG.md` for this goal.
+
+**Reading rule.** The spec is the single source of these settings; the plan does not copy them.
+Skills read them with `brainstorm_tool.py settings <file>` (or `resolve_settings`, loaded as a
+module): a roadmap or a part follows its `> Source:` / `> Источник:` link to the master plan; a
+plan uses settings in its own header when present, else the spec named by `**Spec:**`; a spec
+reads its own lines. Settings in a plan header (`**Chain:**`, `**Environments:**` with rights,
+`**Backlog:**`) exist only for an old spec without these lines: the spec is never rewritten
+(hand-off rule 3), so `plan-writing` asks and records the answers there. A missing `**Spec:**`
+or `Source` target gives `ok: false` and `settings-source-missing: <path>`.
+
 ## Unverified claims
 
 A claim about the behaviour of an external system (database, API, service) is either verified
@@ -52,7 +92,11 @@ or designed around:
   line "Verified during implementation: <claim> — <which test, on which permitted environment>".
 
 Either way `## Open Questions` stays empty: this is a decision with a planned check, not an
-open question. Environments the user permitted are named in the spec with the user's words.
+open question. Environments the user permitted are recorded as `> Environment:` lines with
+separate read and write rights and the user's words (see above). These rights cover the plan's
+steps and the audit checks of `plan-iterative-revision` and `plan-resolver`. They do not cover
+the investigation in `plan-brainstorming`: it happens before the spec exists, so every check on
+an external system there still needs the user's explicit permission.
 
 ## Artifacts and naming
 
@@ -62,12 +106,32 @@ open question. Environments the user permitted are named in the spec with the us
 | spec | `<plan-root>-spec.md`, next to the goal file | `plan-brainstorming` |
 | plan | `<plan-root>-impl.md`, same directory (`plan_tool.py plan-path`) | `plan-writing` |
 | execution result | code in the working tree; the engineer commits | `plan-executor` |
+| backlog | `BACKLOG.md` at the repository root (`git rev-parse --show-toplevel` of the spec's or plan's directory; outside git the working directory) | `plan-brainstorming` (format, `backlog-append`, `backlog-parse`); writers: `plan-brainstorming`, `plan-executor`, `plan-resolver` |
 
 `<plan-root>` = the goal file name without extension and without any descriptive suffix after
 the numeric segment: `plan01.md` → `plan01-spec.md`; `plan02-goal.md` → `plan02-spec.md`;
 `superplan03-abstract.md` → `superplan03-spec.md`; `review01.json` → `review01-spec.md`. A goal
 file without a numeric segment keeps its whole stem (`goal.md` → `goal-spec.md`). Inline input has
 no file: ask for the path and recommend a default. A user preference overrides the default.
+
+Several specs of one goal (decomposition) take a numeric suffix by default:
+`values-fix-1-spec.md`, `values-fix-2-spec.md`, … (plans `values-fix-1-impl.md`, …). A
+descriptive suffix (`review01-conn-spec.md`) only when the user asks for it. A spec added to a
+goal that already has specs takes the next free number; existing specs are never renamed.
+
+`BACKLOG.md` is append-only for the skills:
+
+- `## My notes` (`## Свои заметки` in a file created from a Russian spec) belongs to the user;
+  skills never write there. Then one `## <goal>` section per goal: `<goal>` = the settings
+  `backlog` value (`> Backlog:` of the spec, `**Backlog:**` of an old plan header), else the
+  spec or plan file name without `-spec.md` / `-impl.md`.
+- Item: `- [ ] <what> — <skill>, <artifact>, <YYYY-MM-DD>`. Spec map: `- <spec file> — <what it
+  covers>`, no checkbox.
+- Skills append only at the end of their goal's section, through `brainstorm_tool.py
+  backlog-append`: it refuses to change any other byte (exit `1`, file not written) and skips
+  an entry already present from the same source (`action: exists`). Only the user marks `[x]`
+  or deletes lines.
+- `/plan-brainstorming BACKLOG.md [section]` starts the next cycle from the unchecked items.
 
 ## Hand-off rules
 
@@ -81,7 +145,9 @@ no file: ask for the path and recommend a default. A user preference overrides t
 
 `python "<SKILL_DIR>/scripts/brainstorm_tool.py" spec-check <spec>` checks: all 8 headings
 present and in order; no empty section; `Out of Scope` non-empty; `Open Questions` empty or
-`(none)` (+ one-line rationale). Exit `1` → `plan-writing` stops and sends the user back to
+`(none)` (+ one-line rationale); the `> Chain:`, `> Environment:` and `> Backlog:` lines (known
+keys and values, the environment format with both rights, no `write=run` on prod, no interface
+markers in quotes). Exit `1` → `plan-writing` stops and sends the user back to
 `plan-brainstorming`; it never invokes it itself.
 
 ## Glossary

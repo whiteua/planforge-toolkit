@@ -33,7 +33,8 @@ def read_json(process: subprocess.CompletedProcess[str]) -> dict:
 
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="\n")
+    # write_bytes keeps "\n" as written; Path.write_text(newline=...) needs Python 3.10
+    path.write_bytes(content.encode("utf-8"))
 
 
 def sha256(path: Path) -> str:
@@ -863,6 +864,28 @@ class FixLoopToolTests(unittest.TestCase):
             self.assertEqual((data["hashed"], data["base_used"]), (1, True))
             process = run_tool("assert-readonly", str(start), str(current), "a.txt")
             self.assertEqual(read_json(process)["violations"], ["b.txt"])
+
+    def test_assert_readonly_accepts_several_allowed_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root = Path(tmp)
+            write(root / "plan.md", "# Plan\n")
+            write(root / "BACKLOG.md", "# Backlog\n")
+            start = Path(snaps) / "start.json"
+            current = Path(snaps) / "current.json"
+            self.assertEqual(run_tool("fingerprint-workspace", str(root), str(start)).returncode, 0)
+            write(root / "plan-report-1.md", "report\n")
+            write(root / "BACKLOG.md", "# Backlog\n\n## plan\n\n- [ ] x — plan-resolver, plan.md, 2026-10-01\n")
+            self.assertEqual(run_tool("fingerprint-workspace", str(root), str(current)).returncode, 0)
+            process = run_tool("assert-readonly", str(start), str(current), "plan-report-1.md", "BACKLOG.md")
+            data = read_json(process)
+            self.assertEqual(process.returncode, 0, data)
+            self.assertEqual(data["allowed_paths"], ["plan-report-1.md", "BACKLOG.md"])
+            write(root / "plan.md", "# Changed\n")
+            self.assertEqual(run_tool("fingerprint-workspace", str(root), str(current)).returncode, 0)
+            process = run_tool("assert-readonly", str(start), str(current), "plan-report-1.md", "BACKLOG.md")
+            data = read_json(process)
+            self.assertEqual(process.returncode, 1, data)
+            self.assertEqual(data["violations"], ["plan.md"])
 
     def test_parse_report_missing_file_is_exit_two(self) -> None:
         self.assertEqual(run_tool("parse-report", "no-such-report-1.md").returncode, 2)

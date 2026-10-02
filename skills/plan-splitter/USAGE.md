@@ -30,7 +30,7 @@ dependency roadmap, each part executable in a single agent pass.
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | Plan file path | **Yes** | — | Path to the plan `.md` |
-| `verify` | No | `ask` | `ask` / `all` / `none` / part list — deep verification scope (non-interactive `ask` = `none`) |
+| `verify` | No | `ask`; `none` in a run without a confirmation channel (chain run, subagent) | `ask` / `all` / `none` / part list — deep verification scope (non-interactive `ask` = `none`) |
 | `verify_depth` | No | `standard` | `quick` / `standard` / `deep` — `preset` for plan-iterative-revision |
 | `verify_mode` | No | `full-cycle` | `full-cycle` / `audit-only` — may verification edit the parts |
 
@@ -38,11 +38,11 @@ dependency roadmap, each part executable in a single agent pass.
 
 ```
 1. BOOTSTRAP        — language, write preflight, existing artifacts
-2. GATE DECISION    — 5 factors: split or not? ("keep" is a normal outcome)
+2. GATE DECISION    — split setting: always → split, never → not needed; auto or none → 5 factors ("keep" is a normal outcome)
 3. ANALYSIS         — boundaries, dependency graph, parallel groups, weights 🔴/🟡/🟢
 4. DRAFT & CONFIRM  — you approve the split table (one retry)
 5. GENERATE         — <base>-roadmap.md + <base>-a.md, -b.md, …
-6. VERIFY           — validate-all (files, DAG, coverage, hash) + content re-read
+6. VERIFY           — validate-all (files, DAG, coverage, External/Size lines copied verbatim, hash) + content re-read
 7. VERIFY CHOICE    — deep verification? (scope, depth, mode)
 8. DEEP VERIFY      — one plan-iterative-revision batch run over the parts, machine gate
 ```

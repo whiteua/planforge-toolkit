@@ -19,6 +19,9 @@ Turn ideas into validated design specs through collaborative dialogue.
 
 # With a JSON list of code-review findings (file or pasted inline)
 /plan-brainstorming .docs/reviews/review01.json
+
+# From the unchecked items of the shared backlog (optionally one section)
+/plan-brainstorming BACKLOG.md values-fix
 ```
 
 You can also simply describe your idea in chat and mention "brainstorming" / "design" / "spec".
@@ -29,6 +32,7 @@ You can also simply describe your idea in chat and mention "brainstorming" / "de
 |---|---|---|
 | Goal file path | Optional | Path to a `.md` file describing the idea. If omitted, describe the idea inline after the command. |
 | Findings JSON | Optional | Path to a `.json` file (or inline JSON) with an array of findings: `file`, `line` (optional), `summary`, `failure_scenario`. Switches to findings mode. |
+| `BACKLOG.md` [section] | Optional | The shared backlog at the repository root. Its unchecked items (of one section, when given) become the problem statement; the first question is which items go into this spec. After the spec is approved, its Out of Scope items are appended back to `BACKLOG.md`. |
 
 ### Findings mode
 
@@ -50,10 +54,10 @@ Spec path: `review01.json` → `review01-spec.md` next to it. With inline JSON t
 4. Asks clarifying questions **one at a time** (prefer multiple-choice)
 5. Proposes approaches with trade-offs and a recommendation (2–3 on Standard/Deep, one on Quick)
 6. Presents design section by section, asks for approval after each
-7. Runs ambiguity sweep — closes all open questions; if an answer changes the design, re-presents that section
+7. Runs ambiguity sweep — closes all open questions; if an answer changes the design, re-presents that section. Then proposes the chain settings in one message (`Chain`, external environments with read and write rights, changes named first) — you confirm or edit them; they are written above `# Goal`
 8. Writes the spec file, checks it with `brainstorm_tool.py spec-check`, runs self-review incl. a fidelity check against your original request (Deep: plus a reviewer subagent)
 9. Asks you to review the written spec
-10. On approval → invokes `plan-writing`
+10. On approval → appends the spec's Out of Scope items (and the spec map, when the goal was split into several specs) to `BACKLOG.md` at the repository root, then invokes `plan-writing`
 
 ## Depth Tiers
 

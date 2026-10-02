@@ -20,6 +20,9 @@ Missing files, functions or types; wrong signatures; race conditions; resource l
 - Do the described signatures match the real ones?
 - Is concurrency handled where state is shared?
 - Is resource handling described (connections, files, transactions, unsubscribes)?
+- Does a task carry more than 100 lines of new code without a `**Size:** <N> lines — <reason>`
+  line (`plan-check` warns above 100 and fails above 150)? Report it as `minor`; the required
+  fix is to split the task or to add the `**Size:**` line with the reason.
 
 ## 3. math
 

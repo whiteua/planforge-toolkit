@@ -126,11 +126,11 @@ right section is checked in the self-review.
   Example: `review01.json` → `review01-spec.md`.
 - Inline JSON: there is no file to derive the path from. Ask for the spec
   path and recommend a default.
-- Several specs from one findings list (after decomposition): the first
-  spec uses the default path. Every further spec needs its own name, so ask
-  for the path and recommend a short descriptive suffix that no file in the
-  directory uses yet (`review01-spec.md`, then `review01-conn-spec.md`).
-  `plan-writing` maps each to its own plan (`review01-conn-impl.md`).
+- Several specs from one findings list (after decomposition): numeric
+  suffixes by default, `review01-1-spec.md`, `review01-2-spec.md`, …
+  (`spec-contract.md`, "Artifacts and naming"); a descriptive suffix
+  (`review01-conn-spec.md`) only when the user asks for it.
+  `plan-writing` maps each to its own plan (`review01-2-impl.md`).
   Each spec lists the other specs' finding ids in `Out of Scope` with a
   pointer to the spec that covers them, so `findings-coverage` passes for
   every spec.

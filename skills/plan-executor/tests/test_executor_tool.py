@@ -964,8 +964,8 @@ class TestFix02(PlanTestCase):
             self.assertEqual(begun["external"], [])
             self.tool.unit_finish(self.exec_dir, unit_id, "pass")
         begun = self.tool.unit_begin(self.exec_dir)
-        self.assertEqual(len(begun["external"]), 1)
-        self.assertIn("dev_db", begun["external"][0])
+        self.assertEqual(begun["external"], [{"env": "dev_db", "access": None, "kind": None, "consent": None,
+                                              "confirmed": False, "source": None}])
 
     def test_note_is_stored_and_rendered(self):
         self.init(self.plan(self.PLAN))
@@ -1044,6 +1044,209 @@ class TestPlanDrift(PlanTestCase):
 
         self.assertEqual(migrated["version"], 2)
         self.assertTrue(migrated["source_sha256"])
+
+
+class TestSettingsConsent(PlanTestCase):
+    SPEC = (
+        "> Tier: Deep\n"
+        "> Environment: `test_db` (test) — read=run, write=task — \"Тесты на test_db? — Да\" (2026-10-01)\n"
+        "> Environment: `prod_db` (prod) — read=run, write=deny — \"Чтение прода на весь прогон? — Да, только чтение\" (2026-10-01)\n"
+        "> Environment: `stage_db` (test) — read=task, write=deny — \"Stage только по задаче? — Да\" (2026-10-01)\n\n"
+        "# Goal\n\nЦель.\n"
+    )
+    PLAN = (
+        "# P\n\n**Spec:** plan01-spec.md\n\n**Tier:** Deep\n\n"
+        "### Task 1: Read prod\n\n" "**External:** `prod_db` (read) — сверка остатков\n\n- [ ] **Step 1:** x\n\n"
+        "### Task 2: Migrate\n\n" "**External:** `test_db` (write) — migrate deploy\n\n- [ ] **Step 1:** x\n\n"
+        "### Task 3: Legacy\n\n" "**External:** `test_db` — smoke\n\n- [ ] **Step 1:** x\n"
+    )
+
+    def write_pair(self):
+        return self.plan(self.SPEC, name="plan01-spec.md"), self.plan(self.PLAN)
+
+    def test_brainstorm_tool_is_loaded_by_path(self):
+        module = self.tool._load_brainstorm_tool()
+        self.assertTrue(callable(getattr(module, "resolve_settings", None)))
+        _, plan = self.write_pair()
+        settings, warning = self.tool._resolve_settings(plan)
+        self.assertIsNone(warning)
+        self.assertEqual(settings["from"], "spec")
+
+    def test_missing_brainstorm_tool_gives_warning(self):
+        self.tool._load_brainstorm_tool = lambda: None
+        settings, warning = self.tool._resolve_settings(self.plan(self.PLAN))
+        self.assertIsNone(settings)
+        self.assertIn("plan-brainstorming not installed alongside", warning)
+
+    def test_ledger_init_stores_settings_from_spec(self):
+        spec, plan = self.write_pair()
+        led = self.init(plan)
+        self.assertEqual(led["settings"]["from"], "spec")
+        self.assertEqual([env["name"] for env in led["settings"]["environments"]], ["test_db", "prod_db", "stage_db"])
+        self.assertTrue(os.path.samefile(led["settings_source"]["path"], spec))
+        self.assertEqual(led["settings_source"]["sha256"], self.tool._sha256_file(spec))
+        self.assertEqual(led["consents"], {})
+        self.assertIsInstance(led["warnings"], list)
+        self.assertEqual(self.tool._load(self.exec_dir)["settings_source"], led["settings_source"])
+
+    def test_roadmap_input_reads_settings_through_source(self):
+        spec, _ = self.write_pair()
+        roadmap = self.plan(
+            "# R\n\n> Source: [plan01-impl.md](./plan01-impl.md)\n\n"
+            "| Stage | Title | Depends | Group | Weight |\n|---|---|---|---|---|\n| a | A | - | A | green |\n",
+            name="plan01-impl-roadmap.md")
+        led = self.init(roadmap)
+        self.assertEqual(led["input_type"], "staged")
+        self.assertTrue(os.path.samefile(led["settings_source"]["path"], spec))
+
+    def test_missing_brainstorm_tool_keeps_settings_null(self):
+        _, plan = self.write_pair()
+        self.tool._load_brainstorm_tool = lambda: None
+        led = self.init(plan)
+        self.assertEqual((led["settings"], led["settings_source"]), (None, None))
+        self.assertTrue(any("plan-brainstorming not installed alongside" in w for w in led["warnings"]))
+
+    def test_resume_clears_run_consents(self):
+        _, plan = self.write_pair()
+        self.init(plan)
+        led = self.tool._load(self.exec_dir)
+        led["consents"] = {"test_db": {"write": True}}
+        self.tool._save(self.exec_dir, led)
+        self.assertEqual(self.init(plan)["consents"], {})
+        self.assertEqual(self.tool._load(self.exec_dir)["consents"], {})
+
+    def test_changed_spec_is_settings_drift_until_accepted(self):
+        spec, plan = self.write_pair()
+        self.init(plan)
+        Path(spec).write_text(self.SPEC.replace("read=run, write=task", "read=run, write=run"), encoding="utf-8")
+        with self.assertRaises(ValueError) as ctx:
+            self.init(plan)
+        self.assertIn("settings-drift", str(ctx.exception))
+        self.assertEqual(ctx.exception.details["changed_keys"], ["environments"])
+        self.assertEqual(self.tool._load(self.exec_dir)["settings"]["environments"][0]["write"], "task")
+        led = self.init(plan, accept_drift=True)
+        self.assertEqual(led["settings"]["environments"][0]["write"], "run")
+        self.assertEqual(self.init(plan)["settings_source"]["sha256"], self.tool._sha256_file(spec))
+
+    def test_unreadable_spec_with_external_units_stops(self):
+        plan = self.plan(self.PLAN)  # plan01-spec.md is not written
+        with self.assertRaises(ValueError) as ctx:
+            self.init(plan)
+        self.assertIn("settings-unavailable", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("settings-source-missing", " ".join(ctx.exception.details["settings_errors"]))
+        self.assertFalse((Path(self.exec_dir) / "state.json").exists())
+
+    def test_unreadable_spec_without_external_units_warns(self):
+        led = self.init(self.plan("# P\n\n**Spec:** gone-spec.md\n\n**Tier:** Deep\n\n### Task 1: A\n\n- [ ] **Step 1:** x\n"))
+        self.assertTrue(any(w.startswith("settings-unavailable") for w in led["warnings"]))
+        self.assertEqual(led["units"][0]["id"], "task-1")
+
+    def test_unreadable_spec_on_resume_keeps_settings_and_warns(self):
+        spec = self.plan(self.SPEC, name="plan01-spec.md")
+        plan = self.plan("# P\n\n**Spec:** plan01-spec.md\n\n**Tier:** Deep\n\n### Task 1: A\n\n- [ ] **Step 1:** x\n")
+        first = self.init(plan)
+        os.remove(spec)
+        led = self.init(plan)
+        self.assertTrue(any(w.startswith("settings-unavailable") for w in led["warnings"]))
+        self.assertEqual(led["settings_source"], first["settings_source"])
+        self.assertEqual(self.tool._load(self.exec_dir)["settings"], first["settings"])
+
+    def test_unit_begin_reports_consent_per_external_line(self):
+        _, plan = self.write_pair()
+        self.init(plan)
+        first = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(first["external"], [{"env": "prod_db", "access": "read", "kind": "prod", "consent": "run",
+                                              "confirmed": True, "source": "spec"}])
+        self.assertEqual(first["unit"]["external"], first["external"])
+        self.assertEqual(self.tool._load(self.exec_dir)["units"][0]["external"], first["external"])
+        self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+        second = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(second["external"], [{"env": "test_db", "access": "write", "kind": "test", "consent": "task",
+                                               "confirmed": False, "source": None}])
+        self.tool.unit_finish(self.exec_dir, "task-2", "pass")
+        legacy = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(legacy["external"], [{"env": "test_db", "access": None, "kind": "test", "consent": None,
+                                               "confirmed": False, "source": None}])
+
+    def test_settings_with_errors_never_confirm(self):
+        led = {"settings": {"ok": False, "environments": [
+            {"name": "test_db", "kind": "test", "read": "run", "write": "run"}]}, "consents": {}}
+        entries = self.tool._external_entries("**External:** `test_db` (write) — x\n", led)
+        self.assertEqual(entries, [{"env": "test_db", "access": "write", "kind": "test", "consent": None,
+                                    "confirmed": False, "source": None}])
+
+    def test_prod_write_is_never_confirmed(self):
+        led = {"settings": {"ok": True, "environments": [
+            {"name": "prod_db", "kind": "prod", "read": "run", "write": "run"}]},
+               "consents": {"prod_db": {"write": True}}}
+        entries = self.tool._external_entries("**External:** `prod_db` (WRITE) — x\n", led)
+        self.assertEqual((entries[0]["confirmed"], entries[0]["source"]), (False, None))
+        reads = self.tool._external_entries("**External:** `prod_db` (read) — x\n", led)
+        self.assertEqual((reads[0]["confirmed"], reads[0]["source"]), (True, "spec"))
+
+    def test_every_environment_on_one_line_is_an_entry(self):
+        led = {"settings": {"ok": True, "environments": [
+            {"name": "test_db", "kind": "test", "read": "run", "write": "task"},
+            {"name": "prod_db", "kind": "prod", "read": "run", "write": "deny"}]}, "consents": {}}
+        entries = self.tool._external_entries(
+            "**External:** `test_db` (read), `prod_db` (write) — run `prisma migrate deploy`\n", led)
+        self.assertEqual([(e["env"], e["access"], e["confirmed"]) for e in entries],
+                         [("test_db", "read", True), ("prod_db", "write", False)])
+        for separator in ("; ", " and ", " "):
+            line = "**External:** `test_db` (read)%s`prod_db` (write) — x\n" % separator
+            self.assertEqual([(e["env"], e["access"]) for e in self.tool._external_entries(line, led)],
+                             [("test_db", "read"), ("prod_db", "write")], separator)
+        after_dash = self.tool._external_entries("**External:** `test_db` (write) — run `x` on `prod_db`\n", led)
+        self.assertEqual([e["env"] for e in after_dash], ["test_db"])
+
+    def consent_cli(self, env, access):
+        result = subprocess.run([sys.executable, str(TOOL_PATH), "consent", self.exec_dir, env, access],
+                                capture_output=True, check=False)
+        return result.returncode, json.loads(result.stdout.decode("utf-8"))
+
+    def test_run_consent_confirms_later_units(self):
+        _, plan = self.write_pair()
+        self.init(plan)
+        code, out = self.consent_cli("test_db", "write")
+        self.assertEqual((code, out["consents"]), (0, {"test_db": {"write": True}}))
+        self.tool.unit_begin(self.exec_dir)
+        self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+        second = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual((second["external"][0]["confirmed"], second["external"][0]["source"]), (True, "session"))
+
+    def test_consent_refusals(self):
+        _, plan = self.write_pair()
+        self.init(plan)
+        for env, access, error in (("prod_db", "write", "consent-prod-write"),
+                                   ("stage_db", "write", "consent-denied"),
+                                   ("nope_db", "read", "consent-unknown-environment")):
+            code, out = self.consent_cli(env, access)
+            self.assertEqual(code, 1, out)
+            self.assertIn(error, out["errors"][0])
+        self.assertEqual(self.tool._load(self.exec_dir)["consents"], {})
+        code, out = self.consent_cli("prod_db", "read")
+        self.assertEqual((code, out["consents"]), (0, {"prod_db": {"read": True}}))
+
+    def test_unit_finish_keeps_every_note(self):
+        _, plan = self.write_pair()
+        self.init(plan)
+        self.tool.unit_begin(self.exec_dir)
+        proc = subprocess.run([sys.executable, str(TOOL_PATH), "unit-finish", self.exec_dir, "task-1", "pass",
+                               "--note", "External: prod_db (read) confirmed by the engineer for this task",
+                               "--note", "agreed: a smaller fixture"], capture_output=True, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.tool._load(self.exec_dir)["units"][0]["notes"], [
+            "External: prod_db (read) confirmed by the engineer for this task", "agreed: a smaller fixture"])
+
+    def test_schema_declares_settings_and_consent_fields(self):
+        schema = json.loads((ROOT / "assets" / "ledger.schema.json").read_text(encoding="utf-8"))
+        for key in ("settings", "settings_source", "consents"):
+            self.assertIn(key, schema["properties"])
+        self.assertNotIn("consents", schema["required"])
+        self.assertEqual(schema["properties"]["version"]["enum"], [1, 2])
+        external = schema["properties"]["units"]["items"]["properties"]["external"]["items"]
+        self.assertEqual(sorted(external["required"]), ["access", "confirmed", "consent", "env", "kind", "source"])
 
 
 class TestExtractFiles(unittest.TestCase):
@@ -1146,6 +1349,318 @@ class TestUnitBeginFinish(CheckpointTestCase):
         with self.assertRaises(ValueError) as ctx:
             self.ledger_init()
         self.assertIn("exec-dir-inside-workdir", str(ctx.exception))
+
+
+@unittest.skipUnless(shutil.which("git"), "git required")
+class TestWorktreeTree(CheckpointTestCase):
+    def test_tree_matches_snapshot_and_diff_reports_statuses(self):
+        self.init_repo()
+        (self.workdir / "keep.txt").write_text("1\n", encoding="utf-8")
+        (self.workdir / "gone.txt").write_text("1\n", encoding="utf-8")
+        self.run_git("add", ".")
+        self.run_git("commit", "-m", "base")
+        snap = self.tool.checkpoint_create(str(self.workdir), "s1", "run1")["checkpoint_id"]
+        before = self.tool._worktree_tree(str(self.workdir))
+        self.assertEqual(before, self.tool._commit_tree(str(self.workdir), snap))
+        (self.workdir / "keep.txt").write_text("2\n", encoding="utf-8")
+        (self.workdir / "gone.txt").unlink()
+        (self.workdir / "new.txt").write_text("n\n", encoding="utf-8")
+        after = self.tool._worktree_tree(str(self.workdir))
+        self.assertEqual(self.tool._tree_diff(str(self.workdir), before, after), [
+            {"path": "gone.txt", "status": "deleted"},
+            {"path": "keep.txt", "status": "modified"},
+            {"path": "new.txt", "status": "added"},
+        ])
+        self.assertEqual(self.tool._tree_diff(str(self.workdir), after, after), [])
+        # The engineer's index is untouched: new.txt is still untracked.
+        self.assertIn("?? new.txt", self.run_git("status", "--porcelain").stdout)
+
+    def test_outside_git_is_none(self):
+        self.assertIsNone(self.tool._worktree_tree(str(self.workdir)))
+        self.assertIsNone(self.tool._commit_tree(str(self.workdir), None))
+
+
+class TestForeignSchema(unittest.TestCase):
+    def test_schema_describes_foreign_fields(self):
+        schema = json.loads((ROOT / "assets" / "ledger.schema.json").read_text(encoding="utf-8"))
+        props = schema["properties"]
+        self.assertEqual(props["expected_tree"]["type"], ["string", "null"])
+        event = props["foreign_events"]["items"]
+        self.assertEqual(event["properties"]["decision"]["enum"], ["accepted", "restored"])
+        self.assertEqual(event["properties"]["paths"]["items"]["properties"]["status"]["enum"],
+                         ["added", "modified", "deleted"])
+
+
+@unittest.skipUnless(shutil.which("git"), "git required")
+class TestForeignChanges(CheckpointTestCase):
+    PLAN = ("# P\n\n### Task 1: A\n\n**Files:**\n- Modify: `cli.py`\n\n- [ ] **Step 1: edit**\n\n"
+            "### Task 2: B\n\n**Files:**\n- Modify: `util.py`\n\n- [ ] **Step 1: edit**\n")
+
+    def setUp(self):
+        import types
+        super().setUp()
+        self.init_repo()
+        for name in ("cli.py", "util.py"):
+            (self.workdir / name).write_text(f"# {name}\n", encoding="utf-8")
+        self.run_git("add", ".")
+        self.run_git("commit", "-m", "base")
+        self.exec_dir = str(Path(self.tmp.name) / "exec")
+        plan = Path(self.tmp.name) / "plan01-impl.md"
+        plan.write_text(self.PLAN, encoding="utf-8")
+        self.led = self.tool.cmd_ledger_init(types.SimpleNamespace(
+            plan_path=str(plan), exec_dir=self.exec_dir, whole=False, workdir=str(self.workdir),
+            allow_dirty=False, accept_drift=False))
+
+    def expected_tree(self):
+        return self.tool._load(self.exec_dir).get("expected_tree")
+
+    def cli(self, *args):
+        proc = subprocess.run([sys.executable, str(TOOL_PATH), *args], capture_output=True, text=True, encoding="utf-8")
+        return proc.returncode, json.loads(proc.stdout)
+
+    def test_ledger_init_and_unit_finish_set_expected_tree(self):
+        baseline_tree = self.run_git("rev-parse", self.led["baseline_checkpoint"] + "^{tree}").stdout.strip()
+        self.assertEqual(self.expected_tree(), baseline_tree)
+        self.assertEqual(self.led["foreign_events"], [])
+        self.tool.unit_begin(self.exec_dir)
+        (self.workdir / "cli.py").write_text("# changed\n", encoding="utf-8")
+        done = self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+        snap_tree = self.run_git("rev-parse", done["checkpoint_id"] + "^{tree}").stdout.strip()
+        self.assertEqual(self.expected_tree(), snap_tree)
+        self.tool.unit_begin(self.exec_dir)
+        (self.workdir / "util.py").write_text("# half done\n", encoding="utf-8")
+        self.tool.unit_finish(self.exec_dir, "task-2", "fail", error="boom")
+        self.assertEqual(self.expected_tree(), self.tool._worktree_tree(str(self.workdir)))
+        self.assertEqual(self.tool.validate_ledger(self.tool._load(self.exec_dir)), [])
+
+    def test_changed_deleted_and_new_files_stop_unit_begin(self):
+        (self.workdir / "cli.py").write_text("# edited by hand\n", encoding="utf-8")
+        (self.workdir / "util.py").unlink()
+        (self.workdir / "notes.txt").write_text("x\n", encoding="utf-8")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(begun["reason"], "foreign-changes")
+        self.assertEqual(begun["foreign_changes"], [
+            {"path": "cli.py", "status": "modified"},
+            {"path": "notes.txt", "status": "added"},
+            {"path": "util.py", "status": "deleted"},
+        ])
+        self.assertEqual(begun["unit"]["id"], "task-1")
+        self.assertEqual(begun["expected_tree"], self.expected_tree())
+        self.assertEqual(self.tool._load(self.exec_dir)["units"][0]["status"], "pending")
+
+    def test_clean_tree_and_backlog_change_do_not_alarm(self):
+        (self.workdir / "BACKLOG.md").write_text("# Backlog\n", encoding="utf-8")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual((begun["reason"], begun["foreign_changes"]), ("ready", []))
+
+    def test_in_progress_skips_the_check(self):
+        self.tool.unit_begin(self.exec_dir)
+        (self.workdir / "util.py").write_text("# edited by hand\n", encoding="utf-8")
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "in-progress")
+
+    def test_retry_after_fail_has_no_false_alarm(self):
+        self.tool.unit_begin(self.exec_dir)
+        (self.workdir / "cli.py").write_text("# half done\n", encoding="utf-8")
+        self.tool.unit_finish(self.exec_dir, "task-1", "fail", error="boom")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual((begun["reason"], begun["foreign_changes"]), ("retry-available", []))
+
+    def test_old_ledger_without_expected_tree_starts_after_next_unit(self):
+        led = self.tool._load(self.exec_dir)
+        del led["expected_tree"]
+        self.tool._save(self.exec_dir, led)
+        (self.workdir / "cli.py").write_text("# edited before the upgrade\n", encoding="utf-8")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual((begun["reason"], begun["foreign_changes"]), ("ready", None))
+        self.assertIn("old ledger", begun["foreign_warning"])
+        self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+        self.assertEqual(self.expected_tree(), self.tool._worktree_tree(str(self.workdir)))
+        (self.workdir / "util.py").write_text("# foreign\n", encoding="utf-8")
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "foreign-changes")
+
+    def test_resume_after_interrupted_unit_has_no_false_alarm(self):
+        import types
+        self.tool.unit_begin(self.exec_dir)
+        (self.workdir / "cli.py").write_text("# half done when the session ended\n", encoding="utf-8")
+        self.tool.cmd_ledger_init(types.SimpleNamespace(
+            plan_path=str(Path(self.tmp.name) / "plan01-impl.md"), exec_dir=self.exec_dir, whole=False,
+            workdir=str(self.workdir), allow_dirty=False, accept_drift=False))
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual((begun["reason"], begun["foreign_changes"]), ("ready", []))
+
+    def test_accept_changes_records_event_and_clears_the_alarm(self):
+        (self.workdir / "cli.py").write_text("# edited by hand\n", encoding="utf-8")
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "foreign-changes")
+        result = self.tool.accept_changes(self.exec_dir, note="engineer  fixed a typo")
+        self.assertEqual(result["accepted"], [{"path": "cli.py", "status": "modified"}])
+        events = self.tool._load(self.exec_dir)["foreign_events"]
+        self.assertEqual([(e["decision"], e["note"]) for e in events], [("accepted", "engineer fixed a typo")])
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "ready")
+
+    def test_accept_changes_cli_without_changes(self):
+        code, out = self.cli("accept-changes", self.exec_dir)
+        self.assertEqual((code, out["accepted"], out["event"]), (0, [], None))
+
+    def test_accept_changes_resets_a_missing_expected_tree(self):
+        led = self.tool._load(self.exec_dir)
+        led["expected_tree"] = "0" * 40  # not in the object store, as after git gc
+        self.tool._save(self.exec_dir, led)
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual((begun["reason"], begun["foreign_changes"]), ("ready", None))
+        self.assertIn("missing from the object store", begun["foreign_warning"])
+        result = self.tool.accept_changes(self.exec_dir)
+        self.assertEqual((result["accepted"], result["event"]), ([], None))
+        self.assertEqual(self.expected_tree(), self.tool._worktree_tree(str(self.workdir)))
+
+    def test_restore_paths_restores_only_listed_files(self):
+        snap = self.led["baseline_checkpoint"]
+        (self.workdir / "cli.py").write_text("# foreign\n", encoding="utf-8")
+        (self.workdir / "util.py").write_text("# keep me\n", encoding="utf-8")
+        (self.workdir / "stray.txt").write_text("x\n", encoding="utf-8")
+        result = self.tool.checkpoint_restore_paths(str(self.workdir), snap, ["cli.py", "stray.txt"])
+        self.assertEqual((result["restored"], result["removed"]), (["cli.py"], ["stray.txt"]))
+        self.assertEqual(result["paths"], [{"path": "cli.py", "status": "modified"},
+                                           {"path": "stray.txt", "status": "added"}])
+        self.assertEqual((self.workdir / "cli.py").read_text(encoding="utf-8"), "# cli.py\n")
+        self.assertFalse((self.workdir / "stray.txt").exists())
+        self.assertEqual((self.workdir / "util.py").read_text(encoding="utf-8"), "# keep me\n")
+
+    def test_restore_paths_brings_back_a_deleted_file_from_a_tree(self):
+        (self.workdir / "util.py").unlink()
+        result = self.tool.checkpoint_restore_paths(str(self.workdir), self.led["expected_tree"], ["./util.py"])
+        self.assertEqual(result["paths"], [{"path": "util.py", "status": "deleted"}])
+        self.assertEqual((self.workdir / "util.py").read_text(encoding="utf-8"), "# util.py\n")
+
+    def test_unknown_path_is_exit_2_and_nothing_is_restored(self):
+        (self.workdir / "cli.py").write_text("# foreign\n", encoding="utf-8")
+        code, out = self.cli("checkpoint-restore", str(self.workdir), self.led["baseline_checkpoint"],
+                             "--paths", "cli.py", "ghost.txt")
+        self.assertEqual(code, 2)
+        self.assertIn("ghost.txt", out["errors"][0])
+        self.assertEqual((self.workdir / "cli.py").read_text(encoding="utf-8"), "# foreign\n")
+
+    def test_path_outside_the_repository_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.tool.checkpoint_restore_paths(str(self.workdir), self.led["baseline_checkpoint"], ["../exec/state.json"])
+        self.assertIn("invalid-path", str(ctx.exception))
+
+    def test_fail_then_restore_with_exec_dir_has_no_false_alarm(self):
+        self.tool.unit_begin(self.exec_dir)
+        (self.workdir / "cli.py").write_text("# broken\n", encoding="utf-8")
+        failed = self.tool.unit_finish(self.exec_dir, "task-1", "fail", error="boom")
+        code, out = self.cli("checkpoint-restore", str(self.workdir), failed["restore_to"], "--exec-dir", self.exec_dir)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["expected_tree"], self.tool._worktree_tree(str(self.workdir)))
+        self.assertEqual((self.workdir / "cli.py").read_text(encoding="utf-8"), "# cli.py\n")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual((begun["reason"], begun["foreign_changes"]), ("retry-available", []))
+        self.assertEqual(self.tool._load(self.exec_dir)["foreign_events"], [])
+
+    def test_restore_foreign_path_records_events_and_keeps_neighbour(self):
+        (self.workdir / "cli.py").write_text("# foreign\n", encoding="utf-8")
+        (self.workdir / "util.py").write_text("# wanted\n", encoding="utf-8")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(begun["reason"], "foreign-changes")
+        code, out = self.cli("checkpoint-restore", str(self.workdir), begun["expected_tree"],
+                             "--paths", "cli.py", "--exec-dir", self.exec_dir)
+        self.assertEqual((code, out["restored"]), (0, ["cli.py"]))
+        self.assertEqual((self.workdir / "util.py").read_text(encoding="utf-8"), "# wanted\n")
+        events = self.tool._load(self.exec_dir)["foreign_events"]
+        self.assertEqual([(e["decision"], [p["path"] for p in e["paths"]]) for e in events],
+                         [("restored", ["cli.py"]), ("accepted", ["util.py"])])
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "ready")
+
+    def test_missing_ledger_fails_before_restoring(self):
+        (self.workdir / "cli.py").write_text("# foreign\n", encoding="utf-8")
+        code, out = self.cli("checkpoint-restore", str(self.workdir), self.led["baseline_checkpoint"],
+                             "--exec-dir", str(Path(self.tmp.name) / "nope"))
+        self.assertEqual(code, 2)
+        self.assertIn("ledger not found", out["errors"][0])
+        self.assertEqual((self.workdir / "cli.py").read_text(encoding="utf-8"), "# foreign\n")
+
+    def test_full_restore_keeps_backlog(self):
+        backlog = "# Backlog\n\n## g\n\n- [ ] x — plan-brainstorming, g-spec.md, 2026-10-01\n"
+        (self.workdir / "BACKLOG.md").write_text(backlog, encoding="utf-8")
+        self.tool.unit_begin(self.exec_dir)
+        (self.workdir / "cli.py").write_text("# broken\n", encoding="utf-8")
+        failed = self.tool.unit_finish(self.exec_dir, "task-1", "fail", error="boom")
+        code, out = self.cli("checkpoint-restore", str(self.workdir), failed["restore_to"], "--exec-dir", self.exec_dir)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("BACKLOG.md", out["removed"])
+        self.assertEqual((self.workdir / "BACKLOG.md").read_text(encoding="utf-8"), backlog)
+        self.assertEqual((self.workdir / "cli.py").read_text(encoding="utf-8"), "# cli.py\n")
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "retry-available")
+
+    def test_full_restore_keeps_backlog_present_in_the_snapshot(self):
+        (self.workdir / "BACKLOG.md").write_text("# Backlog\n", encoding="utf-8")  # not committed
+        self.tool.unit_begin(self.exec_dir)
+        self.tool.unit_finish(self.exec_dir, "task-1", "pass")  # the task-1 snapshot holds BACKLOG.md
+        self.tool.unit_begin(self.exec_dir)
+        backlog = "# Backlog\n\n## g\n\n- [ ] y — plan-resolver, g-impl.md, 2026-10-01\n"
+        (self.workdir / "BACKLOG.md").write_text(backlog, encoding="utf-8")
+        (self.workdir / "cli.py").write_text("# broken\n", encoding="utf-8")
+        failed = self.tool.unit_finish(self.exec_dir, "task-2", "fail", error="boom")
+        code, out = self.cli("checkpoint-restore", str(self.workdir), failed["restore_to"], "--exec-dir", self.exec_dir)
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.workdir / "BACKLOG.md").read_text(encoding="utf-8"), backlog)
+        self.assertEqual((self.workdir / "cli.py").read_text(encoding="utf-8"), "# cli.py\n")
+        self.assertEqual(self.tool.unit_begin(self.exec_dir)["reason"], "retry-available")
+
+
+class TestForeignChangesOutsideGit(CheckpointTestCase):
+    def test_outside_git_foreign_changes_is_null(self):
+        import types
+        (self.workdir / "cli.py").write_text("x\n", encoding="utf-8")
+        plan = Path(self.tmp.name) / "plan01-impl.md"
+        plan.write_text("# P\n\n### Task 1: A\n\n- [ ] **Step 1: edit**\n", encoding="utf-8")
+        exec_dir = str(Path(self.tmp.name) / "exec")
+        self.tool.cmd_ledger_init(types.SimpleNamespace(plan_path=str(plan), exec_dir=exec_dir, whole=False,
+                                                        workdir=str(self.workdir), allow_dirty=False, accept_drift=False))
+        (self.workdir / "cli.py").write_text("y\n", encoding="utf-8")
+        begun = self.tool.unit_begin(exec_dir)
+        self.assertEqual((begun["reason"], begun["foreign_changes"]), ("ready", None))
+        self.assertIn("not a git repository", begun["foreign_warning"])
+
+
+@unittest.skipUnless(shutil.which("git"), "git required")
+class TestBacklogIsNotDirty(CheckpointTestCase):
+    BACKLOG = "# Backlog\n\n## g\n\n- [ ] x — plan-executor, g-impl.md, 2026-10-01\n"
+
+    def setUp(self):
+        super().setUp()
+        self.init_repo()
+        (self.workdir / "cli.py").write_text("x = 1\n", encoding="utf-8")
+        self.run_git("add", ".")
+        self.run_git("commit", "-m", "base")
+
+    def init(self):
+        import types
+        plan = Path(self.tmp.name) / "plan01-impl.md"
+        plan.write_text("# P\n\n### Task 1: A\n\n- [ ] **Step 1: edit**\n", encoding="utf-8")
+        return self.tool.cmd_ledger_init(types.SimpleNamespace(
+            plan_path=str(plan), exec_dir=str(Path(self.tmp.name) / "exec"), whole=False,
+            workdir=str(self.workdir), allow_dirty=False, accept_drift=False))
+
+    def test_new_backlog_is_not_dirty(self):
+        (self.workdir / "BACKLOG.md").write_text(self.BACKLOG, encoding="utf-8")
+        self.assertFalse(self.tool.checkpoint_detect(str(self.workdir))["dirty"])
+        self.assertRegex(self.init()["baseline_checkpoint"], r"^[0-9a-f]{40}$")
+
+    def test_changed_backlog_is_not_dirty(self):
+        (self.workdir / "BACKLOG.md").write_text("# Backlog\n", encoding="utf-8")
+        self.run_git("add", "BACKLOG.md")
+        self.run_git("commit", "-m", "backlog")
+        (self.workdir / "BACKLOG.md").write_text(self.BACKLOG, encoding="utf-8")
+        self.assertFalse(self.tool.checkpoint_detect(str(self.workdir))["dirty"])
+        self.assertRegex(self.init()["baseline_checkpoint"], r"^[0-9a-f]{40}$")
+
+    def test_other_changed_file_is_still_dirty(self):
+        (self.workdir / "BACKLOG.md").write_text(self.BACKLOG, encoding="utf-8")
+        (self.workdir / "cli.py").write_text("x = 2\n", encoding="utf-8")
+        with self.assertRaises(ValueError) as ctx:
+            self.init()
+        self.assertIn("dirty-worktree", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, 1)
 
 
 class TestStrategyKeywords(unittest.TestCase):

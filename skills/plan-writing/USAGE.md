@@ -28,13 +28,13 @@ Usually invoked **automatically** by `plan-brainstorming` after spec approval �
 
 ## What Happens
 
-1. **Spec Preflight** — `plan-brainstorming/scripts/brainstorm_tool.py spec-check`: all 8 sections in order, none empty, `Open Questions` is `(none)`
+1. **Spec Preflight** — `plan-brainstorming/scripts/brainstorm_tool.py spec-check`: all 8 sections in order, none empty, `Open Questions` is `(none)`; it also returns the chain settings (`> Chain:`, `> Environment:`, `> Backlog:`), which stay in the spec. An old spec without them: the skill asks and writes the answers into the plan header
 2. **Tier Read** — inherits the tier from the spec's `> Tier:` line (Standard if missing)
 3. **Scope Check** — a spec with several independent subsystems stops for your choice of how to split it
 4. **File Structure** — maps out which files will be created/modified
 5. **Task Generation** — tasks with TDD steps, exact code, file paths; no commit steps
 6. **Check and Self-Review** — `scripts/plan_tool.py plan-check` for the format contract, then spec coverage, consistency and task size (Deep: plus a reviewer subagent)
-7. **Execution Handoff** — offers the next step (audit via `plan-iterative-revision`, split via `plan-splitter`, or execute via `plan-executor`); waits for your explicit choice
+7. **Execution Handoff** — offers the next step (audit via `plan-iterative-revision`, split via `plan-splitter`, or execute via `plan-executor`) with the task count and plan size; with `split=auto` and more than 15 tasks the split comes first; with an explicit `Chain` in the settings, `split=always|never` and `resolver=` are stated, not asked; waits for your explicit choice
 
 ## Spec Preflight Requirements
 
@@ -50,6 +50,7 @@ The input spec **must** have:
 - Each task: **≤ 10 minutes of work** OR **≤ 100 lines of new code**
 - Each step: **one action, 2–5 minutes**
 - Exceeds limit → split into sub-tasks (Task N.1, N.2, ...)
+- Cannot be split → `**Size:** <N> lines — <reason>` in the task; without it `plan-check` warns above 100 lines of code and fails above 150
 
 ## Tier Effect on Tasks
 
@@ -64,6 +65,8 @@ The input spec **must** have:
 Plan file next to the spec: `<X>-spec.md` → `<X>-impl.md` (e.g. `plan01-spec.md` → `plan01-impl.md`), or a user-specified path.
 
 The plan header carries `**Spec:**` and `**Tier:**`; tasks use `### Task N: <title>` headings. This is the format `plan-executor` and `plan-resolver` parse. Plans contain no `git commit` steps; committing the result is up to you.
+
+Chain settings and external-system permissions are not copied into the plan: every skill reads them from the spec through `**Spec:**`. Only a plan written from an old spec without settings carries `**Chain:**`, `**Environments:**` (with `read=`/`write=` rights) and `**Backlog:**` in its header. A task that touches an external system has `` **External:** `name` (read|write) — what ``.
 
 Language: the plan body follows the spec's language; the parsed markers (`### Task N:`, `**Files:**`, `**Step N:**`, ...) stay in English.
 
@@ -81,6 +84,8 @@ Language: the plan body follows the spec's language; the parsed markers (`### Ta
 | "plan-brainstorming not installed" | `../plan-brainstorming/scripts/brainstorm_tool.py` missing | Install both skills side by side |
 | Tasks too large | Complex feature crammed into one task | The agent splits it; `plan-check` warns above 100 lines of code in a task |
 | "No tier line" message | Legacy spec without `> Tier:` | Not an error — defaults to Standard |
+| "needs the access type (read) or (write)" / "is not allowed: write=deny" | `External` line without the access type, or access the settings deny | Add `(read)`/`(write)`; a denied access means the plan must change or the user must change the spec |
+| "settings are unavailable" | The plan has `External` lines, the spec at `**Spec:**` is missing and the header has no settings | Restore the spec path in `**Spec:**` |
 
 ## Pipeline Position
 

@@ -132,6 +132,22 @@
               "type": "string"
             },
             "description": "Deviations from the unit's text agreed with the engineer (unit-finish --note)"
+          },
+          "external": {
+            "type": "array",
+            "description": "The unit's **External:** lines at unit-begin: what was permitted and by whom",
+            "items": {
+              "type": "object",
+              "required": ["env", "access", "kind", "consent", "confirmed", "source"],
+              "properties": {
+                "env": {"type": ["string", "null"]},
+                "access": {"enum": ["read", "write", null]},
+                "kind": {"enum": ["test", "prod", null]},
+                "consent": {"enum": ["run", "task", "deny", null]},
+                "confirmed": {"type": "boolean"},
+                "source": {"enum": ["spec", "session", null]}
+              }
+            }
           }
         }
       },
@@ -159,6 +175,56 @@
         "string",
         "null"
       ]
+    },
+    "expected_tree": {
+      "type": ["string", "null"],
+      "description": "Git tree the working tree must match before the next unit (foreign-changes check in unit-begin)"
+    },
+    "foreign_events": {
+      "type": "array",
+      "description": "Files changed outside the run between units and the engineer's decision (accept-changes, checkpoint-restore --paths --exec-dir)",
+      "items": {
+        "type": "object",
+        "required": ["at", "paths", "decision"],
+        "properties": {
+          "at": {"type": "string"},
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "status"],
+              "properties": {
+                "path": {"type": "string"},
+                "status": {"type": "string", "enum": ["added", "modified", "deleted"]}
+              }
+            }
+          },
+          "decision": {"type": "string", "enum": ["accepted", "restored"]},
+          "note": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "settings": {
+      "type": ["object", "null"],
+      "description": "plan-brainstorming resolve_settings output at ledger-init (chain, environments with read/write rights, backlog); null when plan-brainstorming is not installed alongside"
+    },
+    "settings_source": {
+      "type": ["object", "null"],
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": ["string", "null"]}
+      },
+      "description": "The spec or plan the settings came from; a changed sha256 on resume is settings-drift"
+    },
+    "consents": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {"read": {"type": "boolean"}, "write": {"type": "boolean"}},
+        "additionalProperties": false
+      },
+      "description": "Run-scope consents given during execution (consent command), per environment; cleared on resume"
     }
   }
 }

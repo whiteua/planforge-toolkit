@@ -52,6 +52,94 @@ class Bootstrap(unittest.TestCase):
             self.assertEqual(run("bootstrap", str(plan), "--preset", "ultra").returncode, 2)
 
 
+SPEC_TEXT = (
+    "> Tier: Deep\n"
+    "> Chain: revision=quick; stop=strict\n"
+    "> Environment: `db_test` (test) — read=run, write=task — \"Читать db_test на весь прогон? — Да\" (2026-10-01)\n"
+    "\n# Goal\n\nЦель.\n"
+)
+
+
+def write_spec_and_plan(d: Path, header: str = "") -> Path:
+    (d / "s-spec.md").write_text(SPEC_TEXT, encoding="utf-8")
+    plan = d / "plan.md"
+    plan.write_text(f"# План\n\n**Spec:** s-spec.md\n\n**Tier:** Deep\n{header}\n### Task 1: шаг\n", encoding="utf-8")
+    return plan
+
+
+class BootstrapSettings(unittest.TestCase):
+    def test_settings_from_spec(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = json.loads(run("bootstrap", str(write_spec_and_plan(Path(d)))).stdout)
+            s = out["settings"]
+            self.assertEqual(s["from"], "spec")
+            self.assertTrue(s["source"].endswith("s-spec.md"))
+            self.assertEqual((s["chain"]["revision"], s["chain"]["stop"]), ("quick", "strict"))
+            self.assertEqual(s["environments"][0]["read"], "run")
+
+    def test_part_follows_source_to_plan_and_spec(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_spec_and_plan(Path(d))
+            part = Path(d) / "plan-a.md"
+            part.write_text("# Stage a: Часть\n\n> Source: [plan.md](./plan.md)\n\n## Tasks\n1. шаг\n", encoding="utf-8")
+            out = json.loads(run("bootstrap", str(part)).stdout)
+            self.assertEqual(out["settings"]["from"], "spec")
+            self.assertEqual(out["settings"]["chain"]["revision"], "quick")
+
+    def test_missing_spec_is_a_warning_not_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d) / "plan.md"
+            plan.write_text("# Plan\n\n**Spec:** gone-spec.md\n\n### Task 1: x\n", encoding="utf-8")
+            p = run("bootstrap", str(plan))
+            out = json.loads(p.stdout)
+            self.assertEqual(p.returncode, 0, p.stdout)
+            self.assertIs(out["settings"]["ok"], False)
+            self.assertTrue(any(w.startswith("settings: settings-source-missing") for w in out["warnings"]), out["warnings"])
+
+    def test_without_brainstorm_tool_settings_is_null(self):
+        with tempfile.TemporaryDirectory() as d:
+            copy = Path(d) / "skills" / "plan-iterative-revision" / "scripts" / "next_review_index.py"
+            copy.parent.mkdir(parents=True)
+            shutil.copyfile(str(TOOL), str(copy))
+            plan = Path(d) / "plan.md"
+            plan.write_text("# Plan\n", encoding="utf-8")
+            p = subprocess.run([sys.executable, str(copy), "bootstrap", str(plan)], text=True, capture_output=True, encoding="utf-8")
+            out = json.loads(p.stdout)
+            self.assertEqual(p.returncode, 0, p.stdout)
+            self.assertIsNone(out["settings"])
+            self.assertIn("plan-brainstorming not installed alongside", " ".join(out["warnings"]))
+
+    def test_explicit_chain_sets_preset_and_stop_policy(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = json.loads(run("bootstrap", str(write_spec_and_plan(Path(d)))).stdout)
+            config = out["config"]
+            self.assertEqual((config["preset"], config["max"], config["stop_policy"]), ("quick", 3, "strict"))
+            self.assertEqual(out["config_from_settings"], ["preset", "stop_policy"])
+
+    def test_plan_header_chain_wins_over_spec(self):
+        with tempfile.TemporaryDirectory() as d:
+            header = "\n**Chain:** split=never; revision=deep; stop=pragmatic; resolver=skip\n"
+            out = json.loads(run("bootstrap", str(write_spec_and_plan(Path(d), header))).stdout)
+            self.assertEqual(out["settings"]["from"], "plan-header")
+            self.assertEqual((out["config"]["preset"], out["config"]["stop_policy"]), ("deep", "pragmatic"))
+
+    def test_user_flags_win_over_settings(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = json.loads(run("bootstrap", str(write_spec_and_plan(Path(d))), "--preset", "deep").stdout)
+            self.assertEqual((out["config"]["preset"], out["config"]["stop_policy"]), ("deep", "strict"))
+            self.assertEqual(out["config_from_settings"], ["stop_policy"])
+
+    def test_no_chain_line_keeps_defaults_and_the_question(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "s-spec.md").write_text("> Tier: Deep\n\n# Goal\n\nЦель.\n", encoding="utf-8")
+            plan = Path(d) / "plan.md"
+            plan.write_text("# План\n\n**Spec:** s-spec.md\n\n### Task 1: шаг\n", encoding="utf-8")
+            out = json.loads(run("bootstrap", str(plan)).stdout)
+            self.assertIs(out["settings"]["chain_explicit"], False)
+            self.assertEqual(out["config"]["preset"], "standard")
+            self.assertEqual(out["config_from_settings"], [])
+
+
 @unittest.skipIf(shutil.which("git") is None, "git not available")
 class Guard(unittest.TestCase):
     def setUp(self):

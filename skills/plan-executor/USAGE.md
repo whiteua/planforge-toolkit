@@ -54,10 +54,10 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 - 3 attempts per unit (1 primary + 2 retries); the same error signature twice → immediate STOP
 - A gate cannot pass silently if tests are missing → escalation, not fake success
 - Gate depth follows the plan tier, lowered for checkpoint tasks, documentation-only tasks (light) and test-only tasks (one step down)
-- A task marked `**External:** <environment>` runs only after you confirm it; the executor never runs a step on an environment the plan does not list
+- A task marked `**External:** <environment> (read|write)` runs without a question only when the spec allows that access for the whole run (`read=run` / `write=run`); otherwise you are asked: only this task / the whole run / stop ("the whole run" only when the task names `(read)` or `(write)` and the environment is in the settings). `deny` stops the run, changes on prod are confirmed task by task, and the executor never runs a step on an environment the plan does not list
 - Work beyond a task's text (a defect the gate found) is done only with your consent and recorded as a note in the ledger
 - Snapshots are stored in hidden git refs `refs/plan-executor/<run>/<unit>`: no commits on your branch; the final commit is yours
-- Rollback (`checkpoint-restore`) restores files to the last good snapshot and removes files created after it — always after your confirmation
+- Rollback (`checkpoint-restore`) restores files to the last good snapshot and removes files created after it, or only the files you name — always after your confirmation
 
 ## Stop Conditions
 
@@ -68,12 +68,14 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 | Plan has no task headings (no `--whole`) | STOP: add headings, run plan-splitter, or use `--whole` |
 | Uncommitted changes in the repo at start | Ask: commit/stash, or continue with them in the baseline |
 | Plan file changed since the ledger was created | STOP and ask: new run, or accept the changed plan |
+| Files changed outside the run between tasks (except `BACKLOG.md`) | Ask: accept them, restore these files, or stop; a silent run stops with the file list |
 
 ## Output
 
 - `<exec_dir>/state.json` — ledger (source of truth for progress)
 - `<exec_dir>/progress.md` — human-readable progress
 
+- `BACKLOG.md` at the repository root — the same out-of-scope defects, appended to the plan's goal section (`/plan-brainstorming BACKLOG.md` starts the next cycle from them)
 - `<plan base>-followups.json` next to the plan — defects noticed but out of scope, in the findings format `plan-brainstorming` accepts (only when there are any)
 
 `exec_dir` defaults to `<repo parent>/.exec/<repo>-<plan>/`: outside the project repository and stable across sessions. A directory inside the repository (unless git-ignored) or inside the OS temp dir is refused.
@@ -100,6 +102,8 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 | `unknown-dependency` | Roadmap depends on a missing stage | Fix the roadmap table |
 | `dirty-worktree` | Uncommitted changes at start | Commit/stash, or allow them into the baseline |
 | `plan-drift` | Plan edited between sessions | New `exec_dir`, or accept the change |
+| `settings-drift` | Spec (or plan header) settings edited between sessions | New `exec_dir`, or accept the changed settings |
+| `settings-unavailable` | The spec named by `**Spec:**` is missing and the plan has External tasks | Restore the spec or fix the `**Spec:**` path |
 | `exec-dir-inside-workdir` | Ledger directory inside the repo | Move `exec_dir` outside or git-ignore it |
 | `exec-dir-ephemeral` | Ledger directory inside the OS temp dir | Use the default (`auto`), or `--allow-temp` for a throwaway run |
 | `exhausted` / `stagnated` | Unit failed 3 times / same error twice | Read the stop-report, fix manually, resume |

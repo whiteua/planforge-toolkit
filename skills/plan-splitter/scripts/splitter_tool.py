@@ -31,7 +31,9 @@ Subcommands:
   validate-all <dir> <base_name>
       Cross-validation of the whole set: '<base>-roadmap.md' + all '<base>-<id>.md' parts.
       Checks: file existence, DAG (no cycles), depends->exist, parallel-group consistency,
-      task-coverage (sum of part tasks >= original-plan tasks), original-plan hash.
+      task-coverage (sum of part tasks >= original-plan tasks), original-plan hash,
+      task lines (every '**External:**' and '**Size:**' line of the original, outside
+      code fences, appears verbatim in some part).
       Print JSON with detailed results. Exit 0 on success, 1 on failure.
 
   verify-baseline <dir> <base_name> [--stages all|a[,b...]] [--out <file>]
@@ -515,6 +517,15 @@ def count_tasks_in_original(text: str) -> int:
     return sum(1 for line in lines if re.match(r"^\d+\.\s+\S", line))
 
 
+# Task lines that are task properties, not prose: copied into the parts character for character.
+TASK_LINE_RE = re.compile(r"^\s*\*\*(?:External|Size):\*\*\s*\S")
+
+
+def task_property_lines(text: str) -> List[str]:
+    """`**External:**` and `**Size:**` task lines outside code fences, without indentation."""
+    return [line.strip() for line in _lines_outside_fences(text) if TASK_LINE_RE.match(line)]
+
+
 def cmd_validate_all(directory: str, base_name: str) -> None:
     if not os.path.isdir(directory):
         print_json({"valid": False, "error": f"Directory not found: {directory}"}, 1)
@@ -607,6 +618,17 @@ def cmd_validate_all(directory: str, base_name: str) -> None:
     else:
         coverage["note"] = f"Original plan not found at {original_path}; skipping coverage check"
 
+    # 6. Task lines (**External:**, **Size:**): each one of the original is copied verbatim into some part
+    task_lines: Dict[str, object] = {}
+    if os.path.isfile(original_path):
+        part_lines: Set[str] = set()
+        for fpath in stage_files.values():
+            part_lines.update(line.strip() for line in read_text(fpath).splitlines())
+        original_lines = task_property_lines(read_text(original_path))
+        missing_lines = [line for line in original_lines if line not in part_lines]
+        task_lines = {"original": len(original_lines), "missing": missing_lines}
+        errors.extend(f"Task line not copied verbatim into any part: {line}" for line in missing_lines)
+
     valid = not errors
     print_json(
         {
@@ -614,6 +636,7 @@ def cmd_validate_all(directory: str, base_name: str) -> None:
             "errors": errors,
             "stages": stages,
             "coverage": coverage,
+            "task_lines": task_lines,
         },
         0 if valid else 1,
     )

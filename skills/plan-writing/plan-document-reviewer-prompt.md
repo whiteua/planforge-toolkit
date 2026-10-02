@@ -21,7 +21,7 @@ Subagent (general-purpose):
     | Category | What to Look For |
     |----------|------------------|
     | Spec Alignment | Every spec requirement has a task; no major scope creep beyond the spec |
-    | Environments | Every step that reaches an external system names an environment listed in the header with the user's quoted permission; no step runs on production unless the quote says so; project scripts aimed at other environments are redirected |
+    | Environments | Every step that reaches an external system belongs to a task with an `External` line naming an environment from the settings (the spec's `> Environment:` lines, or the plan header for an old spec) and the access `(read)` or `(write)` that matches what the step does; no `(write)` on `write=deny`, no `(read)` on `read=deny`; production changes are never pre-approved; project scripts aimed at other environments are redirected |
     | Spec Deviations | Differences from the spec are listed under `Deviations from spec` with the user's decision; unlisted differences are issues, listed ones are agreed |
     | Codebase Grounding | Files, symbols and commands the plan relies on exist in the repository at the cited `path:line`; `Create:` targets are new; open the cited files to check, do not trust the plan |
     | Task Decomposition | Clear task boundaries; each postcondition is reachable by that task's own steps |

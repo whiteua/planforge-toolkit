@@ -62,6 +62,12 @@ keeps that structure inside `## Tasks`: one numbered item per task, with its fil
 done-state as nested content. `plan-executor` runs a part as one unit, so the part text must be
 executable as a whole.
 
+`**External:**` and `**Size:**` lines are copied verbatim, character for character, into the part
+task that holds the source task: `**External:**` carries the environment and the access kind the
+executor's consent gate reads, `**Size:**` carries the justification of an oversized task, so
+rephrasing (item 1) never applies to them. `validate-all` fails when one is missing. The part
+header does not change.
+
 ## 7. Oversized part
 
 If a part still holds more than 15 tasks after analysis (the `validate-stage` warning), add to its file:

@@ -36,12 +36,12 @@ Each skill is an independent, installable module. Together they form a coherent 
 
 | Skill | Description | Depends on | Techniques |
 |---|---|---|---|
-| [`plan-brainstorming`](skills/plan-brainstorming/) | Turn ideas into validated design specs through collaborative dialogue | — | Depth-tiered elaboration, spec contract validation |
-| [`plan-writing`](skills/plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` | Spec preflight, plan format contract (`plan-check`), codebase grounding with `path:line` citations and a recorded test baseline |
-| [`plan-splitter`](skills/plan-splitter/) | Decompose a large plan into self-contained parts (`<base>-a.md`, `-b.md`, …) with a dependency roadmap | `plan-iterative-revision` (optional, deep verification) | Gate-decision (5-factor), topological ordering + parallel groups, 3-level VERIFY, self-sufficiency invariant, SHA-256 origin hash, one batch verification run with a machine gate |
-| [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | — | Persistent progress ledger with resume and plan-drift detection, strictly ordered units with retry-first policy, risk-scaled gates, confirmation for units on external systems, rollback snapshots in hidden git refs (no branch commits), run diff and follow-ups file |
-| [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan (or every part of a split plan) until it is error-free | — | Set-algebraic flow analysis (new/resolved/persisted/reintroduced), SHA-1 issue fingerprinting, two-phase separation (audit ≠ implement), single gate authority (regression/churn/unchanged/stuck/limit), 10-class error taxonomy, immutable append-only review trail, batch mode over split parts |
-| [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report; optionally fix the code and re-audit (`fix` / `auto`) | — | task-census completeness gate, evidence anchors (`path#Lx-Ly`) verified against the workspace, confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only audit invariant, separated fix → re-audit loop with protected plan, snapshot diff and bounded cycles |
+| [`plan-brainstorming`](skills/plan-brainstorming/) | Turn ideas into validated design specs through collaborative dialogue | — | Depth-tiered elaboration, spec contract validation, chain settings and per-environment read/write consent recorded in the spec, shared `BACKLOG.md`, dialogue in the user's language |
+| [`plan-writing`](skills/plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` | Spec preflight, plan format contract (`plan-check`), codebase grounding with `path:line` citations and a recorded test baseline, access type on external tasks, justified size exceptions (`**Size:**`) |
+| [`plan-splitter`](skills/plan-splitter/) | Decompose a large plan into self-contained parts (`<base>-a.md`, `-b.md`, …) with a dependency roadmap | `plan-iterative-revision` (optional, deep verification); `plan-brainstorming` (optional, chain settings) | Gate-decision (5-factor) or the `split` setting, topological ordering + parallel groups, 3-level VERIFY, self-sufficiency invariant, SHA-256 origin hash, one batch verification run with a machine gate, `External` and `Size` lines carried verbatim |
+| [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | `plan-brainstorming` (chain settings, `BACKLOG.md`) | Persistent progress ledger with resume, plan-drift and settings-drift detection, strictly ordered units with retry-first policy, risk-scaled gates, read/write consent per external system, foreign-change detection against an expected tree with per-file restore, rollback snapshots in hidden git refs (no branch commits), run diff, findings to `BACKLOG.md` |
+| [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan (or every part of a split plan) until it is error-free | `plan-brainstorming` (chain settings) | Set-algebraic flow analysis (new/resolved/persisted/reintroduced), SHA-1 issue fingerprinting, two-phase separation (audit ≠ implement), single gate authority (regression/churn/unchanged/stuck/limit), 10-class error taxonomy, immutable append-only review trail, batch mode over split parts, preset and stop policy from the chain settings |
+| [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report; optionally fix the code and re-audit (`fix` / `auto`) | `plan-brainstorming` (chain settings, `BACKLOG.md`) | task-census completeness gate, evidence anchors (`path#Lx-Ly`) verified against the workspace, confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only audit invariant (report and `BACKLOG.md` only), separated fix → re-audit loop with protected plan, snapshot diff and bounded cycles |
 | [`writing-skills`](skills/writing-skills/) | Create, test, and deploy new agent skills using TDD methodology | — | Red-green-refactor for skills, subagent-based behavioural testing |
 
 ---
@@ -214,13 +214,15 @@ done
 
 ### Skill dependencies
 
-> `plan-writing` reads contract files from `plan-brainstorming`, and `plan-splitter`'s deep verification (step 8) runs `plan-iterative-revision`. Each pair must be installed in the **same parent directory**.
+> `plan-writing` reads contract files from `plan-brainstorming`, and `plan-splitter`'s deep verification (step 8) runs `plan-iterative-revision`. `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through `plan-brainstorming`'s helper script, and `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it; without it they warn and work without the settings. Each pair must be installed in the **same parent directory**.
 
 ---
 
 ## Updating
 
 This repository follows a **rolling-release model** — every push to `main` is a release. There are no version tags or lockfiles; the latest commit is always the current version.
+
+> **Before updating:** an update replaces the installed skills without a prompt. Changes that break plans in progress are listed in [CHANGELOG.md](CHANGELOG.md). The 2026-09-30 release renames split-plan files, requires an `Environments` block for steps on external systems, and tightens `plan-resolver` reports. The 2026-10 release adds chain settings and read/write consent in the spec, stops `plan-executor` on files changed between tasks, and makes `plan-check` fail a task over 150 lines of code without a `**Size:**` line.
 
 ### How the CLI knows what to update
 
@@ -288,6 +290,7 @@ The CLI does not currently display commit hashes or dates. To verify you are on 
 
 ```
 /plan-brainstorming I want to add OAuth2 authentication to my API
+/plan-brainstorming BACKLOG.md        # next cycle: the unchecked items of the shared backlog
 ```
 
 The skill will guide you through the full brainstorming → spec → plan cycle.
@@ -324,7 +327,7 @@ The skill will guide you through the full brainstorming → spec → plan cycle.
 
 ### Version control
 
-No skill touches an external system without you. A database, API or remote service is reached only after you allow it for a named environment; the permission is never widened to another one, and an existing project script aimed at production is not permission. Plans list the permitted environments with your own words, tasks that use them are marked `External`, and `plan-executor` asks before running each of them.
+No skill touches an external system without you. A database, API or remote service is reached only after you allow it for a named environment, separately for reading and for changes: `read=` and `write=` each take `run` (the whole run), `task` (ask before each task) or `deny`. The permission is never widened to another environment, changes on production are never allowed for a whole run, and an existing project script aimed at production is not permission. The spec records the environments with your own words, tasks that use them are marked `External` with `(read)` or `(write)`, and `plan-executor` asks before such a task unless that access is allowed for the whole run. A read allowed for the whole run also covers the read-only checks of `plan-iterative-revision` and `plan-resolver`.
 
 No skill commits on your branch. `plan-brainstorming` and `plan-writing` write files and leave them uncommitted; `plan-iterative-revision` and `plan-splitter` only add review, roadmap and part files; `plan-resolver`'s fix phase leaves code changes in the working tree for review; `plan-executor` keeps per-unit rollback snapshots in hidden refs (`refs/plan-executor/<run>/<unit>`, removable with `checkpoint-prune`) and never touches your branch. Commit when a block of work is verified, with the message you choose.
 
@@ -368,7 +371,7 @@ Cheap, exact operations (file parsing, counting, hashing, shell probes) run as C
 
 ### SHA-256 workspace fingerprint
 
-A hash of all relevant workspace files is taken at the start of a pass and asserted again at the end. Any file mutation during a nominally read-only operation fails the `assert-readonly` check immediately. This catches accidental writes by the agent itself, not just intentional mutations.
+A hash of all relevant workspace files is taken at the start of a pass and asserted again at the end. Any file mutation during a nominally read-only operation, other than the explicitly allowed outputs (the resolver's report and appended lines of `BACKLOG.md`), fails the `assert-readonly` check immediately. This catches accidental writes by the agent itself, not just intentional mutations.
 
 **Used in:** `plan-resolver` (`plan-splitter` hashes only the source plan and the part files to detect drift)
 
@@ -445,9 +448,25 @@ All three levels must pass before the split is announced. Up to three retry iter
 
 ### Persistent progress ledger
 
-`plan-executor` writes a structured ledger (`state.json`) into an `exec_dir` outside the repository, by default `<repo parent>/.exec/<repo>-<plan>/`; a directory inside the repository or the OS temp dir is refused. Each unit has an explicit state (`pending`, `running`, `done`, `failed`) and an attempt count; a rendered `progress.md` sits beside it. The ledger survives session restarts: re-running `ledger-init` resumes it, and a changed plan or part file is reported as `plan-drift` until the engineer accepts it.
+`plan-executor` writes a structured ledger (`state.json`) into an `exec_dir` outside the repository, by default `<repo parent>/.exec/<repo>-<plan>/`; a directory inside the repository or the OS temp dir is refused. Each unit has an explicit state (`pending`, `running`, `done`, `failed`) and an attempt count; a rendered `progress.md` sits beside it. The ledger survives session restarts: re-running `ledger-init` resumes it, and a changed plan or part file is reported as `plan-drift` until the engineer accepts it. The ledger also stores the chain settings with the hash of their source (`settings-drift` on resume), consents given during the run and the expected file tree used by foreign-change detection.
 
 **Used in:** `plan-executor`
+
+---
+
+### Foreign-change detection (expected tree)
+
+The ledger keeps the git tree the working copy must have before the next unit (`expected_tree`), built with the same temporary index as the snapshots but without a commit. `unit-begin` compares the working copy with it and, on any difference, returns `reason: foreign-changes` with the added, modified and deleted paths instead of starting the unit. The engineer accepts the changes (`accept-changes`), restores those files (`checkpoint-restore --paths … --exec-dir …`) or stops; a run without a confirmation channel stops with a report. `unit-finish` moves the expected tree forward, so a retry after a failure raises no false alarm; `BACKLOG.md` is not compared.
+
+**Used in:** `plan-executor`
+
+---
+
+### Read/write consent per environment
+
+An external system is permitted separately for reading and for changes: `read=` and `write=` each take `run` (the whole run), `task` (ask before every task) or `deny`. Production changes are never `run`: `spec-check`, `plan-check` and the executor's `consent` command reject it. Tasks declare `` **External:** `name` (read|write) ``, and `plan-check` rejects an access the environment denies. `unit-begin` returns each access with `confirmed` and its `source` (`spec`, or `session` for a consent given during the run, cleared on resume). A read allowed for the run also covers the read-only checks of the plan and code audits.
+
+**Used in:** `plan-brainstorming`, `plan-writing`, `plan-executor`, `plan-iterative-revision`, `plan-resolver`
 
 ---
 
@@ -512,9 +531,33 @@ The agent hands its findings to the tool as JSON; the tool renders the review fi
 
 ### Contract-driven plan generation
 
-`plan-writing` starts by running `plan-brainstorming`'s `spec-check` on the spec (8 mandatory sections, empty `Open Questions`) and stops when it fails; the plan it writes is then checked by `plan-check --root`, which enforces the header, `### Task N:` headings, the task core per tier, no placeholders, no commit steps, and that `Create:` targets are new while `Modify:`/`Test:` targets and cited paths exist in the repository. Every existing symbol a task relies on is cited as `path:line`, and the plan header records the test baseline taken before planning. This keeps the plan traceable to the design and grounded in the code rather than in guesses.
+`plan-writing` starts by running `plan-brainstorming`'s `spec-check` on the spec (8 mandatory sections, empty `Open Questions`) and stops when it fails; the plan it writes is then checked by `plan-check --root`, which enforces the header, `### Task N:` headings, the task core per tier, no placeholders, no commit steps, and that `Create:` targets are new while `Modify:`/`Test:` targets and cited paths exist in the repository. Every existing symbol a task relies on is cited as `path:line`, and the plan header records the test baseline taken before planning. This keeps the plan traceable to the design and grounded in the code rather than in guesses. A task over 100 lines of code is split or carries `**Size:** <N> lines — <reason>`; without it `plan-check` warns above 100 lines and fails above 150, and justified tasks are listed as `oversized`.
 
 **Used in:** `plan-writing`, `plan-brainstorming`
+
+---
+
+### Spec-owned chain settings
+
+Every decision the chain needs is taken once, in the spec dialogue, and written above `# Goal`: `> Chain: split=…; revision=…; stop=…; resolver=…`, one `> Environment:` line per external system and `> Backlog: <section>`. `spec-check` validates them and the plan does not copy them. Later skills find them through one reading rule (`brainstorm_tool.py settings`: the plan header if it has settings, else the spec named by `**Spec:**`; parts and roadmaps go through their Source link), so the revision takes its preset and stop policy, the splitter its `split` decision and the executor its resolver choice without asking. When a decision is missing and nobody can be asked, the skill stops with a report instead of guessing. For a spec written before settings existed, `plan-writing` asks as before and records the answers in the plan header.
+
+**Used in:** `plan-brainstorming`, `plan-writing`, `plan-iterative-revision`, `plan-splitter`, `plan-executor`, `plan-resolver`
+
+---
+
+### Shared append-only backlog
+
+One `BACKLOG.md` at the repository root collects what the chain deferred: Out of Scope items of approved specs, findings of the executor and defects of the resolver outside the plan. Its format belongs to `plan-brainstorming`: `backlog-append` adds one line at the end of a goal's section, verifies that every other byte is unchanged and skips duplicates. The `My notes` section is the user's, and only the user checks items off. `/plan-brainstorming BACKLOG.md` turns the unchecked items into the next task.
+
+**Used in:** `plan-brainstorming`, `plan-executor`, `plan-resolver`
+
+---
+
+### Dialogue in the plan's language
+
+Everything the user sees — questions, answer options, status lines, gates, summaries, stop reports — is in the language of the first task statement; only parser tokens stay in English. The language is detected by one deterministic rule (Cyrillic letters over 5% of all letters → Russian), exposed as `detect-lang` and as the `lang` field of `spec-check` and `plan-check`.
+
+**Used in:** all six pipeline skills
 
 ---
 

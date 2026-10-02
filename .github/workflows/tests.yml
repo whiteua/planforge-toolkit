@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-22.04 is pinned: it still ships Python 3.8, the oldest version the skills support.
+        os: [ubuntu-22.04, windows-latest]
+        python: ["3.8", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # The helper scripts are stdlib only; pytest is the single test dependency.
+      - run: python -m pip install --upgrade pip pytest
+      - run: python -m pytest skills -q
+
+  scripts:
+    name: shell and node syntax
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n skills/plan-brainstorming/scripts/start-server.sh
+      - run: bash -n skills/plan-brainstorming/scripts/stop-server.sh
+      - run: node --check skills/plan-brainstorming/scripts/server.cjs

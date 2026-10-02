@@ -17,6 +17,9 @@ TOOL = os.path.abspath(os.path.join(HERE, "..", "scripts", "plan_tool.py"))
 FIXTURE = os.path.join(HERE, "fixtures", "plan01-impl.md")
 EXECUTOR = os.path.abspath(os.path.join(HERE, "..", "..", "plan-executor", "scripts", "executor_tool.py"))
 RESOLVER = os.path.abspath(os.path.join(HERE, "..", "..", "plan-resolver", "scripts", "resolver_tool.py"))
+BRAINSTORM = os.path.abspath(os.path.join(HERE, "..", "..", "plan-brainstorming", "scripts", "brainstorm_tool.py"))
+SETTINGS_SPEC = os.path.join(HERE, "fixtures", "settings01-spec.md")
+SETTINGS_PLAN = os.path.join(HERE, "fixtures", "settings01-impl.md")
 
 
 def _load_module():
@@ -182,6 +185,62 @@ class PlanCheckTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(any("100-lines" in w for w in result["warnings"]))
 
+    SIZE_LINE = "**Size:** 151 lines — таблица данных не делится по смыслу"
+
+    def _with_big_task(self, code_lines, size_line=None):
+        """VALID plus Task 90 with exactly `code_lines` lines of code."""
+        body = "\n".join(f"y{i} = {i}" for i in range(code_lines))
+        task = (
+            "\n### Task 90: Big generated table\n\n**Files:**\n- Create: `big.py`\n\n"
+            + (size_line + "\n\n" if size_line else "")
+            + "**Preconditions:**\n- none\n\n**Postconditions:**\n- `big.py` exists.\n\n"
+            "- [ ] **Step 1: Write the table**\n\n```python\n" + body + "\n```\n"
+        )
+        return VALID.rstrip("\n") + "\n" + task
+
+    def test_code_size_limits(self):
+        at_limit = self.check(self._with_big_task(100))
+        self.assertTrue(at_limit["ok"], at_limit["errors"])
+        self.assertFalse(any(w.startswith("Task 90:") for w in at_limit["warnings"]))
+        warned = self.check(self._with_big_task(150))
+        self.assertTrue(warned["ok"], warned["errors"])
+        self.assertTrue(any(w.startswith("Task 90: 150 lines") and "100-lines" in w for w in warned["warnings"]))
+        failed = self.check(self._with_big_task(151))
+        self.assertFalse(failed["ok"])
+        self.assertIn(
+            "Task 90: 151 lines of code (limit 100, error above 150) "
+            "without a '**Size:** <N> lines — <reason>' line",
+            failed["errors"],
+        )
+        self.assertFalse(any(w.startswith("Task 90:") for w in failed["warnings"]))
+        self.assertNotIn("90", failed["oversized"])
+
+    def test_size_line_justifies_large_task(self):
+        result = self.check(self._with_big_task(151, self.SIZE_LINE))
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertFalse(any(w.startswith("Task 90:") for w in result["warnings"]))
+        self.assertIn("90", result["oversized"])
+        self.assertNotIn("90", self.check(VALID)["oversized"])
+
+    def test_malformed_size_line(self):
+        self.assertError(self._with_big_task(10, "**Size:** big"), "malformed size line")
+
+    def test_size_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_name = self.check(VALID)["spec"]
+            with open(os.path.join(tmp, spec_name), "w", encoding="utf-8") as fh:
+                fh.write("> Tier: Standard\n\n# Goal\n\nx\n")
+            path = os.path.join(tmp, "size-impl.md")
+            for text, expected_code, listed in (
+                (self._with_big_task(151), 1, False),
+                (self._with_big_task(151, self.SIZE_LINE), 0, True),
+            ):
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                code, out = _run(TOOL, "plan-check", path)
+                self.assertEqual(code, expected_code, out["errors"])
+                self.assertEqual("90" in out["oversized"], listed)
+
     def test_russian_body(self):
         text = VALID.replace("Parse the verbose flag", "Разбор флага verbose").replace(
             "Output without `--verbose` is unchanged.", "Вывод без флага не меняется.")
@@ -199,6 +258,52 @@ class PlanCheckTest(unittest.TestCase):
             self.assertEqual(_run(TOOL, "plan-check", os.path.join(tmp, "missing.md"))[0], 2)
         proc = subprocess.run([sys.executable, TOOL], capture_output=True)
         self.assertEqual(proc.returncode, 2)
+
+
+RU_PLAN = (
+    VALID.replace(
+        "**Goal:** `cli.py --verbose` prints the input path before the line count.",
+        "**Goal:** `cli.py --verbose` печатает путь к файлу перед числом строк.",
+    )
+    .replace(
+        "**Architecture:** One new argparse flag in the existing `main()`; output order is path, then count.",
+        "**Architecture:** Один новый флаг argparse в существующей `main()`; сначала путь, затем число строк.",
+    )
+    .replace("Output without `--verbose` is unchanged.", "Вывод без `--verbose` не меняется.")
+    .replace("Task 1 is done.", "Задача 1 выполнена.")
+)
+
+
+class PlanCheckLangTest(unittest.TestCase):
+    def test_detect_lang_text(self):
+        self.assertEqual(pt.detect_lang_text("Добавить флаг"), "ru")
+        self.assertEqual(pt.detect_lang_text("Add a flag"), "en")
+        self.assertEqual(pt.detect_lang_text(""), "en")
+        self.assertEqual(pt.detect_lang_text("ж" * 5 + "a" * 95), "en")
+        self.assertEqual(pt.detect_lang_text("ж" * 6 + "a" * 94), "ru")
+
+    def test_lang_follows_the_body(self):
+        self.assertEqual(pt.check_plan(VALID)["lang"], "en")
+        result = pt.check_plan(RU_PLAN)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["lang"], "ru")
+
+    def test_code_fences_do_not_count(self):
+        fenced = VALID.replace(
+            'p.add_argument("--verbose", action="store_true")',
+            "# Этот комментарий внутри блока кода не считается телом плана и не меняет язык диалога\n"
+            "# Ещё одна строка комментария на русском языке внутри того же блока кода",
+        )
+        self.assertEqual(pt.check_plan(fenced)["lang"], "en")
+
+    def test_cli_reports_lang(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ru-impl.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(RU_PLAN)
+            code, out = _run(TOOL, "plan-check", path)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["lang"], "ru")
 
 
 @unittest.skipUnless(os.path.isfile(EXECUTOR), "plan-executor not installed alongside")
@@ -226,6 +331,144 @@ class ResolverContractTest(unittest.TestCase):
         self.assertEqual(out["plan_ids"], [t["id"] for t in pt.check_plan(VALID)["tasks"]])
         self.assertEqual(out["uncovered"], ["1.1", "2"])
         self.assertEqual(code, 1)
+
+
+@unittest.skipUnless(os.path.isfile(BRAINSTORM), "plan-brainstorming not installed alongside")
+class SettingsTest(unittest.TestCase):
+    """plan-check reads settings by the shared rule: plan header first, else the spec at **Spec:**."""
+
+    def setUp(self):
+        with open(SETTINGS_PLAN, encoding="utf-8") as fh:
+            self.plan = fh.read()
+        with open(SETTINGS_SPEC, encoding="utf-8") as fh:
+            self.spec = fh.read()
+
+    def check_pair(self, plan, spec=None):
+        """plan-check on `plan` written as settings01-impl.md next to `spec` (None: no spec file)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            if spec is not None:
+                with open(os.path.join(tmp, "settings01-spec.md"), "w", encoding="utf-8") as fh:
+                    fh.write(spec)
+            path = os.path.join(tmp, "settings01-impl.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(plan)
+            return pt.check_plan(plan, None, path)
+
+    def test_plan_settings_reads_spec(self):
+        settings, errors, warnings = pt._plan_settings(SETTINGS_PLAN)
+        self.assertEqual(errors, [])
+        self.assertEqual(settings["from"], "spec")
+        self.assertEqual([e["name"] for e in settings["environments"]], ["dev_db", "prod_db"])
+        self.assertEqual(settings["chain"]["split"], "never")
+
+    def test_plan_settings_missing_spec_is_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "plan01-impl.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(VALID)
+            settings, errors, warnings = pt._plan_settings(path)
+        self.assertEqual(errors, [])
+        self.assertFalse(settings["ok"])
+        self.assertTrue(any("settings-source-missing" in w for w in warnings), warnings)
+
+    def test_plan_settings_without_path(self):
+        self.assertEqual(pt._plan_settings(None), (None, [], []))
+
+    def test_check_plan_reports_settings_and_size(self):
+        result = pt.check_plan(self.plan, None, SETTINGS_PLAN)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["settings"]["from"], "spec")
+        self.assertEqual(result["environments"], ["dev_db", "prod_db"])
+        self.assertEqual(result["task_count"], 2)
+        self.assertEqual(result["plan_bytes"], len(self.plan.encode("utf-8")))
+
+    def test_text_only_call_keeps_legacy_result(self):
+        result = pt.check_plan(VALID)
+        self.assertIsNone(result["settings"])
+        self.assertEqual(result["task_count"], 3)
+        self.assertEqual(result["warnings"], [])
+
+    def test_unlisted_environment_names_both_sources(self):
+        plan = self.plan.replace("`prod_db` (read)", "`stage_db` (read)")
+        result = pt.check_plan(plan, None, SETTINGS_PLAN)
+        self.assertTrue(any("`stage_db` is not listed in the settings" in e for e in result["errors"]), result["errors"])
+
+    def test_external_without_settings_is_error(self):
+        result = self.check_pair(self.plan)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("settings are unavailable" in e for e in result["errors"]), result["errors"])
+
+    def test_missing_spec_without_external_is_warning(self):
+        result = self.check_pair(VALID)
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(any("settings-source-missing" in w for w in result["warnings"]), result["warnings"])
+
+    def test_access_required_when_environment_has_rights(self):
+        plan = self.plan.replace("`dev_db` (write)", "`dev_db`")
+        result = self.check_pair(plan, self.spec)
+        self.assertTrue(any("needs the access type" in e for e in result["errors"]), result["errors"])
+
+    def test_write_on_write_deny_is_error(self):
+        plan = self.plan.replace("`prod_db` (read)", "`prod_db` (write)")
+        result = self.check_pair(plan, self.spec)
+        self.assertTrue(any("write=deny" in e for e in result["errors"]), result["errors"])
+
+    def test_read_on_read_deny_is_error(self):
+        spec = self.spec.replace("read=run, write=task", "read=deny, write=task")
+        plan = self.plan.replace("`dev_db` (write)", "`dev_db` (read)")
+        result = self.check_pair(plan, spec)
+        self.assertTrue(any("read=deny" in e for e in result["errors"]), result["errors"])
+
+    def test_legacy_header_without_rights_still_passes(self):
+        env_block = '**Environments:**\n- `dev_db` (test) — "this database is made for tests" (2026-09-30)\n\n'
+        plan = VALID.replace("**Tier:** Standard\n", "**Tier:** Standard\n\n" + env_block, 1)
+        plan = plan.replace("**Preconditions:**", "**External:** `dev_db` — smoke test\n\n**Preconditions:**", 1)
+        result = self.check_pair(plan)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["settings"]["from"], "plan-header")
+        self.assertIsNone(result["settings"]["environments"][0]["read"])
+        self.assertTrue(any("has no access type" in w for w in result["warnings"]), result["warnings"])
+
+    def test_header_settings_win_over_spec(self):
+        header = '**Environments:**\n- `dev_db` (test; read=run, write=run) — "Smoke test on dev_db? — Yes" (2026-10-01)\n\n'
+        plan = self.plan.replace("**Tier:** Standard\n", "**Tier:** Standard\n\n" + header, 1)
+        result = self.check_pair(plan, self.spec)
+        self.assertEqual(result["settings"]["from"], "plan-header")
+        self.assertEqual(result["environments"], ["dev_db"])
+        self.assertTrue(any("`prod_db` is not listed" in e for e in result["errors"]), result["errors"])
+
+    def test_bad_chain_and_duplicate_backlog_in_header_fail(self):
+        header = "**Chain:** split=bogus\n\n**Backlog:** a\n\n**Backlog:** b\n\n"
+        plan = VALID.replace("**Tier:** Standard\n", "**Tier:** Standard\n\n" + header, 1)
+        result = self.check_pair(plan)
+        self.assertFalse(result["ok"])
+        settings_errors = [e for e in result["errors"] if e.startswith("settings: line ")]
+        self.assertTrue(any("unknown value 'bogus' for chain key 'split'" in e for e in settings_errors), result["errors"])
+        self.assertTrue(any("duplicate Backlog line" in e for e in settings_errors), result["errors"])
+
+
+@unittest.skipUnless(os.path.isfile(BRAINSTORM), "plan-brainstorming not installed alongside")
+class BrainstormContractTest(unittest.TestCase):
+    """plan-check must see the settings that spec-check and resolve_settings see."""
+
+    def test_spec_check_and_plan_check_agree(self):
+        code, spec_out = _run(BRAINSTORM, "spec-check", SETTINGS_SPEC)
+        self.assertEqual(code, 0, spec_out)
+        code, plan_out = _run(TOOL, "plan-check", SETTINGS_PLAN)
+        self.assertEqual(code, 0, plan_out)
+        resolved = pt._load_brainstorm_tool().resolve_settings(SETTINGS_PLAN)
+        self.assertEqual([e["name"] for e in resolved["environments"]], ["dev_db", "prod_db"])
+        self.assertEqual(spec_out["environments"], resolved["environments"])
+        self.assertEqual(plan_out["settings"]["environments"], resolved["environments"])
+        self.assertEqual(plan_out["settings"]["chain"], resolved["chain"])
+        self.assertEqual(plan_out["environments"], ["dev_db", "prod_db"])
+        self.assertEqual(plan_out["task_count"], 2)
+
+    def test_cli_on_legacy_fixture(self):
+        code, out = _run(TOOL, "plan-check", FIXTURE)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["task_count"], 3)
+        self.assertTrue(any("settings-source-missing" in w for w in out["warnings"]), out["warnings"])
 
 
 if __name__ == "__main__":

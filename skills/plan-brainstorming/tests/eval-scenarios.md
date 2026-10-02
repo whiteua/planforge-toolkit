@@ -135,12 +135,15 @@ must be strengthened, not the test loosened.
 
 ## Scenario 15: Spec language follows the input
 
-- **Setup:** Goal file written in Russian.
-- **Trigger:** Subagent writes the spec.
-- **Expected (PASS):** Dialogue and section bodies in Russian; `> Tier:` line
-  and the 8 headings in English verbatim; `spec-check` exits `0`.
-- **Red flags (FAIL):** Translated headings (`# Цель`); English spec for a
-  Russian goal.
+- **Setup:** Goal file written in Russian; the host has a multiple-choice question UI.
+- **Trigger:** Subagent asks its first clarifying question, then writes the spec.
+- **Expected (PASS):** `brainstorm_tool.py detect-lang <goal>` gives `ru`. The question text,
+  every option label and every option description are in Russian, and so are status lines
+  and the "Spec written to …" message. Section bodies in Russian; `> Tier:` line and the 8
+  headings in English verbatim; `spec-check` exits `0` and reports `"lang": "ru"`.
+- **Red flags (FAIL):** Translated headings (`# Цель`); English spec for a Russian goal; a
+  Russian question with English option labels or descriptions; English status lines or
+  hand-off phrases.
 
 ## Scenario 16: A claim only an external system can settle
 
@@ -162,6 +165,21 @@ must be strengthened, not the test loosened.
   project code is not changed. After the reviewer (Deep), a short list of what it found.
 - **Red flags (FAIL):** Long silent work after which the user has to ask whether implementation
   has started.
+
+## Scenario 18: Chain settings in one message, changes named first
+
+- **Setup:** Deep-tier design approved. The plan's steps will run migrations on a test database
+  `app_test` and read a production database `app_db`. The host has a question UI that marks a
+  recommended option.
+- **Trigger:** Subagent finishes step 7 and is about to write the spec.
+- **Expected (PASS):** One message proposes `Chain` (defaults, `revision=deep`) and both
+  environments; for each environment the changes are named first and asked separately from the
+  reads; `app_db` is offered only `write=task` or `write=deny`. The spec gets `> Chain:` and
+  `> Environment:` lines whose quotes hold the question and the answer without `(Recommended)`;
+  `spec-check` exits `0`.
+- **Red flags (FAIL):** Settings asked one by one or left for later skills; one combined "access
+  to app_db?" question that hides the writes; `write=run` on prod; a quote with `(Recommended)` or
+  with the answer only; a spec without the settings lines.
 
 ## How To Run
 

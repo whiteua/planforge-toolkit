@@ -107,6 +107,15 @@ BUILTIN_SETTINGS: Dict[str, Dict[str, Any]] = {
     "fallback": {"parallel": 1, "roles": {role: {"model": None, "effort": None} for role in ROLES}},
 }
 ROLE_KEYS = ("model", "effort", "fallback")
+# Claude Code model aliases: each points at the current model of its family and cannot be pinned;
+# a full model id (claude-sonnet-5-5) pins the version (PROFILES.md, Pinned models).
+MODEL_ALIASES = ("sonnet", "opus", "haiku", "fable")
+
+
+def _pinned(roles: Dict[str, Any]) -> Dict[str, bool]:
+    """{role: True} when the role's model is a full model id: not an alias, not null (inherited)."""
+    return {role: isinstance(entry.get("model"), str) and entry["model"] not in MODEL_ALIASES
+            for role, entry in roles.items()}
 
 
 def _roles_errors(where: str, roles: Any) -> List[str]:
@@ -184,7 +193,8 @@ def load_settings(path: str, profile: str) -> Dict[str, Any]:
     for role, entry in ((body or {}).get("roles") or {}).items():
         roles[role].update(entry)
     return {"ok": not errors, "source": "file" if body is not None or errors else "builtin", "profile": profile,
-            "parallel": (body or {}).get("parallel", builtin["parallel"]), "roles": roles, "errors": errors}
+            "parallel": (body or {}).get("parallel", builtin["parallel"]), "roles": roles,
+            "pinned": _pinned(roles), "errors": errors}
 
 
 def cmd_settings_load(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:

@@ -170,6 +170,16 @@ class SettingsLoadTest(HomeCase):
         self.assertEqual(out["roles"]["writing"], {"model": "fable", "effort": "high"})
         self.assertEqual(self.run_main("settings-load", "--profile", "github-copilot")[1]["source"], "builtin")
 
+    def test_pinned_marks_full_model_ids(self):
+        out = self.run_main("settings-load", "--profile", "claude-code")[1]
+        self.assertEqual(out["pinned"], {role: False for role in ct.ROLES})
+        self.assertEqual(self.run_main("settings-load", "--profile", "fallback")[1]["pinned"],
+                         {role: False for role in ct.ROLES})
+        self.write_settings({"profiles": {"claude-code": {"roles": {"audit": {"model": "claude-sonnet-5-5"}}}}})
+        out = self.run_main("settings-load", "--profile", "claude-code")[1]
+        self.assertEqual(out["pinned"], dict({role: False for role in ct.ROLES}, audit=True))
+        self.assertEqual(out["roles"]["audit"], {"model": "claude-sonnet-5-5", "effort": "high"})
+
     def test_file_option_wins_over_home(self):
         path = os.path.join(self.tmp, "my.json")
         with open(path, "w", encoding="utf-8") as fh:
@@ -266,12 +276,14 @@ class ModelPickTest(HomeCase):
 class ExampleSettingsTest(HomeCase):
     EXAMPLE = Path(__file__).resolve().parents[1] / "assets" / "runner.example.json"
 
-    def test_example_loads_and_equals_the_builtin_defaults(self):
+    def test_example_loads_with_full_model_ids(self):
         for profile in ("claude-code", "github-copilot"):
             code, out = self.run_main("settings-load", "--file", str(self.EXAMPLE), "--profile", profile)
             self.assertEqual((code, out["source"], out["errors"]), (0, "file", []))
-            self.assertEqual(out["roles"], ct.BUILTIN_SETTINGS[profile]["roles"])
+            self.assertEqual(tuple(out["roles"]), ct.ROLES)
             self.assertEqual(out["parallel"], ct.BUILTIN_SETTINGS[profile]["parallel"])
+        out = self.run_main("settings-load", "--file", str(self.EXAMPLE), "--profile", "claude-code")[1]
+        self.assertEqual(out["pinned"], {role: True for role in ct.ROLES})  # an alias would not pin the version
 
 
 class RunInitHelpersTest(unittest.TestCase):
@@ -1494,6 +1506,34 @@ class PlanIdContractTest(HomeCase):
                 journal = self.tool(BRAINSTORM, "journal-path", plan, "--create")["journal"]
                 entries = [(p["id"], p["spec"]) for p in bt.journal_load(journal)["plans"]]
                 self.assertEqual(entries, [(bt._journal_plan_id(ct._derived_plan(name)), name)])
+
+
+class AskSpecTest(unittest.TestCase):
+    def test_stage_failed_ask_names_the_spec_of_the_plan(self):
+        entry = _t2_plan("a-spec.md", done=("writing",), revision="failed")
+        entry["stages"]["revision"]["finished_at"] = "2026-10-02T01:31:00Z"
+        ask = ct._stage_step({"events": _t2_failed_events("a-impl", "revision", 2)}, _t2_state(entry),
+                             "revision", None)
+        self.assertEqual((ask["kind"], ask["spec"], ask["plan"]), ("ask", "a-spec.md", "a-impl.md"))
+
+
+class RunnerDocsTest(unittest.TestCase):
+    REFS = Path(__file__).resolve().parents[1] / "references"
+
+    def test_every_journal_question_of_the_runner_passes_the_spec(self):
+        for name in ("LOOP.md", "START.md"):
+            lines = [line for line in (self.REFS / name).read_text(encoding="utf-8").splitlines()
+                     if "J journal-question" in line]
+            self.assertTrue(lines, name)
+            for line in lines:
+                self.assertIn("--spec ", line, f"{name}: {line[:100]}")
+
+    def test_profiles_and_start_say_an_alias_does_not_pin_the_version(self):
+        for name in ("PROFILES.md", "START.md"):
+            text = (self.REFS / name).read_text(encoding="utf-8")
+            self.assertIn("does not pin the version", text, name)
+            self.assertIn("pinned", text, name)
+        self.assertIn("subagent_type: planforge-<role>", (self.REFS / "PROFILES.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

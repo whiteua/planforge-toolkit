@@ -112,6 +112,12 @@ case) fails with exit 1, and the user section is found regardless of case.
 - Fixes: a `> **Source:**` line and a link target in `<…>` are read in roadmaps and parts;
   `**External:**` lines inside code blocks no longer count; `backlog-append` keeps the file mode of
   `BACKLOG.md` and writes to the target of a symlinked `BACKLOG.md`.
+- `plan-brainstorming` checks off the `BACKLOG.md` items an approved spec took in (`backlog-mark`,
+  only the checkbox byte changes); `[x]` means "taken into an approved spec", not "done", and
+  unchecking stays with the user. `journal-question --spec` binds the plan entry that a question
+  creates before `plan-writing` to its spec. `settings-load` returns `pinned` per role: an alias
+  (`sonnet`, `opus`, `haiku`, `fable`) does not pin the version, a full model id does, and such a
+  role runs through its agent definition file.
 
 ### Plans in progress
 
@@ -128,6 +134,11 @@ case) fails with exit 1, and the user section is found regardless of case.
 - Nothing to migrate for the journal: the first skill that runs creates it. Old
   `<plan>-followups.json` files stay as they are and are not read.
 - Journals without a `runner` section stay valid; `plan-chain-runner` adds it at its start.
+- A journal with a time field that is not `YYYY-MM-DDTHH:MM:SSZ` (`created_at`, `*_at`, `at`) now
+  fails `journal-validate`, and `plan-chain-runner` stops on it with `journal-corrupt`: set the
+  field by hand (`null` only where the journal format allows it). `--spec` of `journal-event` or
+  `journal-question` that differs from the spec of the plan's entry now fails with
+  `journal-plan-unknown`.
 
 ## 2026-09-30
 

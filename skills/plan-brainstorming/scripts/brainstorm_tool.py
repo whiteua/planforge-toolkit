@@ -25,11 +25,12 @@ Commands:
   detect-lang       <file|->
   backlog-append    <root> --section S --source "skill, artifact" --item TEXT [--lang ru|en] [--plain] [--date D]
   backlog-parse     <BACKLOG.md> [--section S]
+  backlog-mark      <root> --section S --item TEXT
   journal-path      <spec|plan|roadmap|part.md> [--create]
   journal-event     <journal> --skill S --plan P --stage ST --status X [--reason R] [--input F]
                     [--artifact k=v|k[]=v]... [--data JSON] [--spec SPEC]
   journal-unit      <journal> --plan P --kind unit-begin|unit-finish --data JSON
-  journal-question  <journal> --skill S --plan P --stage ST --text T [--option O]... [--answer A]
+  journal-question  <journal> --skill S --plan P --stage ST --text T [--option O]... [--answer A] [--spec SPEC]
   journal-answer    <journal> <Qn> (--answer A | --applied)
   journal-finding   <journal> --skill S --plan P --file F [--line N] --summary T --failure-scenario T [--backlog-root R]
   journal-commit    <journal> --plan P --sha SHA --subject S [--file F]...
@@ -893,6 +894,81 @@ def backlog_append(root: str, section: str, source: str, item: str, lang: str = 
     return {**result, "action": "created" if created else "appended"}
 
 
+def backlog_mark(root: str, section: str, item: str) -> Dict[str, Any]:
+    """Check off `- [ ] <item>` of `## <section>` in `<root>/BACKLOG.md`: the item entered an approved
+    spec. Only the checkbox byte changes. marked / already; not-found and ambiguous write nothing."""
+    if not os.path.isdir(root):
+        raise InputError(f"root is not a directory: {root}")
+    section = _backlog_field("section", section)
+    item = _backlog_field("item", item)
+    if _is_user_section(section):
+        raise BacklogError(f"user-section: section '{section}' belongs to the user; skills never write there")
+    path = os.path.abspath(os.path.join(root, BACKLOG_FILE))
+    result: Dict[str, Any] = {"ok": True, "path": path, "section": section, "item": item}
+    missing = dict(result, ok=False, action="not-found", errors=[f"not-found: '{item}' in '## {section}'"])
+    try:
+        with open(path, "rb") as fh:
+            old = fh.read()
+    except FileNotFoundError:
+        return missing
+    except OSError as exc:
+        raise InputError(f"cannot read {path}: {exc}") from exc
+    try:
+        text = old.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BacklogError(f"{path} is not UTF-8, file not written: {exc}") from exc
+    lines = _backlog_lines(text)
+    unchecked, checked = _backlog_mark_lines(lines, section, item)
+    if len(unchecked) > 1:
+        return dict(result, ok=False, action="ambiguous", lines=[index + 1 for index in unchecked],
+                    errors=[f"ambiguous: {len(unchecked)} unchecked lines of '## {section}' read '{item}'"])
+    if not unchecked:
+        return dict(result, action="already", line=checked[0] + 1) if checked else missing
+    index = unchecked[0]
+    offset = sum(len(line) for line in lines[:index]) + len(lines[index]) - len(lines[index].lstrip("﻿")) + 3
+    new_text = text[:offset] + "x" + text[offset + 1:]
+    new = new_text.encode("utf-8")
+    if text[offset] != " " or len(new) != len(old) or sum(a != b for a, b in zip(old, new)) != 1:
+        raise BacklogError(f"{path}: more than the checkbox would change, file not written")
+    try:
+        _atomic_write_text(path, new_text)
+    except OSError as exc:
+        raise BacklogError(f"{path}: write failed, file left unchanged: {exc}") from exc
+    with open(path, "rb") as fh:
+        if fh.read() != new:
+            raise BacklogError(f"{path}: content after write differs from the expected bytes")
+    return dict(result, action="marked", line=index + 1)
+
+
+def _backlog_item_text(body: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """(text, source, date) of an item body: " — <source>, <YYYY-MM-DD>" at the end is split off."""
+    if " — " in body:
+        head, tail = body.rsplit(" — ", 1)
+        found = BACKLOG_TAIL_RE.match(tail)
+        if found:
+            return head, found.group("source"), found.group("date")
+    return body, None, None
+
+
+def _backlog_mark_lines(lines: List[str], section: str, item: str) -> Tuple[List[int], List[int]]:
+    """Indexes of the item lines of `## <section>`, outside code fences, whose text (as backlog-parse
+    gives it) is `item`: (unchecked, checked)."""
+    headings, fenced = _backlog_scan(lines)
+    unchecked: List[int] = []
+    checked: List[int] = []
+    current: Optional[str] = None
+    for index, (line, heading, in_fence) in enumerate(zip(lines, headings, fenced)):
+        if heading is not None:
+            current = heading
+            continue
+        if in_fence or current != f"## {section}":
+            continue
+        match = BACKLOG_ITEM_RE.match(line.lstrip("﻿").rstrip())
+        if match and _backlog_item_text(match.group("body"))[0] == item:
+            (unchecked if match.group("mark") == " " else checked).append(index)
+    return unchecked, checked
+
+
 def backlog_parse(path: str, section: Optional[str] = None) -> Dict[str, Any]:
     """Unchecked `- [ ]` items of BACKLOG.md, optionally of one section."""
     items: List[Dict[str, Any]] = []
@@ -911,12 +987,7 @@ def backlog_parse(path: str, section: Optional[str] = None) -> Dict[str, Any]:
             continue
         if section is not None and current != section:
             continue
-        text, source, day = match.group("body"), None, None
-        if " — " in text:
-            head, tail = text.rsplit(" — ", 1)
-            found = BACKLOG_TAIL_RE.match(tail)
-            if found:
-                text, source, day = head, found.group("source"), found.group("date")
+        text, source, day = _backlog_item_text(match.group("body"))
         items.append({"section": current, "text": text, "source": source, "date": day, "line": number})
     return {"ok": True, "items": items}
 
@@ -929,6 +1000,11 @@ def cmd_backlog_append(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 
 def cmd_backlog_parse(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     return 0, backlog_parse(args.file, args.section)
+
+
+def cmd_backlog_mark(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    result = backlog_mark(args.root, args.section, args.item)
+    return (0 if result["ok"] else 1), result
 
 
 # Chain journal <goal>-chain.json (spec plan-chain-runner-1, section A): stages of every plan of a
@@ -1203,6 +1279,12 @@ def _plan_entry(data: Dict[str, Any], journal: str, plan_path: str, spec: Option
     plan_id = name[:-3] if is_file else name
     for entry in data["plans"]:
         if entry.get("id") == plan_id:
+            if spec is not None:  # a question asked before plan-writing binds the entry to its spec
+                rel = _journal_rel(journal, spec)
+                if entry.get("spec") is None:
+                    entry["spec"] = rel
+                elif entry["spec"] != rel:
+                    raise InputError(f"journal-plan-unknown: plan {plan_id} belongs to spec {entry['spec']}, not {rel}")
             return entry
     if not create or not is_file:
         raise InputError(f"unknown-plan: {plan_path}")
@@ -1352,20 +1434,23 @@ def journal_unit(journal: str, plan: str, kind: str, data: Dict[str, Any]) -> Di
 
 
 def journal_question(journal: str, skill: str, plan: str, stage: str, text: str,
-                     options: Optional[List[str]] = None, answer: Optional[str] = None) -> Dict[str, Any]:
+                     options: Optional[List[str]] = None, answer: Optional[str] = None,
+                     spec: Optional[str] = None) -> Dict[str, Any]:
     """New Qn. Without an answer it stays open and a running stage stops; with one it is answered at once."""
     if stage not in STAGES:
         raise InputError(f"unknown stage: {stage} (stages: {', '.join(STAGES)})")
     if not (text or "").strip() or (answer is not None and not answer.strip()):
         raise InputError("question text and answer must be non-empty")
     journal = os.path.abspath(journal)
-    return journal_update(journal, lambda doc: _add_question(doc, journal, skill, plan, stage, text, options, answer))
+    return journal_update(journal, lambda doc: _add_question(doc, journal, skill, plan, stage, text, options, answer,
+                                                             spec=spec))
 
 
 def _add_question(doc: Dict[str, Any], journal: str, skill: str, plan: str, stage: str, text: str,
-                  options: Optional[List[str]] = None, answer: Optional[str] = None) -> Dict[str, Any]:
-    """journal_question inside a mutate that already holds the lock."""
-    entry = _plan_entry(doc, journal, plan)
+                  options: Optional[List[str]] = None, answer: Optional[str] = None,
+                  spec: Optional[str] = None) -> Dict[str, Any]:
+    """journal_question inside a mutate that already holds the lock; `spec` as in journal_event."""
+    entry = _plan_entry(doc, journal, plan, spec=spec)
     record = entry["stages"][stage]
     qid = f"Q{len(doc['questions']) + 1}"
     question = {"id": qid, "plan": entry["id"], "stage": stage, "skill": skill, "text": text,
@@ -1389,7 +1474,7 @@ def cmd_journal_unit(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 
 def cmd_journal_question(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     return 0, journal_question(args.journal, args.skill, args.plan, args.stage, args.text,
-                               options=args.option, answer=args.answer)
+                               options=args.option, answer=args.answer, spec=args.spec)
 
 
 def journal_answer(journal: str, qid: str, answer: Optional[str] = None, applied: bool = False) -> Dict[str, Any]:
@@ -1767,9 +1852,43 @@ def _runner_errors(runner: Any) -> List[str]:
     return errors
 
 
-def _journal_structure_errors(data: Dict[str, Any]) -> List[str]:
+JOURNAL_TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+
+
+def _journal_time_errors(data: Dict[str, Any]) -> List[str]:
+    """Time fields in the format of _iso_now, each error with its path. Null is allowed for stage
+    started_at/finished_at, question answered_at and session ended_at; stage times and applied_at
+    may be absent. Called on a journal whose top-level keys have their types."""
+    fields: List[Tuple[str, Any, bool]] = [("created_at", data["created_at"], False)]
+    for index, entry in enumerate(data["plans"]):
+        stages = entry.get("stages") if isinstance(entry, dict) else None
+        for stage, record in (stages.items() if isinstance(stages, dict) else ()):
+            fields += [(f"plans[{index}].stages.{stage}.{name}", record[name], True)
+                       for name in ("started_at", "finished_at") if isinstance(record, dict) and name in record]
+    for index, question in enumerate(data["questions"]):
+        if isinstance(question, dict):
+            fields += [(f"questions[{index}].asked_at", question.get("asked_at"), False),
+                       (f"questions[{index}].answered_at", question.get("answered_at"), True)]
+            if "applied_at" in question:
+                fields.append((f"questions[{index}].applied_at", question["applied_at"], False))
+    fields += [(f"findings[{index}].recorded_at", item.get("recorded_at"), False)
+               for index, item in enumerate(data["findings"]) if isinstance(item, dict)]
+    fields += [(f"events[{index}].at", item.get("at"), False)
+               for index, item in enumerate(data["events"]) if isinstance(item, dict)]
+    runner = data.get("runner")
+    sessions = runner.get("sessions") if isinstance(runner, dict) else None
+    for index, item in enumerate(sessions if isinstance(sessions, list) else ()):
+        if isinstance(item, dict):
+            fields += [(f"runner.sessions[{index}].started_at", item.get("started_at"), False),
+                       (f"runner.sessions[{index}].ended_at", item.get("ended_at"), True)]
+    return [f"{where}: not a journal time (YYYY-MM-DDTHH:MM:SSZ)" for where, value, nullable in fields
+            if not (value is None and nullable)
+            and not (isinstance(value, str) and JOURNAL_TIME_RE.fullmatch(value))]
+
+
+def _journal_structure_errors(data: Dict[str, Any], times: bool = True) -> List[str]:
     """Keys and types, plan ids, stage names and statuses, Qn/Fn ids, question states, event kinds,
-    the optional runner section."""
+    the optional runner section and, with `times`, the time fields (_journal_time_errors)."""
     errors = [f"'{key}' must be {kind.__name__}" for key, kind in _VALIDATE_TOP_KEYS
               if not isinstance(data.get(key), kind) or isinstance(data.get(key), bool)]
     if errors:
@@ -1803,6 +1922,8 @@ def _journal_structure_errors(data: Dict[str, Any]) -> List[str]:
         if not isinstance(event, dict) or event.get("kind") not in EVENT_KINDS:
             errors.append(f"events[{index}]: kind must be one of {', '.join(EVENT_KINDS)}")
     errors.extend(_journal_item_errors(data))
+    if times:  # before the runner errors: test_runner_errors_come_after_the_other_structure_errors_and_stop_the_replay
+        errors.extend(_journal_time_errors(data))
     if "runner" in data:  # optional section of plan-chain-runner
         errors.extend(_runner_errors(data["runner"]))
     return errors
@@ -2066,7 +2187,8 @@ def _journal_rebuild(journal: str) -> Tuple[bool, Optional[str], List[str]]:
     and a fresh one is built from the files next to it; a readable journal is left as it is. Valid
     version-1 JSON with structural errors (journal-validate) counts as corrupt too."""
     try:
-        if not _journal_structure_errors(journal_load(journal)):
+        # A bad time alone is fixed by hand (plan-chain-runner LOOP.md, Journal errors), not rebuilt.
+        if not _journal_structure_errors(journal_load(journal), times=False):
             return False, None, []
     except InputError as exc:
         if not str(exc).startswith(("journal-corrupt", "journal-missing")):
@@ -2164,6 +2286,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_bl_parse.add_argument("file", help="path to BACKLOG.md")
     p_bl_parse.add_argument("--section", help="only this section")
     p_bl_parse.set_defaults(func=cmd_backlog_parse)
+    p_bl_mark = sub.add_parser("backlog-mark", help="check off one item of an approved spec in <root>/BACKLOG.md")
+    p_bl_mark.add_argument("root", help="git top-level of the spec's directory, else the working directory")
+    p_bl_mark.add_argument("--section", required=True, help="goal section that holds the item")
+    p_bl_mark.add_argument("--item", required=True, help="item text as backlog-parse gives it (without ' — source, date')")
+    p_bl_mark.set_defaults(func=cmd_backlog_mark)
     p_settings = sub.add_parser("settings", help="chain settings, environments and backlog by the single reading rule")
     p_settings.add_argument("file", help="spec, plan, roadmap or part file")
     p_settings.set_defaults(func=cmd_settings)
@@ -2184,7 +2311,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_j_event.add_argument("--input", help="stage input file: its sha256 is stored on done")
     p_j_event.add_argument("--artifact", action="append", default=[], help="key=value or key[]=value (repeatable)")
     p_j_event.add_argument("--data", help="JSON object added to the event")
-    p_j_event.add_argument("--spec", help="spec of a new plan entry when the journal has several specs")
+    p_j_event.add_argument("--spec", help="spec of the plan: binds a new entry, or one without a spec, to it; a different spec is journal-plan-unknown")
     p_j_event.set_defaults(func=cmd_journal_event)
 
     p_j_unit = sub.add_parser("journal-unit", help="unit event of plan-executor in the chain journal")
@@ -2202,6 +2329,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_j_question.add_argument("--text", required=True, help="the question in the dialogue language")
     p_j_question.add_argument("--option", action="append", default=[], help="answer option (repeatable)")
     p_j_question.add_argument("--answer", help="the user's answer (interactive mode): the stage keeps its status")
+    p_j_question.add_argument("--spec", help="spec of the plan: binds a new entry, or one without a spec, to it")
     p_j_question.set_defaults(func=cmd_journal_question)
 
     p_j_answer = sub.add_parser("journal-answer", help="answer a journal question or mark it applied")

@@ -26,8 +26,8 @@
     "status": {"enum": ["pending", "running", "done", "stopped", "failed", "skipped"]},
     "stage": {"type": "object", "required": ["status"], "properties": {
       "status": {"$ref": "#/definitions/status"},
-      "started_at": {"$ref": "#/definitions/time"},
-      "finished_at": {"$ref": "#/definitions/time"},
+      "started_at": {"anyOf": [{"$ref": "#/definitions/time"}, {"type": "null"}]},
+      "finished_at": {"anyOf": [{"$ref": "#/definitions/time"}, {"type": "null"}]},
       "input": {"type": "string", "description": "stage input file, set on done with --input"},
       "input_sha256": {"type": "string"},
       "artifacts": {"type": "object", "description": "key=value strings and key[]=value lists; commit stage: commits[] of {sha, subject, files, at}"}}},
@@ -46,7 +46,7 @@
         "stage": {"type": "string"}, "skill": {"type": "string"}, "text": {"type": "string"},
         "options": {"type": "array", "items": {"type": "string"}},
         "status": {"enum": ["open", "answered", "applied"]}, "answer": {"type": ["string", "null"]},
-        "asked_at": {"$ref": "#/definitions/time"}, "answered_at": {"type": ["string", "null"]},
+        "asked_at": {"$ref": "#/definitions/time"}, "answered_at": {"anyOf": [{"$ref": "#/definitions/time"}, {"type": "null"}]},
         "applied_at": {"$ref": "#/definitions/time"}}},
     "finding": {"type": "object", "required": ["id", "plan", "skill", "file", "line", "summary", "failure_scenario", "recorded_at", "backlog"],
       "properties": {"id": {"type": "string", "pattern": "^F[1-9]\\d*$"}, "plan": {"type": "string"},
@@ -74,6 +74,6 @@
         "parallel": {"type": "integer", "minimum": 1, "description": "optional; run-init --parallel, read by run-next first"},
         "sessions": {"type": "array", "items": {"type": "object", "required": ["id", "started_at", "ended_at", "end"],
           "properties": {"id": {"type": "string", "minLength": 1}, "started_at": {"$ref": "#/definitions/time"},
-            "ended_at": {"type": ["string", "null"]}, "end": {"enum": ["stopped", "complete", "interrupted", null]}}}}}}
+            "ended_at": {"anyOf": [{"$ref": "#/definitions/time"}, {"type": "null"}]}, "end": {"enum": ["stopped", "complete", "interrupted", null]}}}}}}
   }
 }

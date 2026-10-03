@@ -37,7 +37,7 @@ You can also simply describe your idea in chat and mention "brainstorming" / "de
 |---|---|---|
 | Goal file path | Optional | Path to a `.md` file describing the idea. If omitted, describe the idea inline after the command. |
 | Findings JSON | Optional | Path to a `.json` file (or inline JSON) with an array of findings: `file`, `line` (optional), `summary`, `failure_scenario`. Switches to findings mode. |
-| `BACKLOG.md` [section] | Optional | The shared backlog at the repository root. Its unchecked items (of one section, when given) become the problem statement; the first question is which items go into this spec. After the spec is approved, its Out of Scope items are appended back to `BACKLOG.md`. |
+| `BACKLOG.md` [section] | Optional | The shared backlog at the repository root. Its unchecked items (of one section, when given) become the problem statement; the first question is which items go into this spec. After the spec is approved, its Out of Scope items are appended back to `BACKLOG.md`, and the items it took in are checked off `[x]` (`backlog-mark`). |
 | Spec file path (`*-spec.md`) | Optional | An approved spec with `# Goal`. Switches to amend mode: only the change is discussed, the spec is edited in place and re-checked, no new plan is written. |
 
 ### Findings mode
@@ -54,7 +54,7 @@ Spec path: `review01.json` → `review01-spec.md` next to it. With inline JSON t
 
 ### Amend mode
 
-The input is an approved spec that must change. The agent discusses only the change, edits the spec in place, runs `spec-check` and the self-review, and asks for your approval; new Out of Scope items go to `BACKLOG.md`. It writes no new plan: the chain journal sees the changed spec, and the next `/plan-chain-runner continue` (or `/plan-writing <spec>`) asks whether to rewrite the plan.
+The input is an approved spec that must change. The agent discusses only the change, edits the spec in place, runs `spec-check` and the self-review, and asks for your approval; new Out of Scope items go to `BACKLOG.md`, and the `BACKLOG.md` items the change took in are checked off `[x]`. It writes no new plan: the chain journal sees the changed spec, and the next `/plan-chain-runner continue` (or `/plan-writing <spec>`) asks whether to rewrite the plan.
 
 ## Process (what happens)
 
@@ -67,7 +67,7 @@ The input is an approved spec that must change. The agent discusses only the cha
 7. Runs ambiguity sweep — closes all open questions; if an answer changes the design, re-presents that section. Then proposes the chain settings in one message (`Chain`, external environments with read and write rights, changes named first) — you confirm or edit them; they are written above `# Goal`
 8. Writes the spec file, checks it with `brainstorm_tool.py spec-check`, runs self-review incl. a fidelity check against your original request (Deep: plus a reviewer subagent)
 9. Asks you to review the written spec
-10. On approval → appends the spec's Out of Scope items (and the spec map, when the goal was split into several specs) to `BACKLOG.md` at the repository root, then invokes `plan-writing`
+10. On approval → appends the spec's Out of Scope items (and the spec map, when the goal was split into several specs) to `BACKLOG.md` at the repository root (in backlog mode it also checks off the items the spec took in), then invokes `plan-writing`
 
 ## Depth Tiers
 

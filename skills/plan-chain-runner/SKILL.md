@@ -52,7 +52,7 @@ Journal commands: `J spec-check`, `journal-path --create`, `journal-event`, `jou
 ## The loop (LOOP.md is authoritative)
 
 1. `C run-next <journal> --in-flight <plan id>:<stage>...` at the start and whenever an agent returns, naming the agents still working; never while an audit agent works.
-2. `skip` → `J journal-event … --status skipped`; `ask` → `J journal-question … --skill plan-chain-runner`; `answer` → `J journal-answer … --answer rewrite` (the drift cascade); `run` → an agent of the profile with the role's model and the silent brief ([PROFILES.md](references/PROFILES.md)); the `run` actions of one answer start together.
+2. `skip` → `J journal-event … --status skipped`; `ask` → `J journal-question … --skill plan-chain-runner --spec <spec>`; `answer` → `J journal-answer … --answer rewrite` (the drift cascade); `run` → an agent of the profile with the role's model and the silent brief ([PROFILES.md](references/PROFILES.md)); the `run` actions of one answer start together.
 3. After each agent: `J journal-reconcile`, `J journal-show --plan`, a progress line; a stage the journal does not confirm after the agent returned (whatever it said) gets one repeat, then a `not-confirmed:` question; an agent silent for 60 minutes counts as failed.
 4. `actions` empty → the summary ([summary.en.md](assets/summary.en.md) / [summary.ru.md](assets/summary.ru.md)), the open questions with the hint `discuss`, then `C run-session <journal> --end … --id <id>`.
 

@@ -440,6 +440,35 @@ class JournalQuestionTest(JournalCase):
         self.assertEqual(bt.journal_load(self.journal)["questions"][0]["answer"], "да")
 
 
+class JournalQuestionSpecTest(JournalCase):
+    def setUp(self):
+        super().setUp()
+        self.spec2 = _write(os.path.join(self.dir, "alpha-2-spec.md"), SPEC)
+        self.plan2 = os.path.join(self.dir, "alpha-2-impl.md")  # not written yet: a question before plan-writing
+        bt.journal_create(self.journal, "alpha", "ru", self.spec)
+        bt.journal_create(self.journal, "alpha", "ru", self.spec2)
+
+    def entry(self, plan_id):
+        return next(p for p in bt.journal_load(self.journal)["plans"] if p["id"] == plan_id)
+
+    def test_a_question_with_spec_creates_the_entry_with_it(self):
+        bt.journal_question(self.journal, "plan-chain-runner", self.plan2, "execution", "dirty-worktree: x",
+                            ["allow-dirty", "stop"], answer="allow-dirty", spec=self.spec2)
+        self.assertEqual(self.entry("alpha-2-impl")["spec"], "alpha-2-spec.md")
+
+    def test_an_entry_without_spec_gets_it_and_a_different_spec_is_refused(self):
+        bt.journal_question(self.journal, "plan-chain-runner", self.plan2, "execution", "first?")
+        self.assertIsNone(self.entry("alpha-2-impl")["spec"])  # two specs: no fallback
+        bt.journal_question(self.journal, "plan-chain-runner", self.plan2, "execution", "second?", spec=self.spec2)
+        self.assertEqual(self.entry("alpha-2-impl")["spec"], "alpha-2-spec.md")
+        before = bt.journal_load(self.journal)
+        with self.assertRaisesRegex(bt.InputError, "^journal-plan-unknown: "):
+            bt.journal_question(self.journal, "plan-chain-runner", self.plan2, "execution", "third?", spec=self.spec)
+        self.assertEqual(bt.journal_load(self.journal), before)
+        with self.assertRaisesRegex(bt.InputError, "^journal-plan-unknown: "):
+            bt.journal_event(self.journal, "plan-writing", self.plan2, "writing", "running", spec=self.spec)
+
+
 class JournalQuestionCliTest(JournalCase):
     def test_cli_unit_and_question(self):
         bt.journal_create(self.journal, "alpha", "ru", self.spec)
@@ -455,6 +484,20 @@ class JournalQuestionCliTest(JournalCase):
         self.assertEqual(bt.journal_load(self.journal)["questions"][0]["options"], ["да", "нет"])
         self.assertEqual(_run("journal-question", self.journal, "--skill", "x", "--plan", "nope",
                               "--stage", "execution", "--text", "?")[0], 2)
+
+    def test_cli_question_with_spec(self):
+        spec2 = _write(os.path.join(self.dir, "alpha-2-spec.md"), SPEC)
+        bt.journal_create(self.journal, "alpha", "ru", self.spec)
+        bt.journal_create(self.journal, "alpha", "ru", spec2)
+        plan2 = os.path.join(self.dir, "alpha-2-impl.md")
+        base = ("journal-question", self.journal, "--skill", "plan-chain-runner", "--plan", plan2,
+                "--stage", "execution", "--text", "dirty-worktree: x")
+        code, out = _run(*base, "--spec", spec2)
+        self.assertEqual((code, out["id"]), (0, "Q1"))
+        self.assertEqual(bt.journal_load(self.journal)["plans"][-1]["spec"], "alpha-2-spec.md")
+        code, out = _run(*base, "--spec", self.spec)
+        self.assertEqual(code, 2)
+        self.assertTrue(out["errors"][0].startswith("journal-plan-unknown: "), out)
 
 
 class JournalAnswerTest(JournalCase):
@@ -778,6 +821,46 @@ class JournalValidateStructureTest(unittest.TestCase):
             with self.subTest(expected=expected):
                 errors = self._errors(mutate)
                 self.assertTrue(any(expected in error for error in errors), errors)
+
+
+class JournalValidateTimeTest(JournalValidateStructureTest):
+    def test_each_time_field(self):
+        stages = lambda d: d["plans"][0]["stages"]  # noqa: E731
+        cases = [
+            (lambda d: d.update(created_at=""), "created_at: not a journal time"),
+            (lambda d: d["events"][0].update(at=5), "events[0].at: not a journal time"),
+            (lambda d: d["findings"][0].update(recorded_at="2026-10-02 10:00:00"), "findings[0].recorded_at: not a"),
+            (lambda d: d["questions"][0].update(asked_at="2026-10-02T10:00:00"), "questions[0].asked_at: not a"),
+            (lambda d: d["questions"][0].update(answered_at=""), "questions[0].answered_at: not a"),
+            (lambda d: d["questions"][0].update(applied_at=None), "questions[0].applied_at: not a"),
+            (lambda d: stages(d)["writing"].update(started_at="yesterday"), "stages.writing.started_at: not a"),
+            (lambda d: stages(d)["audit"].update(finished_at=1.5), "plans[0].stages.audit.finished_at: not a"),
+            (lambda d: d.update(runner={"sessions": [{"started_at": "x", "ended_at": 3}]}),
+             "runner.sessions[0].started_at: not a"),
+        ]
+        for mutate, expected in cases:
+            with self.subTest(expected=expected):
+                errors = self._errors(mutate)
+                self.assertTrue(any(expected in error for error in errors), errors)
+        self.assertIn("runner.sessions[0].ended_at: not a journal time (YYYY-MM-DDTHH:MM:SSZ)",
+                      self._errors(lambda d: d.update(runner={"sessions": [{"started_at": "x", "ended_at": 3}]})))
+
+    def test_nulls_where_allowed_pass(self):
+        def nulls(data):
+            data["plans"][0]["stages"]["split"].update(started_at=None, finished_at=None)
+            data["questions"][0].update(applied_at="2026-10-02T10:06:00Z")
+        self.assertEqual(self._errors(nulls), [])
+
+    def test_rebuild_keeps_a_journal_whose_only_fault_is_a_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _j2_journal(tmp, plans={"a-impl": {}}, events=[dict(_j2_event("a-impl", "", "finding"), at="now")])
+            with open(path, encoding="utf-8") as fh:
+                before = fh.read()
+            self.assertEqual(j2._journal_rebuild(path), (False, None, []))
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), before)
+            self.assertEqual(j2.journal_validate(path)["errors"],
+                             ["events[0].at: not a journal time (YYYY-MM-DDTHH:MM:SSZ)"])
 
 
 def _j2_move(plan, stage, before, after, kind=None):

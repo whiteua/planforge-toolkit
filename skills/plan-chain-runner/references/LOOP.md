@@ -2,7 +2,7 @@
 
 The main loop after the start (START.md) and after `continue`. `C` and `J` as in SKILL.md, Tool. `<journal>` is the absolute path of `<goal>-chain.json`.
 
-**Paths.** `spec`, `plan` and file `args` in the results of `run-next` and `run-status` are relative to the journal's directory, which `run-next` returns as `journal_dir`. Join them with `journal_dir` before passing them to an agent. For `J journal-*` commands `--plan` takes the plan id (the plan file name without `.md`) or that joined path.
+**Paths.** `spec`, `plan` and file `args` in the results of `run-next` and `run-status` are relative to the journal's directory, which `run-next` returns as `journal_dir`. Join them with `journal_dir` before passing them to an agent. For `J journal-*` commands `--plan` takes the plan id (the plan file name without `.md`) or that joined path, and `--spec` the joined path of the action's `spec`: a question asked before plan-writing then creates the plan's entry with its spec.
 
 ## 1. Next actions
 
@@ -11,7 +11,7 @@ Call `C run-next <journal> [--in-flight <plan id>:<stage>]...` at the start and 
 | `kind` | Action |
 |---|---|
 | `skip` | `J journal-event <journal> --skill plan-chain-runner --plan <plan> --stage <stage> --status skipped --data '{"why": "<why>"}'` |
-| `ask` | `J journal-question <journal> --skill plan-chain-runner --plan <plan> --stage <stage> --text "<prefix> <explanation in the dialogue language>" --option <token>...` with the `prefix` and the `options` of the action as they are |
+| `ask` | `J journal-question <journal> --skill plan-chain-runner --plan <plan> --spec <spec> --stage <stage> --text "<prefix> <explanation in the dialogue language>" --option <token>...` with the `prefix` and the `options` of the action as they are |
 | `answer` | `J journal-answer <journal> <qid> --answer <answer>`: the cascade of a `rewrite` (below); no question to the user |
 | `run` | launch `/<skill> <args>` as an agent of the profile (2) |
 
@@ -50,11 +50,11 @@ Each time one agent returns (or fails to start), for that agent alone; the other
 
 1. `J journal-reconcile <journal>`, then `J journal-show <journal> --plan <plan>` for its plan. Then remove its pair from the in-flight set and go to 1 (Next actions).
 2. The stage of the action is `done` or `skipped` → fine. `stopped` → the plan waits on its question. `failed` → nothing to do here: `run-next` repeats it once and asks `stage-failed:` the second time.
-3. Whatever the agent did — said it finished, failed, returned an error, or returned without a word — the stage is not confirmed when the journal does not show it moved: still `pending` or `running` (and it is not the execution case of 4), or, for an action with `reason`, still `done` with the same `finished_at` as before the launch. Not confirmed → launch the same action once more. Still not confirmed → `J journal-question <journal> --skill plan-chain-runner --plan <plan> --stage <stage> --text "not-confirmed: <stage> <what the agent said and what the journal shows>" --option retry --option stop`. An agent that has not returned and left no new journal event for 60 minutes counts as failed under the same rule: stop waiting for it and launch the repeat.
+3. Whatever the agent did — said it finished, failed, returned an error, or returned without a word — the stage is not confirmed when the journal does not show it moved: still `pending` or `running` (and it is not the execution case of 4), or, for an action with `reason`, still `done` with the same `finished_at` as before the launch. Not confirmed → launch the same action once more. Still not confirmed → `J journal-question <journal> --skill plan-chain-runner --plan <plan> --spec <spec> --stage <stage> --text "not-confirmed: <stage> <what the agent said and what the journal shows>" --option retry --option stop`. An agent that has not returned and left no new journal event for 60 minutes counts as failed under the same rule: stop waiting for it and launch the repeat.
 4. The host refused the model or its effort → `C model-pick --journal <journal> --profile <profile> --role <role> --unsupported <model>` (one `--unsupported` per model refused so far): with `--journal` the role's model, effort and `fallback` come from `runner.models` of the journal, the table the agent was launched with, not from the settings file. The outcomes:
    - `fallback_used: true` → one line "model X unavailable, using Y", relaunch with that model;
    - `fallback_used: false` with a model other than the refused one → the same line, launch with it;
-   - the refused model again, exit `1` `no-model`, or exit `2` → `J journal-question <journal> --skill plan-chain-runner --plan <plan> --stage <stage> --text "model: <role> <which model failed, the error>" --option retry --option stop`; the plan waits. In `discuss` the user answers `retry <model>` (the model to use for the role), `retry` (the same model again) or `stop`; on `continue` the runner applies it itself (Continue).
+   - the refused model again, exit `1` `no-model`, or exit `2` → `J journal-question <journal> --skill plan-chain-runner --plan <plan> --spec <spec> --stage <stage> --text "model: <role> <which model failed, the error>" --option retry --option stop`; the plan waits. In `discuss` the user answers `retry <model>` (the model to use for the role), `retry` (the same model again) or `stop`; on `continue` the runner applies it itself (Continue).
 
    A role launched through `subagent_type: planforge-<role>` (PROFILES.md, Agent definitions) has its model in that file: to use another model, launch the role without `subagent_type` and with `model`, and say in the line that the role's effort is now inherited.
 5. One progress line per finished stage (5).
@@ -95,7 +95,7 @@ The user interrupts the run → `C run-session <journal> --end interrupted --id 
 ## Journal errors
 
 - `journal-locked` (exit `1`) → repeat once; still locked → stop with a short report (journal path, the command), `run-session --end stopped --id <id>`.
-- `journal-corrupt` (exit `2`) → stop with a report and propose `J journal-reconcile <journal> --rebuild`; after it, `continue` shows the card again (START.md, Rebuilt journal). If the rebuild answers `rebuilt: false`, the journal passed the structure checks and the error text names a time field: show the user that field and the journal path, let them set it by hand to `YYYY-MM-DDTHH:MM:SSZ` or `null`, and do not offer the rebuild again.
+- `journal-corrupt` (exit `2`) → stop with a report and propose `J journal-reconcile <journal> --rebuild`; after it, `continue` shows the card again (START.md, Rebuilt journal). If the rebuild answers `rebuilt: false`, the journal passed the structure checks and the error text names a time field: show the user that field and the journal path, let them set it by hand to `YYYY-MM-DDTHH:MM:SSZ` (`null` is allowed only for the start and end time of a stage, `answered_at` of a question and `ended_at` of a runner session), and do not offer the rebuild again.
 - `scheduler-bug` (exit `1`, from `run-next`, `run-eta` or `run-status`) → the journal is sound and the error is in `chain_tool.py`: stop with a report (the command and the error text), `run-session --end stopped --id <id>`. Do not propose `journal-reconcile --rebuild`: it is offered only for `journal-corrupt`.
 - `journal-write-failed` → stop with the error text.
 

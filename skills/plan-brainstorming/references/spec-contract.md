@@ -116,7 +116,7 @@ an external system there still needs the user's explicit permission.
 | spec | `<plan-root>-spec.md`, next to the goal file | `plan-brainstorming` |
 | plan | `<plan-root>-impl.md`, same directory (`plan_tool.py plan-path`) | `plan-writing` |
 | execution result | code in the working tree; committed by the `commit` stage, `/plan-executor <plan> commit` after the audit (only the run's files and the audit's fixes; never push, amend or force) | `plan-executor` |
-| backlog | `BACKLOG.md` at the repository root (`git rev-parse --show-toplevel` of the spec's or plan's directory; outside git the working directory) | `plan-brainstorming` (format, `backlog-append`, `backlog-parse`); writers: `plan-brainstorming`, `plan-executor`, `plan-resolver`, `plan-iterative-revision` (through `journal-finding`) |
+| backlog | `BACKLOG.md` at the repository root (`git rev-parse --show-toplevel` of the spec's or plan's directory; outside git the working directory) | `plan-brainstorming` (format, `backlog-append`, `backlog-mark`, `backlog-parse`); writers: `plan-brainstorming`, `plan-executor`, `plan-resolver`, `plan-iterative-revision` (through `journal-finding`) |
 | diff report | `<plan base>-diffs.md` next to the plan (`<plan base>` = the plan file name without `-impl.md`; one per source plan of a split), rebuilt with the audit's fixes before the commit | `plan-executor` |
 | chain journal | `<goal>-chain.json` next to the spec (a plan without `**Spec:**`: next to the plan, goal = the plan file name without `-impl.md`); `<goal>` = the spec's `> Backlog:` value, else the spec file name without `-spec.md`. Stages, questions, findings and commits of every plan of the goal; it points at the other artifacts and never copies them | `plan-brainstorming` (format, `journal-*` commands); writers: every pipeline skill, each for its own stage |
 | follow-ups | `<goal>-followups.json` next to the journal: findings outside the plan as a findings input (`file`, `line`, `summary`, `failure_scenario`), rewritten from the journal by `journal-export-findings` | `plan-brainstorming` (format); writers: `plan-executor`, `plan-resolver`, `plan-iterative-revision` through `journal-finding` |
@@ -132,7 +132,7 @@ Several specs of one goal (decomposition) take a numeric suffix by default:
 descriptive suffix (`review01-conn-spec.md`) only when the user asks for it. A spec added to a
 goal that already has specs takes the next free number; existing specs are never renamed.
 
-`BACKLOG.md` is append-only for the skills:
+`BACKLOG.md` is append-only for the skills, except the checkbox that `backlog-mark` sets:
 
 - `## My notes` (`## Свои заметки` in a file created from a Russian spec) belongs to the user;
   skills never write there. Then one `## <goal>` section per goal: `<goal>` = the settings
@@ -142,8 +142,10 @@ goal that already has specs takes the next free number; existing specs are never
   covers>`, no checkbox.
 - Skills append only at the end of their goal's section, through `brainstorm_tool.py
   backlog-append`: it refuses to change any other byte (exit `1`, file not written) and skips
-  an entry already present from the same source (`action: exists`). Only the user marks `[x]`
-  or deletes lines.
+  an entry already present from the same source (`action: exists`). `[x]` is set by the user,
+  and by `plan-brainstorming` through `backlog-mark` for the items of an approved spec: it
+  changes that one checkbox byte and nothing else, and `[x]` means "taken into an approved
+  spec", not "done". Only the user unchecks items or deletes lines.
 - `/plan-brainstorming BACKLOG.md [section]` starts the next cycle from the unchecked items.
 
 ## Hand-off rules

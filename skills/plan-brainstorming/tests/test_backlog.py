@@ -307,6 +307,83 @@ class BacklogParseTest(unittest.TestCase):
         self.assertEqual(bt.backlog_parse(self.path, "gamma")["items"], [])
 
 
+MARK_BASE = ("# Backlog\n\n## My notes\n\n- [ ] a1\n\n## alpha\n\n- [ ] a1 — plan-executor, alpha-impl.md, 2026-09-01\n"
+             "- [x] done one — plan-resolver, r.md, 2026-09-02\n```\n- [ ] a2\n```\n- [ ] a2\n- [ ] twin\n- [ ] twin\n"
+             "\n## beta\n\n- [ ] a1 — plan-resolver, beta.md, 2026-09-03\n")
+
+
+class BacklogMarkLinesTest(unittest.TestCase):
+    def find(self, section, item, text=MARK_BASE):
+        return bt._backlog_mark_lines(bt._backlog_lines(text), section, item)
+
+    def test_item_text_follows_backlog_parse(self):
+        self.assertEqual(bt._backlog_item_text("a1 — plan-executor, alpha-impl.md, 2026-09-01"),
+                         ("a1", "plan-executor, alpha-impl.md", "2026-09-01"))
+        self.assertEqual(bt._backlog_item_text("без источника — просто тире"), ("без источника — просто тире", None, None))
+
+    def test_lines_of_one_section_outside_fences(self):
+        self.assertEqual(self.find("alpha", "a1"), ([8], []))
+        self.assertEqual(self.find("beta", "a1"), ([19], []))
+        self.assertEqual(self.find("alpha", "a2"), ([13], []))  # the fenced copy (index 11) is not an item
+        self.assertEqual(self.find("alpha", "done one"), ([], [9]))
+        self.assertEqual(self.find("alpha", "twin"), ([14, 15], []))
+        self.assertEqual(self.find("alpha", "nope"), ([], []))
+        self.assertEqual(self.find("gamma", "a1"), ([], []))
+
+    def test_crlf_and_bom(self):
+        text = "﻿## alpha\r\n\r\n- [ ] a1\r\n"
+        self.assertEqual(self.find("alpha", "a1", text), ([2], []))
+
+
+class BacklogMarkTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.path = os.path.join(self.root, "BACKLOG.md")
+
+    def write(self, text, encoding="utf-8"):
+        with open(self.path, "wb") as fh:
+            fh.write(text.encode(encoding))
+        return text.encode(encoding)
+
+    def read(self):
+        with open(self.path, "rb") as fh:
+            return fh.read()
+
+    def test_marks_one_line_and_nothing_else(self):
+        original = self.write(MARK_BASE.replace("\n", "\r\n"))
+        out = bt.backlog_mark(self.root, "beta", "a1")
+        self.assertEqual((out["ok"], out["action"], out["line"]), (True, "marked", 20))
+        data = self.read()
+        self.assertEqual(len(data), len(original))
+        self.assertEqual([i for i, (a, b) in enumerate(zip(original, data)) if a != b],
+                         [original.index(b"- [ ] a1 \xe2\x80\x94 plan-resolver, beta.md") + 3])
+        self.assertEqual(bt.backlog_mark(self.root, "beta", "a1")["action"], "already")
+        self.assertEqual(bt.backlog_mark(self.root, "alpha", "a1")["action"], "marked")  # same text, other section
+
+    def test_not_found_ambiguous_and_fenced_leave_the_file(self):
+        original = self.write(MARK_BASE)
+        missing = bt.backlog_mark(self.root, "alpha", "nope")
+        self.assertEqual((missing["ok"], missing["action"]), (False, "not-found"))
+        twin = bt.backlog_mark(self.root, "alpha", "twin")
+        self.assertEqual((twin["ok"], twin["action"], twin["lines"]), (False, "ambiguous", [15, 16]))
+        self.assertEqual(self.read(), original)
+        self.assertEqual(bt.backlog_mark(self.root, "alpha", "a2")["line"], 14)  # not the fenced line 12
+        self.assertIn(b"```\n- [ ] a2\n```", self.read())
+
+    def test_user_section_non_utf8_and_missing_file(self):
+        self.assertEqual(bt.backlog_mark(self.root, "alpha", "a1")["action"], "not-found")
+        self.write(MARK_BASE)
+        for section in ("My notes", "свои заметки"):
+            with self.assertRaisesRegex(bt.BacklogError, "^user-section: "):
+                bt.backlog_mark(self.root, section, "a1")
+        original = self.write("# Backlog\n\n## alpha\n\n- [ ] старое\n", "cp1251")
+        with self.assertRaises(bt.BacklogError):
+            bt.backlog_mark(self.root, "alpha", "старое")
+        self.assertEqual(self.read(), original)
+
+
 def _run(*args):
     proc = subprocess.run([sys.executable, TOOL, *args], capture_output=True, encoding="utf-8")
     return proc.returncode, (json.loads(proc.stdout) if proc.stdout.strip() else None)
@@ -346,6 +423,20 @@ class BacklogCliTest(unittest.TestCase):
             fh.write("# Backlog\n\n## alpha\n\n- [ ] старое\n".encode("cp1251"))
         code, out = _run("backlog-append", self.root, "--section", "alpha", "--source", "s, a", "--item", "x")
         self.assertEqual((code, out["ok"]), (1, False))
+
+    def test_mark_exit_codes(self):
+        with open(os.path.join(self.root, "BACKLOG.md"), "wb") as fh:
+            fh.write(MARK_BASE.encode("utf-8"))
+        args = ("backlog-mark", self.root, "--section", "beta", "--item", "a1")
+        self.assertEqual([(code, out["action"]) for code, out in (_run(*args), _run(*args))],
+                         [(0, "marked"), (0, "already")])
+        code, out = _run("backlog-mark", self.root, "--section", "alpha", "--item", "twin")
+        self.assertEqual((code, out["action"], out["lines"]), (1, "ambiguous", [15, 16]))
+        self.assertEqual(_run("backlog-mark", self.root, "--section", "alpha", "--item", "nope")[0], 1)
+        code, out = _run("backlog-mark", self.root, "--section", "My notes", "--item", "a1")
+        self.assertEqual((code, out["ok"]), (1, False))
+        self.assertTrue(out["errors"][0].startswith("user-section: "), out)
+        self.assertEqual(_run("backlog-mark", self.root, "--section", "alpha", "--item", " ")[0], 2)
 
 
 if __name__ == "__main__":

@@ -33,10 +33,12 @@ Once this skill runs, every request goes through the process: a todo list, a sin
   statement, not the design. "Here are the bugs, just fix them" still needs
   an approved spec.
 - **Backlog**: `/plan-brainstorming BACKLOG.md [section]`. Run `backlog-parse <file>
-  [--section <section>]`; the unchecked items are the problem statement. The first question
-  is which items go into this spec (multiple choice, one option per item). Never edit
-  BACKLOG.md lines by hand: after the user approves the spec file, `backlog-mark` checks off
-  the items the spec took in (see Backlog); unchecking an item stays with the user.
+  [--section <section>]`; the unchecked items are the problem statement. Before the first
+  question, run the backlog sweep (see Backlog sweep): items an approved spec already covers
+  are checked off after the user confirms and are not offered again. The first question is
+  which of the remaining items go into this spec (multiple choice, one option per item). Never
+  edit BACKLOG.md lines by hand: after the user approves the spec file, `backlog-mark` checks
+  off the items the spec took in (see Backlog).
 - **Amend**: `/plan-brainstorming <…>-spec.md`, an existing spec (the file name ends in
   `-spec.md` and the file has a `# Goal` heading). Change that spec in place; see Amend mode.
 
@@ -72,9 +74,11 @@ Exit codes: `0` ok, `1` check failed, `2` bad input or I/O error.
 | `spec-check <spec.md>` | Contract check of the written spec (step 8). |
 | `findings-parse <file.json\|-> [--root DIR]` | Findings mode, step 1. |
 | `findings-coverage <file.json\|-> <spec.md>` | Findings mode, step 8. |
-| `backlog-parse <BACKLOG.md> [--section S]` | Backlog mode, step 1. |
+| `backlog-parse <BACKLOG.md> [--section S] [--state open\|done\|cancelled\|all]` | Backlog mode, step 1; amend mode with `--state done`. Each item has `state`: `open` `[ ]`, `done` `[x]`, `cancelled` `[-]`; default `open`. |
+| `backlog-sweep <root> --section S [--journal J]` | Read-only input of the backlog sweep: the open items of the section and the specs of its chain journal with excerpts (see Backlog sweep). Exit `1` for `ambiguous-journal`. |
 | `backlog-append <root> --section S --source "plan-brainstorming, <spec file>" --item TEXT [--lang ru\|en] [--plain]` | After the user approves the spec (see Backlog). |
-| `backlog-mark <root> --section S --item TEXT` | After the user approves the spec: checks off one item the spec took in (see Backlog). Exit `1` for `not-found` and `ambiguous`. |
+| `backlog-mark <root> --section S --item TEXT` | After the user approves the spec, and after a confirmed backlog sweep: checks off one item (see Backlog). Exit `1` for `not-found`, `ambiguous` and `cancelled` (a `[-]` line). |
+| `backlog-unmark <root> --section S --item TEXT` | Amend mode and a withdrawn spec, after the user confirms: unchecks one `[x]` item the spec no longer covers. `unmarked`, `already` (exit `0`); `cancelled`, `not-found`, `ambiguous` (exit `1`, nothing written). |
 | `settings <file>` | Chain settings, environments and backlog of a spec, plan, roadmap or part (single reading rule; other skills load it as a module). |
 | `journal-path <spec\|plan\|roadmap\|part> [--create]` | Path and goal of the chain journal `<goal>-chain.json` (a roadmap or part leads to its master plan, a plan to its spec). `--create` creates the journal and registers the spec: after the spec is approved (see Chain journal); given a plan, roadmap or part it also registers the master plan (every stage `pending`). |
 | `journal-event`, `journal-unit`, `journal-question`, `journal-answer`, `journal-finding`, `journal-commit`, `journal-export-findings`, `journal-show`, `journal-reconcile [--rebuild]`, `journal-validate` (each takes `<journal>` first) | The journal API of the later skills: stage transitions, unit events, questions and answers, findings outside the plan (appended to `BACKLOG.md`), commits, the `<goal>-followups.json` export, a summary, repair and validation. Format: `assets/chain-journal.schema.json`. |
@@ -84,10 +88,10 @@ Exit codes: `0` ok, `1` check failed, `2` bad input or I/O error.
 Complete these steps in order. On Standard and Deep, keep them as todo items; on Quick, one
 item for the whole checklist is enough.
 
-1. **Explore project context** — files, docs, recent commits. Restate the request in one sentence: this is the fidelity anchor for step 9. Findings mode: parse and triage the findings (`references/findings-input.md` Steps A-B). Backlog mode: `backlog-parse` and show the unchecked items.
+1. **Explore project context** — files, docs, recent commits. Restate the request in one sentence: this is the fidelity anchor for step 9. Findings mode: parse and triage the findings (`references/findings-input.md` Steps A-B). Backlog mode: `backlog-parse`, the backlog sweep (see Backlog sweep), then show the remaining unchecked items.
 2. **Determine depth tier** — auto-classify Quick/Standard/Deep, state it, let the user confirm or adjust (`references/depth-tiers.md`). Findings mode: show the triage table in the same message.
 3. **Offer the visual companion** — only when the questions ahead are visual (layouts, flows, comparisons). Its own message (see Visual Companion); skip it otherwise.
-4. **Ask clarifying questions** — purpose, constraints, success criteria (see Asking Questions). Findings mode: first the scope question (`references/findings-input.md` Step C). Backlog mode: first the question which items go into this spec.
+4. **Ask clarifying questions** — purpose, constraints, success criteria (see Asking Questions). Findings mode: first the scope question (`references/findings-input.md` Step C). Backlog mode: first the question which of the remaining items go into this spec.
 5. **Propose approaches** — Standard/Deep: 2-3 with trade-offs, lead with your recommendation and why. Quick: one approach, unless a real fork exists.
 6. **Present the design** — in sections scaled to the tier; get approval after each section.
 7. **Close underspecified areas** — ambiguity sweep (`references/clarify-checklist.md`) until `Open Questions` can be `(none)`. If an answer changes the approved design, re-present the affected section and get approval again. Then propose the chain settings in one message (see Chain Settings) and wait for the user to confirm or adjust them.
@@ -182,7 +186,7 @@ will be checked off `[x]` once the file is approved. On changes that alter the l
 
 `BACKLOG.md` lies at the repository root: `<root>` = `git -C <spec dir> rev-parse --show-toplevel`,
 outside git the current working directory. Format and ownership: `references/spec-contract.md`
-("Artifacts and naming"). Write only through `backlog-append` and `backlog-mark`, never by hand; the user's
+("Artifacts and naming"). Write only through `backlog-append`, `backlog-mark` and `backlog-unmark`, never by hand; the user's
 section (`## My notes` / `## Свои заметки`) is never touched.
 
 After the user approved the spec file, before invoking `plan-writing`:
@@ -195,13 +199,44 @@ After the user approved the spec file, before invoking `plan-writing`:
    `--item "<spec file name> — <what it covers>"` (the spec map).
 3. Backlog mode: for each item listed in the "Spec written" message,
    `backlog-mark <root> --section <the item's section> --item "<its text as backlog-parse gave it>"`.
-   `[x]` means "taken into an approved spec", not "done": there is no second state, and unchecking
-   (a spec withdrawn or rewritten later) stays with the user.
+   `[x]` means "taken into an approved spec", not "done"; `[ ]` is open and `[-]` cancelled. `[-]`
+   is set and changed only by the user: this skill never sets or clears it, and `backlog-mark` /
+   `backlog-unmark` refuse such a line (`cancelled`). Unchecking goes through `backlog-unmark`, only
+   in amend mode and for a withdrawn spec (see Amend mode).
 4. Report in one line: how many lines were appended, how many already existed (`exists`); how many
-   items were checked off (`marked`), were already checked (`already`), and which were not found
-   (`not-found`) or matched several lines (`ambiguous`, nothing written). Exit `1` of
-   `backlog-append` (the file would change outside the section end, or is not UTF-8) or of
-   `backlog-mark`: show the error and continue. The backlog is not a gate.
+   items were checked off (`marked`) or unchecked (`unmarked`), were already in that state
+   (`already`), and which were not found (`not-found`), matched several lines (`ambiguous`) or are
+   cancelled (`cancelled`); nothing is written for the last three. Exit `1` of `backlog-append` (the
+   file would change outside the section end, or is not UTF-8), of `backlog-mark` or of
+   `backlog-unmark`: show the error and continue. The backlog is not a gate.
+
+### Backlog sweep
+
+Finds the open items that an approved spec of the same section already covers, so that they are
+checked off instead of being offered again. It runs only in backlog mode (for every section with open
+items; the user section is skipped) and in amend mode (for the spec's `> Backlog:` section), once per
+session.
+
+1. `backlog-sweep <root> --section <S>`. Backlog mode: `<root>` is the directory of the `BACKLOG.md`
+   file given, and `<S>` each `## <S>` section with open items except the user's own. Amend mode:
+   `<root>` and `<S>` as in Backlog, step 1 (`<S>` is the spec's `> Backlog:` value, else the spec
+   file name without `-spec.md`). It returns the open items of `## <S>` and the specs registered in the
+   section's chain journal `<S>-chain.json` (found under `<root>` by its exact name), each with its
+   `goal`, the item heads of `components` and `findings`, and its `out_of_scope` items. It writes
+   nothing.
+2. Match each open item with the specs by meaning. A spec covers an item when its Goal,
+   Architecture, Components or Findings Traceability takes the item in (read the spec file for
+   Architecture). A mention in Out of Scope is not coverage. A spec with `missing: true` (the user
+   removed or renamed the file) or with `error` covers nothing.
+3. Show the pairs "item → spec, reason", one per line; the user confirms them or strikes lines out.
+   Nothing is written before that.
+4. `backlog-mark <root> --section <S> --item "<text>"` for each confirmed pair, report as in Backlog,
+   step 4, and read the open items again (`backlog-parse`).
+
+`ambiguous-journal` (exit `1`, `journals` lists the paths): ask which journal belongs to the section
+and repeat with `--journal <path>`. `journal: null` or `specs: []`: say in one line that the section
+has no approved specs to match against, and go on. Any other failure: one line, go on; the sweep is
+not a gate.
 
 ## Chain journal
 
@@ -236,6 +271,8 @@ Designing, Self-Review, the User Review Gate and Backlog still apply. Dialogue l
    that is `running` means a `plan-resolver` audit may be fingerprinting the working copy, and
    any edit would invalidate it. Then edit nothing: say that an audit is running and propose to
    come back when it has ended (or to go on only if the user confirms no audit agent is working).
+   Otherwise run the backlog sweep for the spec's `> Backlog:` section (see Backlog sweep), except
+   when the request is to withdraw the spec (see "Withdrawing a spec" below).
 2. Discuss only the change, one question per message; the rest of the approved spec is not
    reopened. A change of the tier or of the `> Chain:` / `> Environment:` lines is proposed in one
    message, as in Chain Settings.
@@ -244,13 +281,25 @@ Designing, Self-Review, the User Review Gate and Backlog still apply. Dialogue l
    compares the edit with the one-sentence change and with the Goal.
 5. User Review Gate: name what changed and wait for explicit approval of the file.
 6. After approval, append to BACKLOG.md only the Out of Scope items this change added (Backlog,
-   step 1), and check off only the BACKLOG.md items this change took in (Backlog, step 3).
+   step 1), and check off only the BACKLOG.md items this change took in (Backlog, step 3). Then
+   `backlog-parse BACKLOG.md --section <S> --state done`: pick the checked items that the change
+   removed from the spec, show them as "item — why the spec no longer covers it", and after the user
+   confirms run `backlog-unmark <root> --section <S> --item "<text>"` for each (report as in
+   Backlog, step 4).
 7. Close with one report and stop: the file, what changed, the BACKLOG lines. Do not invoke
    `plan-writing` and do not create or edit the chain journal: the journal sees the changed spec
    through the input hash of the `writing` stage, and the next `journal-reconcile` asks a
    `drift: writing …` question whose answer `rewrite` rewrites the plan. Name the next step:
    `/plan-chain-runner continue`, or `/plan-writing <spec>` without the runner (it runs the drift
    check itself).
+
+**Withdrawing a spec** goes through this mode too: the request is to cancel the spec, not to change
+it. Only the audit check of step 1 applies; the backlog sweep (it would offer to check off the
+items of the spec being withdrawn) and steps 2-5 (discussion, edit, `spec-check`, approval of the
+file) are skipped. Run `backlog-parse BACKLOG.md --section <S> --state done`, pick the items the
+spec's text took in, show them, and after the user confirms run `backlog-unmark` for each. The skill never deletes or
+renames the spec file: say that the user should remove or rename it, otherwise the next backlog sweep
+offers the same items again. The journal is not edited.
 
 ## Visual Companion
 

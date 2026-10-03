@@ -37,7 +37,7 @@ You can also simply describe your idea in chat and mention "brainstorming" / "de
 |---|---|---|
 | Goal file path | Optional | Path to a `.md` file describing the idea. If omitted, describe the idea inline after the command. |
 | Findings JSON | Optional | Path to a `.json` file (or inline JSON) with an array of findings: `file`, `line` (optional), `summary`, `failure_scenario`. Switches to findings mode. |
-| `BACKLOG.md` [section] | Optional | The shared backlog at the repository root. Its unchecked items (of one section, when given) become the problem statement; the first question is which items go into this spec. After the spec is approved, its Out of Scope items are appended back to `BACKLOG.md`, and the items it took in are checked off `[x]` (`backlog-mark`). |
+| `BACKLOG.md` [section] | Optional | The shared backlog at the repository root. Its unchecked items (of one section, when given) become the problem statement. First the agent matches them with the approved specs of the section (`backlog-sweep`) and, after you confirm, checks off `[x]` the ones a spec already covers; then it asks which of the rest go into this spec. After the spec is approved, its Out of Scope items are appended back to `BACKLOG.md`, and the items it took in are checked off `[x]` (`backlog-mark`). |
 | Spec file path (`*-spec.md`) | Optional | An approved spec with `# Goal`. Switches to amend mode: only the change is discussed, the spec is edited in place and re-checked, no new plan is written. |
 
 ### Findings mode
@@ -54,11 +54,11 @@ Spec path: `review01.json` → `review01-spec.md` next to it. With inline JSON t
 
 ### Amend mode
 
-The input is an approved spec that must change. The agent discusses only the change, edits the spec in place, runs `spec-check` and the self-review, and asks for your approval; new Out of Scope items go to `BACKLOG.md`, and the `BACKLOG.md` items the change took in are checked off `[x]`. It writes no new plan: the chain journal sees the changed spec, and the next `/plan-chain-runner continue` (or `/plan-writing <spec>`) asks whether to rewrite the plan.
+The input is an approved spec that must change. The agent discusses only the change, edits the spec in place, runs `spec-check` and the self-review, and asks for your approval; new Out of Scope items go to `BACKLOG.md`, and the `BACKLOG.md` items the change took in are checked off `[x]`. Checked items the change removed from the spec are unchecked (`backlog-unmark`) after you confirm. Withdrawing a spec goes the same way: its items are unchecked after you confirm, and you remove or rename the spec file yourself. Items marked `[-]` (cancelled) are yours: the skills never set or clear them. It writes no new plan: the chain journal sees the changed spec, and the next `/plan-chain-runner continue` (or `/plan-writing <spec>`) asks whether to rewrite the plan.
 
 ## Process (what happens)
 
-1. Agent explores your project context (files, docs, commits); in findings mode it validates and triages the findings
+1. Agent explores your project context (files, docs, commits); in findings mode it validates and triages the findings; in backlog mode it matches the unchecked items with the approved specs of their section and offers to check off the covered ones
 2. Proposes a **depth tier** (Quick / Standard / Deep) — you confirm or adjust
 3. Offers the Visual Companion when the questions ahead are visual (you can decline)
 4. Asks clarifying questions **one at a time** (prefer multiple-choice)

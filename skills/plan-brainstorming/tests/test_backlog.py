@@ -296,7 +296,7 @@ class BacklogParseTest(unittest.TestCase):
         items = bt.backlog_parse(self.path)["items"]
         self.assertEqual([item["text"] for item in items], ["my idea", "a1", "b1", "свой пункт без источника"])
         self.assertEqual(items[1], {"section": "alpha", "text": "a1", "source": "plan-executor, alpha-impl.md",
-                                    "date": "2026-09-01", "line": 9})
+                                    "date": "2026-09-01", "line": 9, "state": "open"})
         self.assertEqual(items[0]["section"], "My notes")
         self.assertEqual((items[3]["source"], items[3]["date"]), (None, None))
 
@@ -437,6 +437,302 @@ class BacklogCliTest(unittest.TestCase):
         self.assertEqual((code, out["ok"]), (1, False))
         self.assertTrue(out["errors"][0].startswith("user-section: "), out)
         self.assertEqual(_run("backlog-mark", self.root, "--section", "alpha", "--item", " ")[0], 2)
+
+
+STATE_BASE = ("# Backlog\n\n## alpha\n\n- [ ] open one — p, a.md, 2026-09-01\n- [x] done one — p, a.md, 2026-09-02\n"
+              "- [X] done two\n- [-] Отменено. gone one — p, a.md, 2026-09-03\n- [?] not an item\n\n## beta\n\n- [ ] b1\n")
+
+
+class BacklogStateTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "BACKLOG.md")
+        with open(self.path, "wb") as fh:
+            fh.write(STATE_BASE.encode("utf-8"))
+
+    def items(self, section=None, state="open"):
+        return [(i["text"], i["state"]) for i in bt.backlog_parse(self.path, section, state)["items"]]
+
+    def test_regex_knows_three_states(self):
+        self.assertEqual(bt.BACKLOG_ITEM_RE.match("- [-] Отменено. x").group("mark"), "-")
+        self.assertIsNone(bt.BACKLOG_ITEM_RE.match("- [?] x"))
+        self.assertEqual(bt.BACKLOG_STATES, {" ": "open", "x": "done", "X": "done", "-": "cancelled"})
+
+    def test_default_is_open_and_every_item_has_a_state(self):
+        self.assertEqual(self.items(), [("open one", "open"), ("b1", "open")])
+
+    def test_state_filter(self):
+        self.assertEqual(self.items("alpha", "done"), [("done one", "done"), ("done two", "done")])
+        self.assertEqual(self.items("alpha", "cancelled"), [("Отменено. gone one", "cancelled")])
+        self.assertEqual([state for _, state in self.items("alpha", "all")], ["open", "done", "done", "cancelled"])
+
+    def test_unknown_state(self):
+        with self.assertRaises(bt.InputError):
+            bt.backlog_parse(self.path, None, "closed")
+        code, out = _run("backlog-parse", self.path, "--state", "closed")
+        self.assertEqual((code, out["ok"]), (2, False))
+        code, out = _run("backlog-parse", self.path, "--section", "alpha", "--state", "cancelled")
+        self.assertEqual((code, [i["line"] for i in out["items"]]), (0, [8]))
+
+
+class BacklogCancelledKeyTest(unittest.TestCase):
+    def test_key_ignores_the_cancelled_prefix(self):
+        key = bt._backlog_key("- [ ] a1 — p, a.md, 2026-09-01")
+        for line in ("- [-] Отменено. a1 — p, a.md, 2026-10-02", "- [-] Cancelled. a1 — p, a.md, 2026-10-02",
+                     "- [-] a1 — p, a.md, 2026-10-02"):
+            self.assertEqual(bt._backlog_key(line), key, line)
+        self.assertNotEqual(bt._backlog_key("- [-] Отменено. a1 — other, a.md, 2026-10-02"), key)
+        self.assertEqual(bt._backlog_uncancelled("Отменено. x"), "x")
+        self.assertEqual(bt._backlog_uncancelled("Не Отменено. x"), "Не Отменено. x")
+
+    def test_append_does_not_repeat_a_cancelled_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "BACKLOG.md")
+            original = "# Backlog\n\n## alpha\n\n- [-] Отменено. a1 — p, a.md, 2026-09-01\n".encode("utf-8")
+            with open(path, "wb") as fh:
+                fh.write(original)
+            out = bt.backlog_append(tmp, "alpha", "p, a.md", "a1", date="2026-10-03")
+            self.assertEqual(out["action"], "exists")
+            with open(path, "rb") as fh:
+                self.assertEqual(fh.read(), original)
+
+
+CANCEL_BASE = ("# Backlog\n\n## alpha\n\n- [ ] a1\n- [x] a2 — p, a.md, 2026-09-01\n"
+               "- [-] Отменено. a3 — p, a.md, 2026-09-02\n- [-] a4\n```\n- [-] a4\n```\n")
+
+
+class BacklogItemLinesTest(unittest.TestCase):
+    def find(self, item, section="alpha"):
+        return bt._backlog_item_lines(bt._backlog_lines(CANCEL_BASE), section, item)
+
+    def test_lines_by_state(self):
+        self.assertEqual(self.find("a1"), {"open": [4], "done": [], "cancelled": []})
+        self.assertEqual(self.find("a2"), {"open": [], "done": [5], "cancelled": []})
+        self.assertEqual(self.find("a3"), {"open": [], "done": [], "cancelled": [6]})
+        self.assertEqual(self.find("Отменено. a3"), {"open": [], "done": [], "cancelled": [6]})
+        self.assertEqual(self.find("a4"), {"open": [], "done": [], "cancelled": [7]})  # not the fenced copy
+        self.assertEqual(self.find("a1", "beta"), {"open": [], "done": [], "cancelled": []})
+
+    def test_mark_lines_leave_cancelled_out(self):
+        lines = bt._backlog_lines(CANCEL_BASE)
+        self.assertEqual(bt._backlog_mark_lines(lines, "alpha", "a3"), ([], []))
+        self.assertEqual(bt._backlog_mark_lines(lines, "alpha", "a2"), ([], [5]))
+
+
+class BacklogMarkCancelledTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+        self.path = os.path.join(self.root, "BACKLOG.md")
+        self.original = CANCEL_BASE.encode("utf-8")
+        with open(self.path, "wb") as fh:
+            fh.write(self.original)
+
+    def read(self):
+        with open(self.path, "rb") as fh:
+            return fh.read()
+
+    def test_mark_refuses_a_cancelled_item(self):
+        for item in ("a3", "Отменено. a3"):
+            out = bt.backlog_mark(self.root, "alpha", item)
+            self.assertEqual((out["ok"], out["action"], out["line"]), (False, "cancelled", 7))
+            self.assertTrue(out["errors"][0].startswith("cancelled: "), out)
+        self.assertEqual(self.read(), self.original)
+        code, out = _run("backlog-mark", self.root, "--section", "alpha", "--item", "a4")
+        self.assertEqual((code, out["action"]), (1, "cancelled"))
+
+    def test_flip_changes_only_an_expected_byte(self):
+        section, item, path, old, text = bt._backlog_target(self.root, "alpha", "a1")
+        self.assertEqual((section, item, path, old), ("alpha", "a1", os.path.abspath(self.path), self.original))
+        lines = bt._backlog_lines(text)
+        with self.assertRaises(bt.BacklogError):
+            bt._backlog_flip(path, text, old, lines, 4, "xX", " ")  # line 4 is "[ ]", not "[x]"
+        self.assertEqual(self.read(), self.original)
+        bt._backlog_flip(path, text, old, lines, 4, " ", "x")
+        self.assertEqual(self.read(), self.original.replace(b"- [ ] a1", b"- [x] a1"))
+        os.remove(self.path)
+        self.assertEqual(bt._backlog_target(self.root, "alpha", "a1")[3:], (None, None))
+
+
+UNMARK_BASE = ("# Backlog\n\n## My notes\n\n- [x] a1\n\n## alpha\n\n- [x] a1 — p, a.md, 2026-09-01\n- [ ] open one\n"
+               "- [-] Отменено. gone — p, a.md, 2026-09-02\n- [X] twin\n- [x] twin\n```\n- [x] fenced\n```\n")
+
+
+class BacklogUnmarkTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+        self.path = os.path.join(self.root, "BACKLOG.md")
+
+    def write(self, data):
+        with open(self.path, "wb") as fh:
+            fh.write(data)
+        return data
+
+    def read(self):
+        with open(self.path, "rb") as fh:
+            return fh.read()
+
+    def test_unmarks_one_byte_and_keeps_crlf(self):
+        original = self.write(UNMARK_BASE.replace("\n", "\r\n").encode("utf-8"))
+        out = bt.backlog_unmark(self.root, "alpha", "a1")
+        self.assertEqual((out["ok"], out["action"], out["line"]), (True, "unmarked", 9))
+        data = self.read()
+        self.assertEqual([i for i, (a, b) in enumerate(zip(original, data)) if a != b],
+                         [original.index(b"- [x] a1 \xe2\x80\x94 p, a.md") + 3])
+        self.assertEqual(len(data), len(original))
+        self.assertEqual(bt.backlog_unmark(self.root, "alpha", "a1")["action"], "already")
+        self.assertEqual(bt.backlog_unmark(self.root, "alpha", "open one")["line"], 10)
+
+    def test_refusals_write_nothing(self):
+        original = self.write(UNMARK_BASE.encode("utf-8"))
+        for item in ("gone", "Отменено. gone"):
+            self.assertEqual(bt.backlog_unmark(self.root, "alpha", item)["action"], "cancelled")
+        twin = bt.backlog_unmark(self.root, "alpha", "twin")
+        self.assertEqual((twin["ok"], twin["action"], twin["lines"]), (False, "ambiguous", [12, 13]))
+        for item in ("fenced", "nope"):
+            self.assertEqual(bt.backlog_unmark(self.root, "alpha", item)["action"], "not-found")
+        with self.assertRaisesRegex(bt.BacklogError, "^user-section: "):
+            bt.backlog_unmark(self.root, "My notes", "a1")
+        self.assertEqual(self.read(), original)
+        cp1251 = self.write("# Backlog\n\n## alpha\n\n- [x] старое\n".encode("cp1251"))
+        with self.assertRaises(bt.BacklogError):
+            bt.backlog_unmark(self.root, "alpha", "старое")
+        self.assertEqual(self.read(), cp1251)
+
+    def test_bom_and_missing_file(self):
+        self.assertEqual(bt.backlog_unmark(self.root, "alpha", "a1")["action"], "not-found")
+        self.write("﻿## alpha\n\n- [x] a1\n".encode("utf-8"))
+        self.assertEqual(bt.backlog_unmark(self.root, "alpha", "a1")["action"], "unmarked")
+        self.assertEqual(self.read(), "﻿## alpha\n\n- [ ] a1\n".encode("utf-8"))
+
+    def test_cli_exit_codes(self):
+        self.write(UNMARK_BASE.encode("utf-8"))
+        args = ("backlog-unmark", self.root, "--section", "alpha", "--item")
+        for action in ("unmarked", "already"):
+            code, out = _run(*args, "a1")
+            self.assertEqual((code, out["action"]), (0, action))
+        for item, action in (("gone", "cancelled"), ("twin", "ambiguous"), ("nope", "not-found")):
+            code, out = _run(*args, item)
+            self.assertEqual((code, out["action"]), (1, action))
+        self.assertEqual(_run(*args, " ")[0], 2)
+
+
+def _touch(root, *parts, data=b"{}"):
+    path = os.path.join(root, *parts)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return os.path.abspath(path)
+
+
+class SectionJournalsTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+
+    def test_found_inside_a_dot_directory_and_a_git_ignored_folder(self):
+        dotted = _touch(self.root, "docs", ".plans", "alpha", "alpha-chain.json")
+        self.assertEqual(bt._section_journals(self.root, "alpha"), [dotted])
+        _touch(self.root, ".gitignore", data=b"ignored/\n")
+        ignored = _touch(self.root, "ignored", "alpha-chain.json")
+        self.assertEqual(bt._section_journals(self.root, "alpha"), sorted([dotted, ignored]))
+
+    def test_skip_list_exact_name_and_bad_section(self):
+        for skipped in (".git", "node_modules", "__pycache__", ".venv", "venv"):
+            _touch(self.root, skipped, "x", "alpha-chain.json")
+        _touch(self.root, "docs", "alpha-chain.json.bak")
+        _touch(self.root, "docs", "beta-chain.json")
+        self.assertEqual(bt._section_journals(self.root, "alpha"), [])
+        with self.assertRaises(bt.InputError):
+            bt._section_journals(self.root, "a/b")
+
+
+SWEEP_SPEC = ("> Tier: Quick\n\n# Goal\n\nцель альфа\n\n## Architecture\n\nx\n\n## Components\n\n"
+              "- `foo()` в `a.py:1`: делает foo\n- просто пункт\n\n### Findings Traceability\n\n"
+              "| ID | Location | Root cause | Fix (component) | Regression test |\n|---|---|---|---|---|\n"
+              "| F1 | `a.py:1` | причина | `foo` | test_foo |\n\n### Ещё\n\n1. нумерованный: хвост\n\n"
+              "```\n- в блоке кода\n```\n\n## Data Flow\n\nx\n\n## Error Handling\n\nx\n\n## Testing Strategy\n\nx\n\n"
+              "## Out of Scope\n\n- пункт вне: с хвостом\n- второй\n\n## Open Questions\n\n(none)\n")
+
+
+class SpecExcerptTest(unittest.TestCase):
+    def test_excerpt_missing_and_unreadable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            good = _touch(tmp, "alpha-1-spec.md", data=SWEEP_SPEC.encode("utf-8"))
+            _touch(tmp, "bad-spec.md", data=b"\xff\xfe\xfa")
+            out = bt._spec_excerpt(tmp, "alpha-1-spec.md")
+            self.assertEqual(out, {
+                "path": "alpha-1-spec.md", "file": good, "goal": "цель альфа",
+                "components": ["`foo()` в `a.py:1`", "просто пункт", "Ещё", "нумерованный"],
+                "findings": ["F1 | `a.py:1` | причина | `foo` | test_foo"],
+                "out_of_scope": ["пункт вне: с хвостом", "второй"]})
+            self.assertEqual(bt._spec_excerpt(tmp, "gone-spec.md"),
+                             {"path": "gone-spec.md", "file": os.path.join(os.path.abspath(tmp), "gone-spec.md"),
+                              "missing": True})
+            bad = bt._spec_excerpt(tmp, "bad-spec.md")
+            self.assertEqual(sorted(bad), ["error", "file", "path"])
+            self.assertIn("cannot read", bad["error"])
+
+
+class BacklogSweepTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+        _touch(self.root, "BACKLOG.md", data="# Backlog\n\n## alpha\n\n- [ ] open a — p, a.md, 2026-09-01\n"
+               "- [x] done a — p, a.md, 2026-09-01\n".encode("utf-8"))
+        specs = [{"path": name, "sha256": "0"} for name in ("alpha-1-spec.md", "gone-spec.md", "bad-spec.md")]
+        self.journal = _touch(self.root, "docs", ".plans", "alpha", "alpha-chain.json",
+                              data=json.dumps({"version": 1, "specs": specs}).encode("utf-8"))
+        _touch(self.root, "docs", ".plans", "alpha", "alpha-1-spec.md", data=SWEEP_SPEC.encode("utf-8"))
+        _touch(self.root, "docs", ".plans", "alpha", "bad-spec.md", data=b"\xff")
+
+    def snapshot(self):
+        result = {}
+        for directory, _, files in os.walk(self.root):
+            for name in files:
+                with open(os.path.join(directory, name), "rb") as fh:
+                    result[os.path.join(directory, name)] = fh.read()
+        return result
+
+    def test_items_and_specs_read_only(self):
+        before = self.snapshot()
+        out = bt.backlog_sweep(self.root, "alpha")
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual((out["ok"], out["journal"]), (True, self.journal))
+        self.assertEqual([i["text"] for i in out["items"]], ["open a"])
+        self.assertEqual([s["path"] for s in out["specs"]], ["alpha-1-spec.md", "gone-spec.md", "bad-spec.md"])
+        self.assertEqual(out["specs"][0]["out_of_scope"], ["пункт вне: с хвостом", "второй"])
+        self.assertTrue(out["specs"][1]["missing"])
+        self.assertIn("error", out["specs"][2])
+
+    def test_no_journal_no_backlog_and_explicit_journal(self):
+        os.remove(os.path.join(self.root, "BACKLOG.md"))
+        out = bt.backlog_sweep(self.root, "beta")
+        self.assertEqual((out["ok"], out["items"], out["journal"], out["specs"]), (True, [], None, []))
+        other = _touch(self.root, "elsewhere", "alpha-chain.json",
+                       data=json.dumps({"version": 1, "specs": []}).encode("utf-8"))
+        out = bt.backlog_sweep(self.root, "alpha")
+        self.assertEqual((out["ok"], out["journals"]), (False, sorted([self.journal, other])))
+        self.assertTrue(out["errors"][0].startswith("ambiguous-journal: "), out)
+        out = bt.backlog_sweep(self.root, "alpha", journal=other)
+        self.assertEqual((out["ok"], out["journal"], out["specs"]), (True, other, []))
+
+    def test_cli_exit_codes(self):
+        code, out = _run("backlog-sweep", self.root, "--section", "alpha")
+        self.assertEqual((code, len(out["specs"])), (0, 3))
+        _touch(self.root, "x", "alpha-chain.json")
+        self.assertEqual(_run("backlog-sweep", self.root, "--section", "alpha")[0], 1)
+        self.assertEqual(_run("backlog-sweep", self.root, "--section", "alpha", "--journal", self.journal)[0], 0)
+        self.assertEqual(_run("backlog-sweep", self.root, "--section", "alpha", "--journal",
+                              os.path.join(self.root, "x", "alpha-chain.json"))[0], 2)  # "{}" is no journal
+        self.assertEqual(_run("backlog-sweep", self.root, "--section", "a/b")[0], 2)
+        self.assertEqual(_run("backlog-sweep", os.path.join(self.root, "nope"), "--section", "alpha")[0], 2)
 
 
 if __name__ == "__main__":

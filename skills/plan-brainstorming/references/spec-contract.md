@@ -132,21 +132,29 @@ Several specs of one goal (decomposition) take a numeric suffix by default:
 descriptive suffix (`review01-conn-spec.md`) only when the user asks for it. A spec added to a
 goal that already has specs takes the next free number; existing specs are never renamed.
 
-`BACKLOG.md` is append-only for the skills, except the checkbox that `backlog-mark` sets:
+`BACKLOG.md` is append-only for the skills, except the checkbox that `backlog-mark` and
+`backlog-unmark` change:
 
 - `## My notes` (`## Свои заметки` in a file created from a Russian spec) belongs to the user;
   skills never write there. Then one `## <goal>` section per goal: `<goal>` = the settings
   `backlog` value (`> Backlog:` of the spec, `**Backlog:**` of an old plan header), else the
   spec or plan file name without `-spec.md` / `-impl.md`.
-- Item: `- [ ] <what> — <skill>, <artifact>, <YYYY-MM-DD>`. Spec map: `- <spec file> — <what it
-  covers>`, no checkbox.
+- Item: `- [ ] <what> — <skill>, <artifact>, <YYYY-MM-DD>`. Three states: `[ ]` open, `[x]` taken
+  into an approved spec (not "done"; the user also sets `[x]` by hand), `[-]` cancelled by the user,
+  usually written `- [-] Отменено. <what> — …` (`Cancelled. ` in English). Spec map: `- <spec file>
+  — <what it covers>`, no checkbox.
 - Skills append only at the end of their goal's section, through `brainstorm_tool.py
   backlog-append`: it refuses to change any other byte (exit `1`, file not written) and skips
-  an entry already present from the same source (`action: exists`). `[x]` is set by the user,
-  and by `plan-brainstorming` through `backlog-mark` for the items of an approved spec: it
-  changes that one checkbox byte and nothing else, and `[x]` means "taken into an approved
-  spec", not "done". Only the user unchecks items or deletes lines.
-- `/plan-brainstorming BACKLOG.md [section]` starts the next cycle from the unchecked items.
+  an entry already present from the same source (`action: exists`), a cancelled one included:
+  the duplicate key ignores the checkbox and the `Отменено. ` / `Cancelled. ` prefix.
+  `plan-brainstorming` sets `[x]` through `backlog-mark` for the items of an approved spec (also
+  after a confirmed backlog sweep) and clears it through `backlog-unmark` for the items an amended
+  or withdrawn spec no longer covers, after the user confirms. Each changes that one checkbox byte
+  and nothing else and refuses a `[-]` line (`cancelled`). Only the user sets or changes `[-]` and
+  deletes lines.
+- `/plan-brainstorming BACKLOG.md [section]` starts the next cycle from the unchecked items, after
+  `backlog-sweep` (read-only) gave the agent the specs registered in the section's chain journal
+  to match them against.
 
 ## Hand-off rules
 

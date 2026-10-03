@@ -24,8 +24,10 @@ Commands:
   settings          <spec|plan|roadmap|part.md>
   detect-lang       <file|->
   backlog-append    <root> --section S --source "skill, artifact" --item TEXT [--lang ru|en] [--plain] [--date D]
-  backlog-parse     <BACKLOG.md> [--section S]
+  backlog-parse     <BACKLOG.md> [--section S] [--state open|done|cancelled|all]
   backlog-mark      <root> --section S --item TEXT
+  backlog-unmark    <root> --section S --item TEXT
+  backlog-sweep     <root> --section S [--journal J]
   journal-path      <spec|plan|roadmap|part.md> [--create]
   journal-event     <journal> --skill S --plan P --stage ST --status X [--reason R] [--input F]
                     [--artifact k=v|k[]=v]... [--data JSON] [--spec SPEC]
@@ -703,7 +705,10 @@ def cmd_settings(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 BACKLOG_FILE = "BACKLOG.md"
 BACKLOG_USER_SECTION = {"en": "My notes", "ru": "Свои заметки"}
 BACKLOG_HEADING_RE = re.compile(r"^#{1,2} ")
-BACKLOG_ITEM_RE = re.compile(r"^- \[(?P<mark>[ xX])\] (?P<body>.+?)\s*$")
+BACKLOG_ITEM_RE = re.compile(r"^- \[(?P<mark>[ xX-])\] (?P<body>.+?)\s*$")
+# `[ ]` open, `[x]` taken into an approved spec (not "done"), `[-]` cancelled by the user.
+BACKLOG_STATES = {" ": "open", "x": "done", "X": "done", "-": "cancelled"}
+BACKLOG_STATE_FILTERS = ("open", "done", "cancelled", "all")
 BACKLOG_TAIL_RE = re.compile(r"^(?P<source>.+), (?P<date>\d{4}-\d{2}-\d{2})$")
 BACKLOG_DATE_SUFFIX_RE = re.compile(r", \d{4}-\d{2}-\d{2}$")
 
@@ -718,12 +723,23 @@ def _backlog_lines(text: str) -> List[str]:
     return re.findall(r"[^\n]*\n|[^\n]+$", text)
 
 
+BACKLOG_CANCELLED_PREFIXES = ("Отменено. ", "Cancelled. ")
+
+
+def _backlog_uncancelled(text: str) -> str:
+    """Item text without the `Отменено. ` / `Cancelled. ` prefix the user writes on a cancelled item."""
+    for prefix in BACKLOG_CANCELLED_PREFIXES:
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+
 def _backlog_key(line: str) -> Optional[str]:
-    """Identity of a backlog line: checkbox and date are ignored, item and source count."""
+    """Identity of a backlog line: checkbox, date and the cancelled prefix are ignored, item and source count."""
     line = line.rstrip()
     match = BACKLOG_ITEM_RE.match(line)
     if match:
-        return "[] " + BACKLOG_DATE_SUFFIX_RE.sub("", match.group("body"))
+        return "[] " + BACKLOG_DATE_SUFFIX_RE.sub("", _backlog_uncancelled(match.group("body")))
     if line.startswith("- "):
         return "- " + line[2:]
     return None
@@ -894,9 +910,9 @@ def backlog_append(root: str, section: str, source: str, item: str, lang: str = 
     return {**result, "action": "created" if created else "appended"}
 
 
-def backlog_mark(root: str, section: str, item: str) -> Dict[str, Any]:
-    """Check off `- [ ] <item>` of `## <section>` in `<root>/BACKLOG.md`: the item entered an approved
-    spec. Only the checkbox byte changes. marked / already; not-found and ambiguous write nothing."""
+def _backlog_target(root: str, section: str, item: str) -> Tuple[str, str, str, Optional[bytes], Optional[str]]:
+    """Checked arguments of backlog-mark / backlog-unmark: (section, item, BACKLOG.md path, bytes, text);
+    bytes and text are None when the file is missing. User section or a file not in UTF-8: BacklogError."""
     if not os.path.isdir(root):
         raise InputError(f"root is not a directory: {root}")
     section = _backlog_field("section", section)
@@ -904,31 +920,26 @@ def backlog_mark(root: str, section: str, item: str) -> Dict[str, Any]:
     if _is_user_section(section):
         raise BacklogError(f"user-section: section '{section}' belongs to the user; skills never write there")
     path = os.path.abspath(os.path.join(root, BACKLOG_FILE))
-    result: Dict[str, Any] = {"ok": True, "path": path, "section": section, "item": item}
-    missing = dict(result, ok=False, action="not-found", errors=[f"not-found: '{item}' in '## {section}'"])
     try:
         with open(path, "rb") as fh:
             old = fh.read()
     except FileNotFoundError:
-        return missing
+        return section, item, path, None, None
     except OSError as exc:
         raise InputError(f"cannot read {path}: {exc}") from exc
     try:
-        text = old.decode("utf-8")
+        return section, item, path, old, old.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise BacklogError(f"{path} is not UTF-8, file not written: {exc}") from exc
-    lines = _backlog_lines(text)
-    unchecked, checked = _backlog_mark_lines(lines, section, item)
-    if len(unchecked) > 1:
-        return dict(result, ok=False, action="ambiguous", lines=[index + 1 for index in unchecked],
-                    errors=[f"ambiguous: {len(unchecked)} unchecked lines of '## {section}' read '{item}'"])
-    if not unchecked:
-        return dict(result, action="already", line=checked[0] + 1) if checked else missing
-    index = unchecked[0]
+
+
+def _backlog_flip(path: str, text: str, old: bytes, lines: List[str], index: int, before: str, after: str) -> None:
+    """Set the checkbox of line `index` (now one of `before`) to `after`: exactly one byte changes, checked
+    before and after the atomic write; otherwise BacklogError and the file is left as it was."""
     offset = sum(len(line) for line in lines[:index]) + len(lines[index]) - len(lines[index].lstrip("﻿")) + 3
-    new_text = text[:offset] + "x" + text[offset + 1:]
+    new_text = text[:offset] + after + text[offset + 1:]
     new = new_text.encode("utf-8")
-    if text[offset] != " " or len(new) != len(old) or sum(a != b for a, b in zip(old, new)) != 1:
+    if text[offset] not in before or len(new) != len(old) or sum(a != b for a, b in zip(old, new)) != 1:
         raise BacklogError(f"{path}: more than the checkbox would change, file not written")
     try:
         _atomic_write_text(path, new_text)
@@ -937,7 +948,57 @@ def backlog_mark(root: str, section: str, item: str) -> Dict[str, Any]:
     with open(path, "rb") as fh:
         if fh.read() != new:
             raise BacklogError(f"{path}: content after write differs from the expected bytes")
-    return dict(result, action="marked", line=index + 1)
+
+
+def backlog_mark(root: str, section: str, item: str) -> Dict[str, Any]:
+    """Check off `- [ ] <item>` of `## <section>` in `<root>/BACKLOG.md`: the item entered an approved
+    spec. Only the checkbox byte changes. marked / already; cancelled, not-found and ambiguous write nothing."""
+    section, item, path, old, text = _backlog_target(root, section, item)
+    result: Dict[str, Any] = {"ok": True, "path": path, "section": section, "item": item}
+    missing = dict(result, ok=False, action="not-found", errors=[f"not-found: '{item}' in '## {section}'"])
+    if old is None or text is None:
+        return missing
+    lines = _backlog_lines(text)
+    found = _backlog_item_lines(lines, section, item)
+    unchecked, checked, cancelled = found["open"], found["done"], found["cancelled"]
+    if len(unchecked) > 1:
+        return dict(result, ok=False, action="ambiguous", lines=[index + 1 for index in unchecked],
+                    errors=[f"ambiguous: {len(unchecked)} unchecked lines of '## {section}' read '{item}'"])
+    if not unchecked:
+        if checked:
+            return dict(result, action="already", line=checked[0] + 1)
+        if cancelled:
+            return dict(result, ok=False, action="cancelled", line=cancelled[0] + 1,
+                        errors=[f"cancelled: '{item}' in '## {section}' is cancelled [-] by the user"])
+        return missing
+    _backlog_flip(path, text, old, lines, unchecked[0], " ", "x")
+    return dict(result, action="marked", line=unchecked[0] + 1)
+
+
+def backlog_unmark(root: str, section: str, item: str) -> Dict[str, Any]:
+    """Uncheck `- [x] <item>` of `## <section>` in `<root>/BACKLOG.md`: an amended or withdrawn spec no
+    longer covers it. Only the checkbox byte changes. unmarked / already; cancelled, not-found and
+    ambiguous write nothing."""
+    section, item, path, old, text = _backlog_target(root, section, item)
+    result: Dict[str, Any] = {"ok": True, "path": path, "section": section, "item": item}
+    missing = dict(result, ok=False, action="not-found", errors=[f"not-found: '{item}' in '## {section}'"])
+    if old is None or text is None:
+        return missing
+    lines = _backlog_lines(text)
+    found = _backlog_item_lines(lines, section, item)
+    checked = found["done"]
+    if len(checked) > 1:
+        return dict(result, ok=False, action="ambiguous", lines=[index + 1 for index in checked],
+                    errors=[f"ambiguous: {len(checked)} checked lines of '## {section}' read '{item}'"])
+    if not checked:
+        if found["open"]:
+            return dict(result, action="already", line=found["open"][0] + 1)
+        if found["cancelled"]:
+            return dict(result, ok=False, action="cancelled", line=found["cancelled"][0] + 1,
+                        errors=[f"cancelled: '{item}' in '## {section}' is cancelled [-] by the user"])
+        return missing
+    _backlog_flip(path, text, old, lines, checked[0], "xX", " ")
+    return dict(result, action="unmarked", line=checked[0] + 1)
 
 
 def _backlog_item_text(body: str) -> Tuple[str, Optional[str], Optional[str]]:
@@ -950,12 +1011,11 @@ def _backlog_item_text(body: str) -> Tuple[str, Optional[str], Optional[str]]:
     return body, None, None
 
 
-def _backlog_mark_lines(lines: List[str], section: str, item: str) -> Tuple[List[int], List[int]]:
-    """Indexes of the item lines of `## <section>`, outside code fences, whose text (as backlog-parse
-    gives it) is `item`: (unchecked, checked)."""
+def _backlog_item_lines(lines: List[str], section: str, item: str) -> Dict[str, List[int]]:
+    """Indexes of the item lines of `## <section>`, outside code fences, whose text (as backlog-parse gives
+    it) is `item`, by state: open, done, cancelled. A cancelled line also matches without its prefix."""
     headings, fenced = _backlog_scan(lines)
-    unchecked: List[int] = []
-    checked: List[int] = []
+    found: Dict[str, List[int]] = {"open": [], "done": [], "cancelled": []}
     current: Optional[str] = None
     for index, (line, heading, in_fence) in enumerate(zip(lines, headings, fenced)):
         if heading is not None:
@@ -964,13 +1024,26 @@ def _backlog_mark_lines(lines: List[str], section: str, item: str) -> Tuple[List
         if in_fence or current != f"## {section}":
             continue
         match = BACKLOG_ITEM_RE.match(line.lstrip("﻿").rstrip())
-        if match and _backlog_item_text(match.group("body"))[0] == item:
-            (unchecked if match.group("mark") == " " else checked).append(index)
-    return unchecked, checked
+        if not match:
+            continue
+        state = BACKLOG_STATES[match.group("mark")]
+        text = _backlog_item_text(match.group("body"))[0]
+        if text == item or (state == "cancelled" and _backlog_uncancelled(text) == item):
+            found[state].append(index)
+    return found
 
 
-def backlog_parse(path: str, section: Optional[str] = None) -> Dict[str, Any]:
-    """Unchecked `- [ ]` items of BACKLOG.md, optionally of one section."""
+def _backlog_mark_lines(lines: List[str], section: str, item: str) -> Tuple[List[int], List[int]]:
+    """(unchecked, checked) lines of `item` in `## <section>`; cancelled `[-]` lines are in neither."""
+    found = _backlog_item_lines(lines, section, item)
+    return found["open"], found["done"]
+
+
+def backlog_parse(path: str, section: Optional[str] = None, state: str = "open") -> Dict[str, Any]:
+    """Items of BACKLOG.md with their state (open `[ ]`, done `[x]`, cancelled `[-]`), optionally of one
+    section; `state` keeps one state (default open) or `all`."""
+    if state not in BACKLOG_STATE_FILTERS:
+        raise InputError(f"state must be one of: {', '.join(BACKLOG_STATE_FILTERS)}")
     items: List[Dict[str, Any]] = []
     current: Optional[str] = None
     raw_lines = _read_source(path).split("\n")
@@ -981,15 +1054,116 @@ def backlog_parse(path: str, section: Optional[str] = None) -> Dict[str, Any]:
             continue
         if in_fence:
             continue
-        line = raw.lstrip("﻿").rstrip()
-        match = BACKLOG_ITEM_RE.match(line)
-        if not match or match.group("mark") != " ":
+        match = BACKLOG_ITEM_RE.match(raw.lstrip("﻿").rstrip())
+        if not match:
             continue
-        if section is not None and current != section:
+        item_state = BACKLOG_STATES[match.group("mark")]
+        if (state != "all" and item_state != state) or (section is not None and current != section):
             continue
         text, source, day = _backlog_item_text(match.group("body"))
-        items.append({"section": current, "text": text, "source": source, "date": day, "line": number})
+        items.append({"section": current, "text": text, "source": source, "date": day, "line": number,
+                      "state": item_state})
     return {"ok": True, "items": items}
+
+
+# backlog-sweep walks the whole root for the section's journal: a dot in a directory name, `.plans`
+# and .gitignore do not matter, only these directories are skipped.
+BACKLOG_SWEEP_SKIP_DIRS = (".git", "node_modules", "__pycache__", ".venv", "venv")
+
+
+def _section_journals(root: str, section: str) -> List[str]:
+    """Absolute paths of every `<section>-chain.json` under `root` (exact name), sorted."""
+    name = _check_goal(section) + JOURNAL_SUFFIX
+    found: List[str] = []
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in BACKLOG_SWEEP_SKIP_DIRS)
+        if name in files:
+            found.append(os.path.abspath(os.path.join(directory, name)))
+    return sorted(found)
+
+
+SPEC_ITEM_RE = re.compile(r"^(?:[-*]|\d+\.)\s+(?P<text>.+)$")
+FINDINGS_HEADING = "### Findings Traceability"
+
+
+def _is_table_separator(line: str) -> bool:
+    return line.startswith("|") and "-" in line and re.fullmatch(r"[\s|:\-]+", line) is not None
+
+
+def _spec_item_heads(lines: List[str]) -> List[str]:
+    """Heads of a spec section's items: a top-level list item up to its first ': ', a ###/#### subheading,
+    a table row other than the header and the separator (cells joined by ' | ')."""
+    heads: List[str] = []
+    for index, line in enumerate(lines):
+        if line.startswith("|"):
+            following = lines[index + 1] if index + 1 < len(lines) else ""
+            if not (_is_table_separator(line) or _is_table_separator(following)):
+                heads.append(" | ".join(cell.strip() for cell in line.strip().strip("|").split("|")))
+        elif re.match(r"^#{3,4}\s", line):
+            heads.append(line.lstrip("#").strip())
+        else:
+            match = SPEC_ITEM_RE.match(line)
+            if match:
+                heads.append(match.group("text").split(": ", 1)[0].strip())
+    return heads
+
+
+def _spec_excerpt(journal_dir: str, rel: str) -> Dict[str, Any]:
+    """What backlog-sweep shows of one spec of the journal: Goal, item heads of Components and Findings
+    Traceability, Out of Scope items. A missing file: missing; an unreadable one: error."""
+    path = os.path.normpath(os.path.join(os.path.abspath(journal_dir), rel))
+    entry: Dict[str, Any] = {"path": rel, "file": path}
+    if not os.path.isfile(path):
+        return dict(entry, missing=True)
+    try:
+        text = _read_source(path)
+    except InputError as exc:
+        return dict(entry, error=str(exc))
+    sections: Dict[str, List[str]] = {}
+    current: Optional[str] = None
+    for _, line in _unfenced_lines(text):
+        if line in SPEC_HEADINGS:
+            current = line
+            sections[current] = []
+            continue
+        if line == FINDINGS_HEADING and current in ("## Components", FINDINGS_HEADING):
+            current = FINDINGS_HEADING
+            sections.setdefault(current, [])
+            continue
+        if current == FINDINGS_HEADING and re.match(r"^###\s", line):
+            current = "## Components"
+        if current is not None:
+            sections[current].append(line)
+    out_of_scope = [m.group("text") for m in map(SPEC_ITEM_RE.match, sections.get("## Out of Scope", [])) if m]
+    return dict(entry, goal="\n".join(sections.get("# Goal", [])).strip(),
+                components=_spec_item_heads(sections.get("## Components", [])),
+                findings=_spec_item_heads(sections.get(FINDINGS_HEADING, [])), out_of_scope=out_of_scope)
+
+
+def backlog_sweep(root: str, section: str, journal: Optional[str] = None) -> Dict[str, Any]:
+    """Read-only input of the backlog sweep: the open items of `## <section>` in <root>/BACKLOG.md and the
+    specs of the section's chain journal with their excerpts. Writes nothing."""
+    if not os.path.isdir(root):
+        raise InputError(f"root is not a directory: {root}")
+    section = _backlog_field("section", section)
+    backlog = os.path.abspath(os.path.join(root, BACKLOG_FILE))
+    items = backlog_parse(backlog, section)["items"] if os.path.isfile(backlog) else []
+    result: Dict[str, Any] = {"ok": True, "root": os.path.abspath(root), "section": section,
+                              "backlog": backlog, "items": items}
+    if journal is None:
+        journals = _section_journals(root, section)
+        if len(journals) > 1:
+            return dict(result, ok=False, journal=None, specs=[], journals=journals,
+                        errors=[f"ambiguous-journal: {len(journals)} files {section}{JOURNAL_SUFFIX} under {root}"])
+        if not journals:
+            return dict(result, journal=None, specs=[])
+        journal = journals[0]
+    journal = os.path.abspath(journal)
+    specs = journal_load(journal).get("specs")
+    if not (isinstance(specs, list) and all(isinstance(s, dict) and isinstance(s.get("path"), str) for s in specs)):
+        raise InputError(f"journal-corrupt: {journal}: 'specs' must be a list of {{path, sha256}} objects")
+    directory = os.path.dirname(journal)
+    return dict(result, journal=journal, specs=[_spec_excerpt(directory, spec["path"]) for spec in specs])
 
 
 def cmd_backlog_append(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
@@ -999,11 +1173,21 @@ def cmd_backlog_append(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 
 
 def cmd_backlog_parse(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
-    return 0, backlog_parse(args.file, args.section)
+    return 0, backlog_parse(args.file, args.section, args.state)
 
 
 def cmd_backlog_mark(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     result = backlog_mark(args.root, args.section, args.item)
+    return (0 if result["ok"] else 1), result
+
+
+def cmd_backlog_unmark(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    result = backlog_unmark(args.root, args.section, args.item)
+    return (0 if result["ok"] else 1), result
+
+
+def cmd_backlog_sweep(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    result = backlog_sweep(args.root, args.section, args.journal)
     return (0 if result["ok"] else 1), result
 
 
@@ -2288,15 +2472,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_bl_add.add_argument("--date", help="YYYY-MM-DD, default today")
     p_bl_add.set_defaults(func=cmd_backlog_append)
 
-    p_bl_parse = sub.add_parser("backlog-parse", help="list unchecked BACKLOG.md items")
+    p_bl_parse = sub.add_parser("backlog-parse", help="list BACKLOG.md items (unchecked by default)")
     p_bl_parse.add_argument("file", help="path to BACKLOG.md")
     p_bl_parse.add_argument("--section", help="only this section")
+    p_bl_parse.add_argument("--state", default="open", help="open (default), done, cancelled or all")
     p_bl_parse.set_defaults(func=cmd_backlog_parse)
     p_bl_mark = sub.add_parser("backlog-mark", help="check off one item of an approved spec in <root>/BACKLOG.md")
     p_bl_mark.add_argument("root", help="git top-level of the spec's directory, else the working directory")
     p_bl_mark.add_argument("--section", required=True, help="goal section that holds the item")
     p_bl_mark.add_argument("--item", required=True, help="item text as backlog-parse gives it (without ' — source, date')")
     p_bl_mark.set_defaults(func=cmd_backlog_mark)
+    p_bl_unmark = sub.add_parser("backlog-unmark", help="uncheck one item an amended or withdrawn spec no longer covers")
+    p_bl_unmark.add_argument("root", help="git top-level of the spec's directory, else the working directory")
+    p_bl_unmark.add_argument("--section", required=True, help="goal section that holds the item")
+    p_bl_unmark.add_argument("--item", required=True, help="item text as backlog-parse gives it (without ' — source, date')")
+    p_bl_unmark.set_defaults(func=cmd_backlog_unmark)
+    p_bl_sweep = sub.add_parser("backlog-sweep", help="read-only: open items of a section and the specs of its chain journal")
+    p_bl_sweep.add_argument("root", help="git top-level of the spec's directory, else the working directory")
+    p_bl_sweep.add_argument("--section", required=True, help="goal section of BACKLOG.md")
+    p_bl_sweep.add_argument("--journal", help="the section's chain journal, when the search finds several")
+    p_bl_sweep.set_defaults(func=cmd_backlog_sweep)
     p_settings = sub.add_parser("settings", help="chain settings, environments and backlog by the single reading rule")
     p_settings.add_argument("file", help="spec, plan, roadmap or part file")
     p_settings.set_defaults(func=cmd_settings)

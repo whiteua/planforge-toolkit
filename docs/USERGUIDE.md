@@ -50,7 +50,7 @@ Each skill is an independent module with a well-defined input, output, and invar
 | **Review** | Audit file produced by `plan-iterative-revision` listing errors in the plan. |
 | **Report** | Audit file produced by `plan-resolver` listing implementation vs. plan findings. |
 | **Chain settings** | Decisions for the whole chain (`split`, `revision`, `stop`, `resolver`), external environments with read/write rights and the backlog section. Recorded in the spec by `plan-brainstorming`; later skills read them instead of asking. |
-| **Backlog** | `BACKLOG.md` at the repository root: what the skills deferred, one section per goal. `plan-brainstorming` checks off the items an approved spec took in; unchecking stays with you. |
+| **Backlog** | `BACKLOG.md` at the repository root: what the skills deferred, one section per goal. `plan-brainstorming` checks off the items an approved spec took in; it unchecks only what an amended or withdrawn spec no longer covers, after you confirm; `[-]` (cancelled) is yours alone. |
 | **Dialogue language** | The language of your first task statement. Every question, option and summary of every skill uses it. |
 | **Chain journal** | `<goal>-chain.json` next to the spec: the stage of each plan (`writing`, `revision`, `split`, `execution`, `diffs`, `audit`, `commit`), questions waiting for your answer, findings. Every skill keeps it, manual runs too. |
 | **Follow-ups** | `<goal>-followups.json` next to the journal: defects found outside the plans, in the input format of `plan-brainstorming`. |
@@ -133,11 +133,11 @@ Every message you see (questions, answer options, summaries) and the spec body f
 
 `spec-check` rejects unknown keys, an environment line without `read=` or `write=`, `write=run` on prod, and interface labels such as "(Recommended)" in the quote.
 
-**Backlog.** After you approve the spec, its Out of Scope items (and, when one task is split into several specs, the spec map) are appended to `BACKLOG.md` at the repository root, in the section of this goal. In backlog mode the items the spec took in are listed in the "Spec written" message and checked off `[x]` after your approval (`backlog-mark`); `[x]` means "taken into an approved spec", not "done". Several specs of one goal are numbered `<root>-1-spec.md`, `<root>-2-spec.md` unless you ask for descriptive names.
+**Backlog.** After you approve the spec, its Out of Scope items (and, when one task is split into several specs, the spec map) are appended to `BACKLOG.md` at the repository root, in the section of this goal. In backlog mode the items the spec took in are listed in the "Spec written" message and checked off `[x]` after your approval (`backlog-mark`); `[x]` means "taken into an approved spec", not "done". Before the first question, backlog mode matches the unchecked items with the approved specs of their section (`backlog-sweep`) and, after you confirm, checks off the ones a spec already covers. Items marked `[-]` are cancelled by you; the skills never set or clear that mark and never append such an item again. Several specs of one goal are numbered `<root>-1-spec.md`, `<root>-2-spec.md` unless you ask for descriptive names.
 
 **Output:** `*-spec.md` in the same directory as the goal file. After you approve it, the skill creates the chain journal `<goal>-chain.json` next to it (`<goal>` is the `Backlog` setting, else the spec name without `-spec.md`); the dialogue questions are not recorded there.
 
-**Amend mode.** Given an approved spec (`*-spec.md` with `# Goal`), the skill discusses only the change, edits the file in place, re-runs `spec-check` and the self-review, asks for your approval, appends the new Out of Scope items to `BACKLOG.md` and checks off `[x]` the `BACKLOG.md` items the change took in. It writes no new plan: the chain journal sees the changed spec, and the next `/plan-chain-runner continue` or `/plan-writing <spec>` asks whether to rewrite the plan (`drift`).
+**Amend mode.** Given an approved spec (`*-spec.md` with `# Goal`), the skill discusses only the change, edits the file in place, re-runs `spec-check` and the self-review, asks for your approval, appends the new Out of Scope items to `BACKLOG.md` and checks off `[x]` the `BACKLOG.md` items the change took in and, after you confirm, unchecks (`backlog-unmark`) the ones it removed from the spec. Withdrawing a spec goes through the same mode: its items are unchecked after you confirm, and you remove or rename the spec file. It writes no new plan: the chain journal sees the changed spec, and the next `/plan-chain-runner continue` or `/plan-writing <spec>` asks whether to rewrite the plan (`drift`).
 
 **Depth tiers:**
 
@@ -617,7 +617,7 @@ No skill reaches a database, API or remote service without your explicit permiss
 
 ### Next cycle from the backlog
 
-`BACKLOG.md` at the repository root collects Out of Scope items, the executor's findings and the resolver's defects outside the plan, one section per goal; your own notes go into `My notes` (`Свои заметки`), which the skills never touch. The items an approved spec took in are checked off by `plan-brainstorming` (`backlog-mark`), the rest by you, and only you uncheck them; `/plan-brainstorming BACKLOG.md` starts the next cycle from the unchecked ones.
+`BACKLOG.md` at the repository root collects Out of Scope items, the executor's findings and the resolver's defects outside the plan, one section per goal; your own notes go into `My notes` (`Свои заметки`), which the skills never touch. The items an approved spec took in are checked off by `plan-brainstorming` (`backlog-mark`, also after a confirmed backlog sweep), the rest by you; `plan-brainstorming` unchecks only what an amended or withdrawn spec no longer covers (`backlog-unmark`, after you confirm), and `[-]` (cancelled) is yours alone; `/plan-brainstorming BACKLOG.md` starts the next cycle from the unchecked ones.
 
 ### Version control
 

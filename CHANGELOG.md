@@ -118,6 +118,14 @@ case) fails with exit 1, and the user section is found regardless of case.
   creates before `plan-writing` to its spec. `settings-load` returns `pinned` per role: an alias
   (`sonnet`, `opus`, `haiku`, `fable`) does not pin the version, a full model id does, and such a
   role runs through its agent definition file.
+- `BACKLOG.md` items have three states: `[ ]` open, `[x]` taken into an approved spec, `[-]`
+  cancelled by the user. `backlog-parse --state open|done|cancelled|all` (default `open`, as before)
+  gives each item a `state`; `backlog-append` no longer appends a cancelled item again (the
+  duplicate key ignores the `Отменено. ` / `Cancelled. ` prefix); `backlog-mark` refuses a `[-]`
+  line (`cancelled`, exit 1). New `backlog-unmark` unchecks one item an amended or withdrawn spec
+  no longer covers, and new read-only `backlog-sweep` gives `plan-brainstorming` the open items of a
+  section and the specs of its chain journal: in backlog and amend mode it checks off, after you
+  confirm, the items a spec already covers.
 
 ### Plans in progress
 

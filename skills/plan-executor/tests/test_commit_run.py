@@ -692,6 +692,41 @@ class TestRollbackOfProjectFilesNamedLikeChainFiles(RepoCase):
         self.assertEqual(self.read("app.py"), "x = 1\n")
 
 
+class TestRollbackKeepsTheRunJournalInAnotherFolder(RepoCase):
+    """The run's own journal and its lock lie next to the spec; a spec outside the plan's folder puts them
+    outside it, and a full rollback must still leave them alone (they are in no snapshot)."""
+
+    def setUp(self):
+        super().setUp()
+        (self.repo / "specs").mkdir()
+        self.write("specs/g-spec.md", "> Tier: Quick\n\n# Goal\n\nx\n")
+        self.plan = self.write("docs/plan01-impl.md", "**Spec:** ../specs/g-spec.md\n\n" + PLAN)
+        self.commit_all()
+        self.led = self.init()
+        self.tool.unit_begin(self.exec_dir)
+        self.write("app.py", "x = 2\n")
+        self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+        self.write("specs/g-chain.json", "{}\n")
+        self.write("specs/g-chain.json.lock", "lock\n")
+
+    def restore(self, **kwargs):
+        args = dict(workdir=str(self.repo), checkpoint_id=self.led["baseline_checkpoint"],
+                    exec_dir=self.exec_dir, paths=None)
+        args.update(kwargs)
+        return self.tool.cmd_checkpoint_restore(types.SimpleNamespace(**args))
+
+    def test_full_rollback_keeps_the_journal_and_its_lock(self):
+        self.restore()
+        self.assertEqual((self.repo / "app.py").read_text(encoding="utf-8"), "x = 1\n")
+        self.assertTrue((self.repo / "specs" / "g-chain.json").is_file())
+        self.assertTrue((self.repo / "specs" / "g-chain.json.lock").is_file())
+
+    def test_paths_rollback_does_not_take_the_journal(self):
+        with self.assertRaisesRegex(self.tool.ToolError, "paths-empty"):
+            self.restore(paths=["specs/g-chain.json", "specs/g-chain.json.lock"])
+        self.assertTrue((self.repo / "specs" / "g-chain.json").is_file())
+
+
 class TestDirtyCheckUntrackedFolders(RepoCase):
     """F6: git status lists an untracked folder as one entry (--untracked-files=normal); only such folders are
     listed file by file (one ls-files call), and every file is judged by _is_chain_file."""

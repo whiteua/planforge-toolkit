@@ -101,7 +101,10 @@ def _plan_settings(plan_path: Optional[str]) -> Tuple[Optional[Dict[str, Any]], 
     tool = _load_brainstorm_tool()
     if tool is None:
         return None, [], ["plan-brainstorming not installed alongside"]
-    settings = tool.resolve_settings(plan_path)
+    try:
+        settings = tool.resolve_settings(plan_path)
+    except tool.InputError as exc:  # the spec at **Spec:** cannot be read (not UTF-8): a JSON error, exit 2
+        raise InputError(str(exc)) from exc
     errors = [f"settings: {e}" for e in settings["errors"] if not e.startswith(SETTINGS_MISSING)]
     warnings = [f"settings: {e}" for e in settings["errors"] if e.startswith(SETTINGS_MISSING)]
     warnings.extend(f"settings: {w}" for w in settings["warnings"])

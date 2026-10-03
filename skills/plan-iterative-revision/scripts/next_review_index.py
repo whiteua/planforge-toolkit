@@ -1020,7 +1020,10 @@ def plan_settings(plan: str) -> Tuple[Optional[Dict[str, object]], List[str]]:
     tool = _load_brainstorm_tool()
     if tool is None:
         return None, ["plan-brainstorming not installed alongside; settings unavailable"]
-    settings = tool.resolve_settings(os.path.abspath(plan))
+    try:
+        settings = tool.resolve_settings(os.path.abspath(plan))
+    except tool.InputError as exc:  # unreadable source of the settings: ValueError for the caller, not a traceback
+        raise ValueError(str(exc)) from exc
     warnings = [f"settings: {item}" for item in settings.get("errors", [])]
     warnings += [f"settings: {item}" for item in settings.get("warnings", [])]
     return settings, warnings
@@ -1059,7 +1062,11 @@ def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
     if not os.path.isfile(plan):
         print_json({"valid": False, "error": f"plan not found: {plan}"})
         return 2
-    settings, settings_warnings = plan_settings(plan)
+    try:
+        settings, settings_warnings = plan_settings(plan)
+    except ValueError as exc:  # the spec at **Spec:** cannot be read (not UTF-8)
+        print_json({"valid": False, "error": str(exc)})
+        return 2
     from_settings = settings_config_args(settings, config_args)
     config = resolve_config(list(config_args) + from_settings)
     if "error" in config:

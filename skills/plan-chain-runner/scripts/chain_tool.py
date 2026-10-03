@@ -420,13 +420,17 @@ def _running_stage(data: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     return None
 
 
-def _claim_mark(path: str, mark: Dict[str, Any]) -> bool:
-    """Create the session mark with O_CREAT | O_EXCL; False when another process created it first."""
+def _claim_mark(path: str, mark: Dict[str, Any], created: Optional[List[str]] = None) -> bool:
+    """Create the session mark with O_CREAT | O_EXCL; False when another process created it first.
+    `created` gets the path as soon as the file is ours, so a refused open (a mark held by another process)
+    never makes the caller remove that process's file."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         return False
+    if created is not None:
+        created.append(path)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(mark, ensure_ascii=False, indent=2) + "\n")
     return True
@@ -469,16 +473,13 @@ def session_begin(journal: str, host: Optional[str] = None, takeover: bool = Fal
         if os.path.exists(path):  # abandoned, unreadable or taken over: put back if the journal write fails
             displaced[:] = [_read_mark_bytes(path)]
             bt._remove_quiet(path, retry_seconds=1.0)
-        try:
-            won = _claim_mark(path, {"id": session_id, "host": host or runner.get("profile"), "journal": journal,
-                                     "heartbeat_at": now})
-        except OSError:  # the file may be left half written: the rollback removes it and puts the displaced mark back
-            claimed.append(path)
-            raise
+        # An OSError leaves in `claimed` only a file we created (maybe half written): the rollback removes it
+        # and puts the displaced mark back.
+        won = _claim_mark(path, {"id": session_id, "host": host or runner.get("profile"), "journal": journal,
+                                 "heartbeat_at": now}, claimed)
         if not won:
             displaced.clear()  # another --begin created its mark first: it stays, there is nothing to put back
             raise ChainError(f"session-active: {journal}", id=None, host=None, age_seconds=None)
-        claimed.append(path)
         for item in runner["sessions"]:
             if isinstance(item, dict) and item.get("end") is None:
                 item["ended_at"], item["end"] = now, "interrupted"

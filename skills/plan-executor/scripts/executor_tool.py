@@ -766,7 +766,7 @@ def _z_list(output):
     return {item for item in output.split("\0") if item}
 
 
-def checkpoint_restore(workdir, checkpoint_id, plan_dir=None):
+def checkpoint_restore(workdir, checkpoint_id, plan_dir=None, own=()):
     """Make the working tree match a snapshot: rewrite its files and delete files added
     after it. The branch, HEAD and the user's index are not changed."""
     if checkpoint_detect(workdir)["vcs"] != "git":
@@ -776,7 +776,7 @@ def checkpoint_restore(workdir, checkpoint_id, plan_dir=None):
     snapshot_files = _z_list(_git(root, "ls-tree", "-r", "-z", "--name-only", checkpoint_id))
     current_files = _z_list(_git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"))
     # The shared backlog and the pipeline's files are not part of a rollback (the skills write them).
-    removed = sorted(rel for rel in current_files - snapshot_files if not _is_chain_file(rel, plan_dir))
+    removed = sorted(rel for rel in current_files - snapshot_files if not _is_chain_file(rel, plan_dir, own))
     for rel in removed:
         target = Path(root) / rel
         if target.is_file() or target.is_symlink():
@@ -784,7 +784,7 @@ def checkpoint_restore(workdir, checkpoint_id, plan_dir=None):
 
     def checkout(env):
         _git(root, "read-tree", checkpoint_id, env=env)
-        kept = _FOREIGN_IGNORED | {rel for rel in snapshot_files if _is_chain_file(rel, plan_dir)}
+        kept = _FOREIGN_IGNORED | {rel for rel in snapshot_files if _is_chain_file(rel, plan_dir, own)}
         _git(root, "--literal-pathspecs", "rm", "--cached", "-f", "-q", "--ignore-unmatch", "--", *sorted(kept),
              env=env)
         _git(root, "checkout-index", "-a", "-f", env=env)
@@ -814,12 +814,12 @@ def _same_as_tree(workdir, tree_ish, rels):
     return {rel for rel, blob, digest in zip(rels, blobs, hashes) if blob == digest}
 
 
-def checkpoint_restore_paths(workdir, tree_ish, paths, plan_dir=None):
+def checkpoint_restore_paths(workdir, tree_ish, paths, plan_dir=None, own=()):
     """Restore only `paths` from a snapshot or tree: changed and deleted files come back from it,
     files absent from it are deleted. Every path is checked before anything is written."""
     if checkpoint_detect(workdir)["vcs"] != "git":
         raise ToolError("not a git repository", 1)
-    wanted = sorted(rel for rel in {_safe_rel_path(raw) for raw in paths} if not _is_chain_file(rel, plan_dir))
+    wanted = sorted(rel for rel in {_safe_rel_path(raw) for raw in paths} if not _is_chain_file(rel, plan_dir, own))
     if not wanted:
         raise ToolError("paths-empty: nothing to restore after excluding BACKLOG.md and the chain files", 2)
     # Like snapshots and foreign changes, paths are relative to the repository root, not to workdir.
@@ -1636,11 +1636,12 @@ _CHAIN_FILE_RE = re.compile(
     r"|impl-roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
 
 
-def _is_chain_file(rel, plan_dir=None):
-    """True for BACKLOG.md at the root and for a _CHAIN_FILE_RE name in `plan_dir` (repository-root-relative,
-    "" for the root; _plan_dir). Without plan_dir (no ledger) the name alone decides, in any folder."""
+def _is_chain_file(rel, plan_dir=None, own=()):
+    """True for BACKLOG.md at the root, for a path in `own` (the run's journal and its lock, _own_journal_rels)
+    and for a _CHAIN_FILE_RE name in `plan_dir` (repository-root-relative, "" for the root; _plan_dir).
+    Without plan_dir (no ledger) the name alone decides, in any folder."""
     rel = str(rel).replace("\\", "/")
-    if rel in _FOREIGN_IGNORED:
+    if rel in _FOREIGN_IGNORED or rel in own:
         return True
     folder, _, name = rel.rpartition("/")
     return bool(_CHAIN_FILE_RE.fullmatch(name)) and (plan_dir is None or folder == plan_dir)
@@ -1665,6 +1666,21 @@ def _plan_dir(led, top=None):
         return None
     folder = os.path.relpath(os.path.dirname(plan), top).replace(os.sep, "/")
     return "" if folder == "." else folder
+
+
+def _own_journal_rels(led, workdir):
+    """Repository-root-relative paths of the run's journal and its lock, for _is_chain_file: the journal lies
+    next to the spec, which may be outside the plan's folder. () when the journal is unknown or outside the
+    repository."""
+    journal = _run_journal(led)
+    if not journal:
+        return ()
+    top = os.path.realpath(_git(workdir, "rev-parse", "--show-toplevel").strip())
+    path = os.path.realpath(journal)
+    if not _inside(path, top):
+        return ()
+    rel = os.path.relpath(path, top).replace(os.sep, "/")
+    return (rel, f"{rel}.lock")
 
 
 # A chain file named like a journal: the dirty check leaves out only the run's own journal (by path).
@@ -2109,15 +2125,17 @@ def _after_restore(exec_dir, workdir, restored_paths=None):
 
 def cmd_checkpoint_restore(args):
     exec_dir = getattr(args, "exec_dir", None)
-    plan_dir = None
+    plan_dir, own = None, ()
     if exec_dir:
         # A missing or broken ledger fails before any file is touched; its plan folder tells the pipeline's
-        # files from project files with the same names (F3). Without --exec-dir the name alone decides.
-        plan_dir = _plan_dir(_load(exec_dir))
+        # files from project files with the same names (F3), and its journal is never rolled back wherever it lies.
+        # Without --exec-dir the name alone decides.
+        led = _load(exec_dir)
+        plan_dir, own = _plan_dir(led), _own_journal_rels(led, args.workdir)
     if getattr(args, "paths", None):
-        result = checkpoint_restore_paths(args.workdir, args.checkpoint_id, args.paths, plan_dir=plan_dir)
+        result = checkpoint_restore_paths(args.workdir, args.checkpoint_id, args.paths, plan_dir=plan_dir, own=own)
     else:
-        result = checkpoint_restore(args.workdir, args.checkpoint_id, plan_dir=plan_dir)
+        result = checkpoint_restore(args.workdir, args.checkpoint_id, plan_dir=plan_dir, own=own)
     if exec_dir:
         result["expected_tree"] = _after_restore(exec_dir, args.workdir, result.get("paths"))
     return result

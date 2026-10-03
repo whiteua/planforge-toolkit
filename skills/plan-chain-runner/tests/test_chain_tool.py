@@ -1423,6 +1423,22 @@ class SessionTakeoverRollbackTest(JournalCase):
         self.assertNotIn("not restored", str(caught.exception))
         self.assertEqual((self.read(self.begun["session_file"]), self.read(self.journal)), (mark, journal))
 
+    def test_a_refused_open_does_not_remove_the_mark_of_the_concurrent_winner(self):
+        path, real_open = self.begun["session_file"], os.open
+        winner = b'{"id": "winner", "host": "x", "heartbeat_at": "2026-10-03T00:00:00Z"}\n'
+
+        def refuse(target, flags, *args, **kwargs):
+            if os.path.abspath(target) == os.path.abspath(path) and flags & os.O_EXCL:
+                with open(path, "wb") as fh:  # the concurrent --begin created its mark first
+                    fh.write(winner)
+                raise PermissionError("held by another process")
+            return real_open(target, flags, *args, **kwargs)
+
+        with mock.patch.object(ct.os, "open", side_effect=refuse):
+            with self.assertRaises(ct._brainstorm().JournalError):
+                ct.session_begin(self.journal, takeover=True)
+        self.assertEqual(self.read(path), winner)
+
 
 class JournalTimeFieldsTest(_T2Case):
     def changed(self, change):

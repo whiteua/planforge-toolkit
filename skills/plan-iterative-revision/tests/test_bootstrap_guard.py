@@ -52,6 +52,19 @@ class Bootstrap(unittest.TestCase):
             self.assertEqual(run("bootstrap", str(plan), "--preset", "ultra").returncode, 2)
 
 
+class BootstrapNonUtf8Spec(unittest.TestCase):
+    def test_a_spec_that_is_not_utf8_is_a_json_error_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "a-spec.md").write_bytes("> Tier: Quick\n\n# Goal\n\nПривет\n".encode("cp1251"))
+            plan = Path(d) / "a-impl.md"
+            plan.write_text("**Spec:** a-spec.md\n\n### Task 1: x\n", encoding="utf-8")
+            p = run("bootstrap", str(plan))
+            self.assertEqual(p.returncode, 2, p.stderr)
+            out = json.loads(p.stdout)
+            self.assertIs(out["valid"], False)
+            self.assertIn("cannot read", out["error"])
+
+
 SPEC_TEXT = (
     "> Tier: Deep\n"
     "> Chain: revision=quick; stop=strict\n"

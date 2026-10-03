@@ -449,6 +449,20 @@ class SettingsTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.isfile(BRAINSTORM), "plan-brainstorming not installed alongside")
+class NonUtf8SpecTest(unittest.TestCase):
+    def test_plan_check_reports_a_spec_that_is_not_utf8_as_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "a-spec.md"), "wb") as fh:
+                fh.write("> Tier: Quick\n\n# Goal\n\nПривет\n".encode("cp1251"))
+            plan = os.path.join(tmp, "a-impl.md")
+            with open(plan, "w", encoding="utf-8") as fh:
+                fh.write("**Spec:** a-spec.md\n\n### Task 1: x\n")
+            code, out = _run(TOOL, "plan-check", plan)
+        self.assertEqual(code, 2)
+        self.assertFalse(out["ok"])
+        self.assertIn("cannot read", out["errors"][0])
+
+
 class BrainstormContractTest(unittest.TestCase):
     """plan-check must see the settings that spec-check and resolve_settings see."""
 

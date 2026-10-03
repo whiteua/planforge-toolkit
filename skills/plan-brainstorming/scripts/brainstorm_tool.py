@@ -1908,6 +1908,12 @@ def _journal_structure_errors(data: Dict[str, Any], times: bool = True) -> List[
             record = entry["stages"].get(name)
             if not isinstance(record, dict) or record.get("status") not in STAGE_STATUSES:
                 errors.append(f"{where}: stage '{name}' needs a status in {', '.join(STAGE_STATUSES)}")
+                continue
+            # the scheduler and the journal commands read these three; the schema types them
+            for key, kind, article in (("artifacts", dict, "an object"), ("input", str, "a string"),
+                                       ("input_sha256", str, "a string")):
+                if key in record and not isinstance(record[key], kind):
+                    errors.append(f"{where}: stage '{name}' '{key}' must be {article}")
     errors.extend(_journal_id_errors(data["questions"], "Q", "question"))
     for question in data["questions"]:
         if not isinstance(question, dict):

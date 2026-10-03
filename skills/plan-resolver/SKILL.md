@@ -17,6 +17,8 @@ allowed-tools:
 
 # Plan Resolver
 
+If the only argument is `help`: show this skill's USAGE.md in the dialogue language (without a spec or plan: the language of the user's message; commands and keys as they are) and do nothing else.
+
 Audits the implementation of a master plan against the code. **AUDIT** is read-mostly: it never
 changes code, the plan or past reports, and writes exactly one new report,
 `<base>-report-N.md` or `<base>-report-N-final.md`, in the plan's directory; after the read-only

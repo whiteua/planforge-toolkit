@@ -11,6 +11,7 @@ re-audit (the plan is never modified).
 /plan-resolver [plan-path] fix                                     # one fix → re-audit cycle
 /plan-resolver [plan-path] next                                    # same as fix; continue after auto stops
 /plan-resolver <plan-path> auto [limit]                            # audit → fix → audit loop, limit default 2
+/plan-resolver help                                                # show this quick reference in the dialogue language, nothing else
 ```
 
 ### Usage Examples

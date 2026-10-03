@@ -16,6 +16,7 @@
    - [plan-executor](#plan-executor)
    - [plan-iterative-revision](#plan-iterative-revision)
    - [plan-resolver](#plan-resolver)
+   - [plan-chain-runner](#plan-chain-runner)
    - [writing-skills](#writing-skills)
 5. [Installation](#installation)
 6. [Typical Workflows](#typical-workflows)
@@ -54,6 +55,7 @@ Each skill is an independent module with a well-defined input, output, and invar
 | **Chain journal** | `<goal>-chain.json` next to the spec: the stage of each plan (`writing`, `revision`, `split`, `execution`, `diffs`, `audit`, `commit`), questions waiting for your answer, findings. Every skill keeps it, manual runs too. |
 | **Follow-ups** | `<goal>-followups.json` next to the journal: defects found outside the plans, in the input format of `plan-brainstorming`. |
 | **Diff report** | `<base>-diffs.md` next to the plan: what the run changed, file by file. |
+| **Chain runner** | `plan-chain-runner`: takes the approved specs of one goal through every stage in the order of their dependencies, launches an agent per stage with the model of its role, and stops with questions in the chain journal (`continue`, `discuss`, `status`). |
 
 ---
 
@@ -88,6 +90,7 @@ Each skill is an independent module with a well-defined input, output, and invar
 
 plan-iterative-revision  — use at any stage to clean up a plan before execution
 plan-executor <plan> commit — after plan-resolver: commit the run's files and the audit's fixes
+plan-chain-runner <specs>  — runs the whole chain for approved specs, by their dependencies
 ```
 
 ---
@@ -103,6 +106,8 @@ plan-executor <plan> commit — after plan-resolver: commit the run's files and 
 /plan-brainstorming <goal-file-or-inline-description>
 /plan-brainstorming <findings.json>   # JSON list of code-review findings
 /plan-brainstorming BACKLOG.md        # unchecked items of the shared backlog become the task
+/plan-brainstorming <spec.md>         # amend mode: change an approved spec in place
+/plan-brainstorming help              # this skill's USAGE.md
 ```
 
 With a findings JSON (`file`, `line`, `summary`, `failure_scenario` per item), the skill validates the list, checks each finding against the code, and writes a fix spec. The spec traces every finding id to a fix or to Out of Scope.
@@ -131,6 +136,8 @@ Every message you see (questions, answer options, summaries) and the spec body f
 **Backlog.** After you approve the spec, its Out of Scope items (and, when one task is split into several specs, the spec map) are appended to `BACKLOG.md` at the repository root, in the section of this goal. Several specs of one goal are numbered `<root>-1-spec.md`, `<root>-2-spec.md` unless you ask for descriptive names.
 
 **Output:** `*-spec.md` in the same directory as the goal file. After you approve it, the skill creates the chain journal `<goal>-chain.json` next to it (`<goal>` is the `Backlog` setting, else the spec name without `-spec.md`); the dialogue questions are not recorded there.
+
+**Amend mode.** Given an approved spec (`*-spec.md` with `# Goal`), the skill discusses only the change, edits the file in place, re-runs `spec-check` and the self-review, asks for your approval and appends the new Out of Scope items to `BACKLOG.md`. It writes no new plan: the chain journal sees the changed spec, and the next `/plan-chain-runner continue` or `/plan-writing <spec>` asks whether to rewrite the plan (`drift`).
 
 **Depth tiers:**
 
@@ -309,6 +316,45 @@ In audit mode, always provide the full list of previous reports for delta analys
 
 ---
 
+### plan-chain-runner
+
+**Purpose:** Run the approved specs of one goal through the whole chain — writing → revision → [split] → execution → audit → commit — after one short start dialogue, then without questions until a decision is needed.
+
+**Invoke:**
+```
+/plan-chain-runner <spec> [<spec> …]     # new run: launch card, then the loop
+/plan-chain-runner continue [<goal>]     # resume from the journal (also: продолжить)
+/plan-chain-runner discuss [<goal>]      # answer the open questions one by one (also: обсудить)
+/plan-chain-runner status [<goal>]       # summary only, changes nothing (also: статус)
+/plan-chain-runner help                  # pipeline map
+```
+
+Without a goal the runner looks for `*-chain.json` journals with unfinished stages in the spec folders of the repository: one is taken, several are asked about.
+
+**Start dialogue.** Every spec must pass `spec-check` and belong to the same goal (otherwise: separate runs). The runner names the host profile in one line, proposes the dependency graph of the specs with a reason for each edge (stages already `done` in the journal are not repeated) and shows one launch card: graph and order, models and effort per role (edits can be saved to `~/.planforge/runner.json`), the chain settings of the specs, and the environments with their rights (a task with `task` rights, a production write included, stops its plan on a question), plus the size and ETA when there is history. A spec without `> Chain:` gets plan-writing's questions here. With a dirty working tree the runner lists the files and offers a start commit (`chore: snapshot before plan-chain-runner run`, no push); the chain's own files are never in it.
+
+**Loop.** `run-next` names the stages to run now; each is launched as an agent of the host profile with the model of its role and a silent brief: run `/<skill> <args>`, there is no confirmation channel, a needed decision is recorded with `journal-question` and the agent stops. After each agent the runner checks the journal and the artifacts, never the agent's word. Progress lines in the spec's language: start and end of each stage with the remaining time, execution progress every 10 tasks or 10 minutes, and a line when an agent is silent for more than 10 minutes.
+
+**Scheduling.** The stages of a plan go in order; independent specs are planned in parallel; execution, diffs, audit and commit run for one plan at a time; nothing else runs during an audit; a spec that depends on another starts after that spec's commit. A plan stopped on a question waits with the specs that depend on it; the others go on.
+
+**Stops and questions.** At the end you get one summary (per plan: the plan, reviews, roadmap, ledger, report, `-diffs.md`, commits; plus `<goal>-followups.json` and the BACKLOG lines) and all open questions at once. `discuss` takes them one by one with options and a recommendation and records your answers; an answer that changes a spec's Goal, Components or Out of Scope is handed to `/plan-brainstorming <spec>` (amend mode). `continue` resumes: the owner of each stage applies the answers.
+
+**Profiles and models.**
+
+| Profile | Agents | Model | Effort |
+|---|---|---|---|
+| `claude-code` (Claude Code) | `Agent` tool, in parallel | per role | inherited, or set by `~/.claude/agents/planforge-<role>.md` if you agree to create them |
+| `github-copilot` (GitHub Copilot CLI) | `task` tool, in parallel | per role | inherited from the session |
+| `fallback` | none: one stage at a time in the same session | — | — |
+
+Roles: `writing`, `revision`, `split`, `execution`, `audit`, `commit`. The built-in defaults are in `skills/plan-chain-runner/references/PROFILES.md`; your own table lives in `~/.planforge/runner.json`.
+
+**Output:** the chain's usual artifacts plus the `runner` section of `<goal>-chain.json` (profile, specs, graph, models, start commit, sessions). Apart from the optional start commit and the chain journal (`runner` section, skipped events, questions, answers), the runner writes nothing in the repository.
+
+**Prerequisites:** all six pipeline skills installed side by side (the runner loads `plan-brainstorming`'s `brainstorm_tool.py` by path and launches the others by name); Python ≥ 3.8 in PATH.
+
+---
+
 ### writing-skills
 
 **Purpose:** Create, test, and deploy new AI agent skills using a TDD methodology.
@@ -400,7 +446,7 @@ The CLI auto-detects which agents are installed on your machine. Use `--agent` t
 #### Recipes
 
 ```bash
-# Install all 7 skills — CLI auto-detects your agent
+# Install all 8 skills — CLI auto-detects your agent
 npx skills add whiteua/planforge-toolkit
 
 # Install all skills globally (available in every project on this machine)
@@ -445,14 +491,14 @@ cd planforge-toolkit
 ```bash
 # macOS / Linux
 DEST="$HOME/.claude/skills"
-for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
+for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision plan-chain-runner writing-skills; do
   ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 
 # Windows PowerShell (run as Administrator)
 $src = "$PWD\skills"
 $dest = "$env:USERPROFILE\.claude\skills"
-foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","writing-skills")) {
+foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","plan-chain-runner","writing-skills")) {
   New-Item -ItemType SymbolicLink -Path "$dest\$skill" -Target "$src\$skill"
 }
 ```
@@ -463,7 +509,7 @@ foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-e
 # macOS / Linux
 DEST="$HOME/.copilot/skills"
 mkdir -p "$DEST"
-for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
+for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision plan-chain-runner writing-skills; do
   ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 
@@ -471,7 +517,7 @@ done
 $src = "$PWD\skills"
 $dest = "$env:USERPROFILE\.copilot\skills"
 New-Item -ItemType Directory -Force -Path $dest
-foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","writing-skills")) {
+foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","plan-chain-runner","writing-skills")) {
   New-Item -ItemType SymbolicLink -Path "$dest\$skill" -Target "$src\$skill"
 }
 ```
@@ -482,12 +528,12 @@ foreach ($skill in @("plan-brainstorming","plan-writing","plan-splitter","plan-e
 # macOS / Linux — adjust DEST for your agent
 DEST="$HOME/.codex/skills"   # or ~/.cursor/skills, ~/.agents/skills, etc.
 mkdir -p "$DEST"
-for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
+for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision plan-chain-runner writing-skills; do
   ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 ```
 
-> **Note:** `plan-writing` reads contract files from `plan-brainstorming`, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through it; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it. Install them in the **same parent directory**.
+> **Note:** `plan-writing` reads contract files from `plan-brainstorming`, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through it; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it. `plan-chain-runner` loads it too and launches the six pipeline skills by name. Install them in the **same parent directory**.
 
 ---
 
@@ -542,6 +588,25 @@ done
   → one summary: worst part result wins
 ```
 
+### Whole chain with plan-chain-runner
+
+```
+/plan-brainstorming I want to add WebSocket notifications to the API
+  → approved specs docs/plans/ws-1-spec.md, docs/plans/ws-2-spec.md and the journal ws-chain.json
+
+/plan-chain-runner docs/plans/ws-1-spec.md docs/plans/ws-2-spec.md
+  → launch card: graph (ws-2 after ws-1), models per role, settings, environments → you confirm
+  → per plan: writing → revision → [split] → execution → diffs → audit → commit, without questions
+  → one summary and the open questions, if any
+
+/plan-chain-runner discuss       # answer the questions one by one
+/plan-chain-runner continue      # resume
+```
+
+### Help
+
+`/plan-chain-runner help` prints the pipeline map: the order of the skills, typical scenarios, the runner's commands and where the artifacts are. `/plan-<skill> help` (`plan-brainstorming`, `plan-writing`, `plan-iterative-revision`, `plan-splitter`, `plan-executor`, `plan-resolver`) shows that skill's `USAGE.md` in your language and does nothing else; `help` together with other arguments is an ordinary call.
+
 ### Chain journal and resuming
 
 Every skill records its stage of each plan in `<goal>-chain.json` next to the spec. When a skill needs a decision and there is nobody to ask (a subagent or a chained run), it writes the question into the journal, marks its stage `stopped` and stops with a report. Answer with `brainstorm_tool.py journal-answer <journal> Q1 --answer "…"` or run the skill again interactively: on start it reads `journal-show --plan <plan>`, applies the answer, marks it applied and continues where it stopped (the ledger for the executor, the last report for the resolver, a new run for the revision). `journal-show` prints each plan's stages, open questions and the next action; after a crash `journal-reconcile` restores the statuses from the files the skills left, and a corrupt journal is rebuilt with `journal-reconcile --rebuild`. When a spec or plan changes after the stage that read it is done, `journal-reconcile` records a `drift: <stage> …` question; the skill that owns the stage asks it on its next start and, by your answer, runs the stage again (`rewrite`) or keeps its result for the changed file (`keep`).
@@ -577,6 +642,9 @@ Only `plan-executor` commits on your branch, at its commit stage (`/plan-executo
 | `<goal>-chain.json` | every pipeline skill | Chain journal: stages of each plan, questions, findings |
 | `<goal>-followups.json` | `plan-executor`, `plan-resolver`, `plan-iterative-revision` (`journal-export-findings`) | Findings outside the plans; input for `plan-brainstorming` |
 | `<base>-diffs.md` | `plan-executor` | What the run changed, file by file |
+| `~/.planforge/runner.json` | `plan-chain-runner` (`settings-save`, with your consent) | Models and effort per profile and role; outside the repository |
+| `~/.planforge/sessions/<sha1>.json` | `plan-chain-runner` | Mark of the active run with its heartbeat; outside the repository |
+| `~/.claude/agents/planforge-<role>.md` | `plan-chain-runner` (Claude Code, with your consent) | Agent definitions that set a role's model and effort |
 
 ---
 
@@ -606,3 +674,10 @@ Only `plan-executor` commits on your branch, at its commit stage (`/plan-executo
 | `commit-run`: `snapshots-missing` | The run's snapshots were garbage-collected; or only the expected tree was (the error names `accept-changes`) | Commit by hand; for the expected tree run `accept-changes <exec_dir>`, then commit again |
 | `commit-run`: `head-moved` | The current branch does not contain the commit the run started from | Switch back to that branch, or commit by hand |
 | No `<base>-diffs.md`, `diffs` and `commit` are `skipped` | The project is not a git repository | Expected: the diff report and the commit need git |
+| `plan-chain-runner` asks whether another run is active | A session mark younger than 30 minutes exists (another window, or a run that has just crashed), or an older one while a stage is still `running` (`session-stale-running`) | Stop the other run, or continue here to take over |
+| The runner stops with `session-taken-over` | Another window took the run over | Nothing to do: that window goes on |
+| `run-init`: `graph-cycle` | The dependency graph in the launch card has a cycle | Fix the graph in the card |
+| `settings-load` fails | `~/.planforge/runner.json` is not valid JSON or names an unknown profile or role | Fix or delete the file; the runner offers the built-in defaults for this run |
+| A `model: <role>` question | The host refused the role's model and its fallback (`model-pick`: `no-model`) | `/plan-chain-runner discuss`: `retry <model>` names the model to use, then `continue` |
+| `status` shows a plan waiting without a question | A stage was answered `stop` (`stage-failed:`, `not-confirmed:`, `model:`); plans that need the code stages wait as `code-busy` | Run that stage by hand, then `/plan-chain-runner continue` |
+| A `not-confirmed:` question | After the agent returned (whatever it reported) or was silent for 60 minutes, and after one retry, the journal and the files still do not confirm its stage | `/plan-chain-runner discuss`: `retry` or `stop` |

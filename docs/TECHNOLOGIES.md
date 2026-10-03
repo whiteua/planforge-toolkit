@@ -27,6 +27,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Reconciliation from artifacts | Kubernetes controller reconcile loop (2014); `fsck` | `journal-reconcile` derives stage statuses from the files the skills left (plan, completion, roadmap, ledger, diff report, reports, commits) and turns a changed stage input into a drift question |
 | Single findings stream | Deduplicated issue intake (Sentry fingerprinting); single source of truth | Findings of the executor, the resolver and the revision are recorded once per `file` + `summary`, appended to `BACKLOG.md` at once and exported as `<goal>-followups.json`, the input format of `findings-parse` |
 | Questions as durable state | Human-in-the-loop callback tasks (AWS Step Functions); ticket lifecycle | A run without a confirmation channel records `Qn` (`open → answered → applied`) and stops; the owning skill applies the answer on resume |
+| Amend mode by the spec's owner | Change control (IEEE 828 configuration management); single ownership | An approved spec is changed in place by `plan-brainstorming`, re-checked and re-approved; the journal sees the change through the `writing` stage's input hash and asks a drift question instead of keeping a stale plan |
 
 ---
 
@@ -146,6 +147,22 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Authoritative fix diff | Reproducible builds; before/after snapshots | The fix phase is bracketed by workspace fingerprints and `snapshot-diff` lists the changed files, which the Fix Log must account for |
 | Re-verification under a run-scope read | Reliance limited to what cannot be re-performed (ISA 500) | With `read=run`, tasks marked `External (read)` are re-checked by the audit instead of being closed as `executor-reported` |
 | Fix files handed to the commit stage | Separation of Duties (maker–checker) | The fix phase records the files `snapshot-diff` lists as `fix_files` (repository-root paths) in the chain journal; the resolver runs no mutating git command, and its gate names `/plan-executor <plan> commit` |
+
+---
+
+## plan-chain-runner
+
+| Technique | Origin | How it's applied |
+|---|---|---|
+| Dependency-graph scheduling | Make (Stuart Feldman, 1976); Apache Airflow DAG scheduler (2015) | `run-next` issues a spec's stages only after the specs it depends on are committed; independent specs are planned in parallel up to `parallel` |
+| Mutual exclusion for code stages | Critical sections (Dijkstra, 1965); single-writer principle | Execution, diffs, audit and commit run for one plan at a time, because the executor and the resolver watch the whole working tree |
+| Quiescent audit | Write freeze during an audit; snapshot isolation | Nothing else is issued while an audit runs, and the runner writes nothing into the journal then; only the session file outside the working tree |
+| Trust, but verify agent reports | Reconciliation loop (Kubernetes controllers, 2014) | A stage counts as done only when `journal-reconcile` and `journal-show` confirm it; an unconfirmed stage after any return of the agent (or 60 minutes of silence) gets one retry, then a `not-confirmed:` question |
+| Host capability profiles with graceful degradation | Feature detection; capability negotiation | `claude-code` (Claude Code `Agent` tool, model per role), `github-copilot` (GitHub Copilot CLI `task` tool, effort inherited), `fallback` (one session, one stage at a time); a missing capability moves the runner to the next profile |
+| Model per role | Role specialisation (MetaGPT, 2023); cost-tiered workers | `~/.planforge/runner.json` maps each role to a model and effort; `model-pick --journal --unsupported` falls back to the role's `fallback` model from the journal's table or asks |
+| Session lease with heartbeat | Leases (Gray & Cheriton, 1989); heartbeat failure detection; fencing tokens | The session file holds the session id and `heartbeat_at`; younger than 30 minutes means another runner is active, older means an abandoned run (asked about when a stage is still running); `--heartbeat`/`--end` with another id fail with `session-taken-over` |
+| ETA from history | Evidence-based scheduling (Joel Spolsky, 2007) | `run-eta` averages the journal's past stage durations and per-unit execution times |
+| Machine-readable questions | Enumerated answers; command tokens in protocols | Questions the scheduler acts on start with fixed prefixes and take fixed tokens (`accept`/`fix`, `retry`/`stop`, `rewrite`/`keep`) |
 
 ---
 

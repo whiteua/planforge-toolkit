@@ -946,6 +946,14 @@ EVENT_KINDS = ("stage-start", "stage-end", "stage-update", "unit-begin", "unit-f
 LOCK_WAIT_SECONDS = 10.0
 LOCK_STALE_SECONDS = 60.0
 
+# Optional `runner` section of the journal (spec plan-chain-runner-2, section C): written by
+# plan-chain-runner's chain_tool.py (run-init, run-session), checked by journal-validate.
+RUNNER_VERSION = 1
+RUNNER_PROFILES = ("claude-code", "github-copilot", "fallback")
+ROLES = ("writing", "revision", "split", "execution", "audit", "commit")
+RUNNER_SESSION_ENDS = ("stopped", "complete", "interrupted")
+RUNNER_START_COMMIT_RE = re.compile(r"^(?:[0-9a-f]{7,64}|declined|none)$")
+
 
 class JournalError(Exception):
     """Journal contract violation: illegal transition, held lock, open questions (exit 1)."""
@@ -1616,8 +1624,122 @@ def _journal_id_errors(items: List[Any], prefix: str, what: str) -> List[str]:
     return [f"{what} ids must be {prefix}1..{prefix}{len(items)} in order, found: {ids}"]
 
 
+def _runner_cycle(graph: Dict[str, List[str]]) -> Optional[List[str]]:
+    """The first dependency cycle of `graph` (spec -> the specs it depends on) as a path whose last
+    node repeats the first, e.g. ['a', 'b', 'a']; None without cycles. Keys and dependencies are
+    visited in their stored order, so the answer is stable for one journal."""
+    state: Dict[str, int] = {}  # 1 = on the current path, 2 = finished
+    path: List[str] = []
+
+    def visit(node: str) -> Optional[List[str]]:
+        state[node] = 1
+        path.append(node)
+        for dep in graph.get(node, ()):
+            if state.get(dep) == 1:
+                return path[path.index(dep):] + [dep]
+            if dep not in state:
+                found = visit(dep)
+                if found:
+                    return found
+        path.pop()
+        state[node] = 2
+        return None
+
+    for node in graph:
+        if node not in state:
+            found = visit(node)
+            if found:
+                return found
+    return None
+
+
+def _runner_graph_errors(graph: Any, specs: Optional[List[str]]) -> List[str]:
+    """runner.graph maps a spec to the specs it depends on: string lists; every key and dependency
+    is one of `specs` (skipped when `specs` itself is invalid, None); no cycle."""
+    if not (isinstance(graph, dict) and all(isinstance(deps, list) and all(isinstance(dep, str) for dep in deps)
+                                             for deps in graph.values())):
+        return ["runner: 'graph' must be an object of string lists"]
+    errors: List[str] = []
+    if specs is not None:
+        known = set(specs)
+        for key, deps in graph.items():
+            if key not in known:
+                errors.append(f"runner: graph key '{key}' is not in specs")
+            errors.extend(f"runner: graph dependency '{dep}' of '{key}' is not in specs"
+                          for dep in deps if dep not in known)
+    cycle = _runner_cycle(graph)
+    if cycle:
+        errors.append("runner-graph-cycle: " + " -> ".join(cycle))
+    return errors
+
+
+def _runner_models_errors(models: Any) -> List[str]:
+    """runner.models maps a role of ROLES to {"model", "effort"}, each a non-empty string or null
+    (null model: profile fallback; null effort: inherited); other keys such as "fallback" are kept."""
+    if not isinstance(models, dict):
+        return ["runner: 'models' must be an object"]
+    errors: List[str] = []
+    for role, entry in models.items():
+        if role not in ROLES:
+            errors.append(f"runner: unknown role '{role}' in models (roles: {', '.join(ROLES)})")
+        elif not (isinstance(entry, dict) and all(
+                name in entry and (entry[name] is None or (isinstance(entry[name], str) and entry[name].strip()))
+                for name in ("model", "effort"))):
+            errors.append(f"runner: models.{role} needs 'model' and 'effort', each a non-empty string or null")
+    return errors
+
+
+def _runner_sessions_errors(sessions: Any) -> List[str]:
+    """runner.sessions lists {"id", "started_at", "ended_at": str|null, "end": RUNNER_SESSION_ENDS|null};
+    run-session --begin appends an open one, --end closes it."""
+    if not isinstance(sessions, list):
+        return ["runner: 'sessions' must be a list"]
+    errors: List[str] = []
+    for index, item in enumerate(sessions):
+        where = f"runner: sessions[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{where}: must be an object")
+            continue
+        errors.extend(f"{where}: '{name}' must be a non-empty string" for name in ("id", "started_at")
+                      if not isinstance(item.get(name), str) or not item[name].strip())
+        if "ended_at" not in item or not (item["ended_at"] is None or isinstance(item["ended_at"], str)):
+            errors.append(f"{where}: 'ended_at' must be a string or null")
+        if "end" not in item or not (item["end"] is None or item["end"] in RUNNER_SESSION_ENDS):
+            errors.append(f"{where}: 'end' must be one of {', '.join(RUNNER_SESSION_ENDS)} or null")
+    return errors
+
+
+def _runner_errors(runner: Any) -> List[str]:
+    """Checks of the optional `runner` section (spec plan-chain-runner-2, section C): version,
+    profile, specs, graph (membership, runner-graph-cycle), roles of models, start_commit and parallel
+    (optional keys), sessions. Required keys: version, profile, specs, graph, models, sessions."""
+    if not isinstance(runner, dict):
+        return ["runner: must be an object"]
+    errors: List[str] = []
+    version = runner.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version != RUNNER_VERSION:
+        errors.append(f"runner: 'version' must be {RUNNER_VERSION}")
+    if runner.get("profile") not in RUNNER_PROFILES:
+        errors.append(f"runner: 'profile' must be one of {', '.join(RUNNER_PROFILES)}")
+    specs = runner.get("specs")
+    if not (isinstance(specs, list) and all(isinstance(spec, str) and spec.strip() for spec in specs)):
+        errors.append("runner: 'specs' must be a list of non-empty strings")
+        specs = None
+    errors.extend(_runner_graph_errors(runner.get("graph"), specs))
+    errors.extend(_runner_models_errors(runner.get("models")))
+    start = runner.get("start_commit", "none")
+    if not (isinstance(start, str) and RUNNER_START_COMMIT_RE.match(start)):
+        errors.append("runner: 'start_commit' must be a commit sha, 'declined' or 'none'")
+    parallel = runner.get("parallel", 1)
+    if isinstance(parallel, bool) or not isinstance(parallel, int) or parallel < 1:
+        errors.append("runner: 'parallel' must be an integer >= 1")
+    errors.extend(_runner_sessions_errors(runner.get("sessions")))
+    return errors
+
+
 def _journal_structure_errors(data: Dict[str, Any]) -> List[str]:
-    """Keys and types, plan ids, stage names and statuses, Qn/Fn ids, question states, event kinds."""
+    """Keys and types, plan ids, stage names and statuses, Qn/Fn ids, question states, event kinds,
+    the optional runner section."""
     errors = [f"'{key}' must be {kind.__name__}" for key, kind in _VALIDATE_TOP_KEYS
               if not isinstance(data.get(key), kind) or isinstance(data.get(key), bool)]
     if errors:
@@ -1651,6 +1773,8 @@ def _journal_structure_errors(data: Dict[str, Any]) -> List[str]:
         if not isinstance(event, dict) or event.get("kind") not in EVENT_KINDS:
             errors.append(f"events[{index}]: kind must be one of {', '.join(EVENT_KINDS)}")
     errors.extend(_journal_item_errors(data))
+    if "runner" in data:  # optional section of plan-chain-runner
+        errors.extend(_runner_errors(data["runner"]))
     return errors
 
 

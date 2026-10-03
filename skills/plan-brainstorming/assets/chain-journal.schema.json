@@ -18,7 +18,8 @@
     "events": {"type": "array", "items": {"$ref": "#/definitions/event"}},
     "limits": {"type": "object", "required": ["enabled", "time_minutes", "cost"],
       "properties": {"enabled": {"type": "boolean"}, "time_minutes": {"type": ["number", "null"]},
-                     "cost": {"type": ["number", "null"]}}}
+                     "cost": {"type": ["number", "null"]}}},
+    "runner": {"$ref": "#/definitions/runner"}
   },
   "definitions": {
     "time": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"},
@@ -57,6 +58,22 @@
       "plan": {"type": ["string", "null"]}, "stage": {"type": ["string", "null"]},
       "kind": {"enum": ["stage-start", "stage-end", "stage-update", "unit-begin", "unit-finish", "question", "answer",
                         "applied", "finding", "commit", "reconcile", "lock-takeover", "diffs-rebuilt"]},
-      "data": {"type": "object"}}}
+      "data": {"type": "object"}}},
+    "runner": {"type": "object", "description": "optional; written by plan-chain-runner (chain_tool.py run-init, run-session); spec paths are relative to the journal's directory",
+      "required": ["version", "profile", "specs", "graph", "models", "sessions"],
+      "properties": {
+        "version": {"const": 1},
+        "profile": {"enum": ["claude-code", "github-copilot", "fallback"]},
+        "specs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "graph": {"type": "object", "description": "spec -> specs it depends on; keys and dependencies are in specs, no cycles",
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+        "models": {"type": "object", "propertyNames": {"enum": ["writing", "revision", "split", "execution", "audit", "commit"]},
+          "additionalProperties": {"type": "object", "required": ["model", "effort"], "properties": {
+            "model": {"type": ["string", "null"], "minLength": 1}, "effort": {"type": ["string", "null"], "minLength": 1}}}},
+        "start_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{7,64}|declined|none)$"},
+        "parallel": {"type": "integer", "minimum": 1, "description": "optional; run-init --parallel, read by run-next first"},
+        "sessions": {"type": "array", "items": {"type": "object", "required": ["id", "started_at", "ended_at", "end"],
+          "properties": {"id": {"type": "string", "minLength": 1}, "started_at": {"$ref": "#/definitions/time"},
+            "ended_at": {"type": ["string", "null"]}, "end": {"enum": ["stopped", "complete", "interrupted", null]}}}}}}
   }
 }

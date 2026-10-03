@@ -1105,5 +1105,220 @@ class JournalGateFixesTest(unittest.TestCase):
         self.assertEqual(len(texts), 1, texts)
 
 
+class RunnerConstantsTest(unittest.TestCase):
+    def test_runner_constants(self):
+        self.assertEqual(j2.RUNNER_VERSION, 1)
+        self.assertEqual(j2.RUNNER_PROFILES, ("claude-code", "github-copilot", "fallback"))
+        self.assertEqual(j2.ROLES, ("writing", "revision", "split", "execution", "audit", "commit"))
+        self.assertTrue(set(j2.ROLES) <= set(j2.STAGES))
+        self.assertEqual(j2.RUNNER_SESSION_ENDS, ("stopped", "complete", "interrupted"))
+
+    def test_start_commit_forms(self):
+        for value in ("a1b2c3d", "0" * 40, "declined", "none"):
+            self.assertTrue(j2.RUNNER_START_COMMIT_RE.match(value), value)
+        for value in ("", "a1b2c3", "A1B2C3D", "HEAD", "declined ", "g1b2c3d"):
+            self.assertIsNone(j2.RUNNER_START_COMMIT_RE.match(value), value)
+
+
+class RunnerCycleTest(unittest.TestCase):
+    def test_acyclic_graphs(self):
+        self.assertIsNone(j2._runner_cycle({}))
+        self.assertIsNone(j2._runner_cycle({"b": ["a"], "c": ["b", "a"]}))
+        self.assertIsNone(j2._runner_cycle({"d": ["b", "c"], "b": ["a"], "c": ["a"], "a": []}))
+
+    def test_the_first_cycle_in_stored_order(self):
+        self.assertEqual(j2._runner_cycle({"a": ["b"], "b": ["a"]}), ["a", "b", "a"])
+        self.assertEqual(j2._runner_cycle({"a": ["a"]}), ["a", "a"])
+        self.assertEqual(j2._runner_cycle({"x": ["a"], "a": ["b"], "b": ["c"], "c": ["a"]}),
+                         ["a", "b", "c", "a"])
+        self.assertEqual(j2._runner_cycle({"b": ["a"], "a": ["b"]}), ["b", "a", "b"])
+
+
+class RunnerGraphErrorsTest(unittest.TestCase):
+    SPECS = ["g-1-spec.md", "g-2-spec.md", "g-3-spec.md"]
+
+    def test_a_graph_over_the_specs_has_no_errors(self):
+        self.assertEqual(j2._runner_graph_errors({}, self.SPECS), [])
+        self.assertEqual(j2._runner_graph_errors(
+            {"g-2-spec.md": ["g-1-spec.md"], "g-3-spec.md": ["g-1-spec.md", "g-2-spec.md"]}, self.SPECS), [])
+
+    def test_types(self):
+        expected = ["runner: 'graph' must be an object of string lists"]
+        for graph in (None, [], {"g-2-spec.md": "g-1-spec.md"}, {"g-2-spec.md": [1]}):
+            with self.subTest(graph=graph):
+                self.assertEqual(j2._runner_graph_errors(graph, self.SPECS), expected)
+
+    def test_unknown_specs(self):
+        self.assertEqual(j2._runner_graph_errors({"x-spec.md": ["g-1-spec.md", "y-spec.md"]}, self.SPECS), [
+            "runner: graph key 'x-spec.md' is not in specs",
+            "runner: graph dependency 'y-spec.md' of 'x-spec.md' is not in specs",
+        ])
+
+    def test_membership_is_skipped_without_valid_specs(self):
+        self.assertEqual(j2._runner_graph_errors({"x-spec.md": ["y-spec.md"]}, None), [])
+
+    def test_cycle(self):
+        graph = {"g-1-spec.md": ["g-2-spec.md"], "g-2-spec.md": ["g-1-spec.md"]}
+        self.assertEqual(j2._runner_graph_errors(graph, self.SPECS),
+                         ["runner-graph-cycle: g-1-spec.md -> g-2-spec.md -> g-1-spec.md"])
+
+
+class RunnerModelsErrorsTest(unittest.TestCase):
+    def test_roles_with_models_and_efforts(self):
+        models = {"writing": {"model": "fable", "effort": "high"}, "commit": {"model": "gpt-5-mini", "effort": None},
+                  "execution": {"model": None, "effort": None},  # profile fallback: the skill runs in the session
+                  "audit": {"model": "claude-opus-5.5", "effort": None, "fallback": "gpt-5-mini"}}
+        self.assertEqual(j2._runner_models_errors({}), [])
+        self.assertEqual(j2._runner_models_errors(models), [])
+
+    def test_each_models_rule(self):
+        cases = [
+            ([], ["runner: 'models' must be an object"]),
+            ({"deploy": {"model": "x", "effort": None}},
+             ["runner: unknown role 'deploy' in models (roles: writing, revision, split, execution, audit, commit)"]),
+            ({"split": "opus"}, ["runner: models.split needs 'model' and 'effort', each a non-empty string or null"]),
+            ({"split": {"model": "opus"}}, ["runner: models.split needs 'model' and 'effort', each a non-empty string or null"]),
+            ({"split": {"model": "", "effort": None}},
+             ["runner: models.split needs 'model' and 'effort', each a non-empty string or null"]),
+            ({"split": {"model": "opus", "effort": 3}},
+             ["runner: models.split needs 'model' and 'effort', each a non-empty string or null"]),
+        ]
+        for models, expected in cases:
+            with self.subTest(models=models):
+                self.assertEqual(j2._runner_models_errors(models), expected)
+
+
+class RunnerSessionsErrorsTest(unittest.TestCase):
+    def test_finished_and_open_sessions(self):
+        sessions = [{"id": "s1", "started_at": "2026-10-02T10:00:00Z", "ended_at": "2026-10-02T11:00:00Z",
+                     "end": "stopped"},
+                    {"id": "s2", "started_at": "2026-10-02T12:00:00Z", "ended_at": None, "end": None}]
+        self.assertEqual(j2._runner_sessions_errors([]), [])
+        self.assertEqual(j2._runner_sessions_errors(sessions), [])
+
+    def test_each_sessions_rule(self):
+        good = {"id": "s1", "started_at": "2026-10-02T10:00:00Z", "ended_at": None, "end": None}
+        cases = [
+            ({}, ["runner: 'sessions' must be a list"]),
+            ([["s1"]], ["runner: sessions[0]: must be an object"]),
+            ([dict(good, id="")], ["runner: sessions[0]: 'id' must be a non-empty string"]),
+            ([{k: v for k, v in good.items() if k != "started_at"}],
+             ["runner: sessions[0]: 'started_at' must be a non-empty string"]),
+            ([{k: v for k, v in good.items() if k != "ended_at"}],
+             ["runner: sessions[0]: 'ended_at' must be a string or null"]),
+            ([good, dict(good, end="crashed")],
+             ["runner: sessions[1]: 'end' must be one of stopped, complete, interrupted or null"]),
+            ([{k: v for k, v in good.items() if k != "end"}],
+             ["runner: sessions[0]: 'end' must be one of stopped, complete, interrupted or null"]),
+        ]
+        for sessions, expected in cases:
+            with self.subTest(expected=expected[0]):
+                self.assertEqual(j2._runner_sessions_errors(sessions), expected)
+
+
+def _jr_runner(**changes):
+    """A valid runner section of goal 'g' with two specs; `changes` replace or (value None) drop keys."""
+    runner = {"version": 1, "profile": "claude-code", "specs": ["g-1-spec.md", "g-2-spec.md"],
+              "graph": {"g-2-spec.md": ["g-1-spec.md"]},
+              "models": {"writing": {"model": "fable", "effort": "high"}, "commit": {"model": "sonnet", "effort": "low"}},
+              "start_commit": "a1b2c3d",
+              "sessions": [{"id": "s1", "started_at": "2026-10-02T10:00:00Z", "ended_at": None, "end": None}]}
+    runner.update(changes)
+    return {key: value for key, value in runner.items() if value is not None}
+
+
+class RunnerErrorsTest(unittest.TestCase):
+    def test_a_valid_runner_has_no_errors(self):
+        self.assertEqual(j2._runner_errors(_jr_runner()), [])
+        self.assertEqual(j2._runner_errors(_jr_runner(start_commit=None)), [])  # the key is optional
+        self.assertEqual(j2._runner_errors(_jr_runner(parallel=2)), [])  # optional, written by run-init --parallel
+        for value in ("declined", "none", "0" * 40):
+            self.assertEqual(j2._runner_errors(_jr_runner(start_commit=value)), [])
+        fallback = {role: {"model": None, "effort": None} for role in j2.ROLES}
+        self.assertEqual(j2._runner_errors(_jr_runner(profile="fallback", models=fallback, sessions=[])), [])
+
+    def test_each_runner_rule(self):
+        cases = [
+            ([], ["runner: must be an object"]),
+            (_jr_runner(version=2), ["runner: 'version' must be 1"]),
+            (_jr_runner(version=True), ["runner: 'version' must be 1"]),
+            (_jr_runner(profile="codex"), ["runner: 'profile' must be one of claude-code, github-copilot, fallback"]),
+            (_jr_runner(specs="g-1-spec.md"), ["runner: 'specs' must be a list of non-empty strings"]),
+            (_jr_runner(specs=["g-1-spec.md", ""], graph={}), ["runner: 'specs' must be a list of non-empty strings"]),
+            (_jr_runner(specs=["g-1-spec.md"]), ["runner: graph key 'g-2-spec.md' is not in specs"]),
+            (_jr_runner(graph=None), ["runner: 'graph' must be an object of string lists"]),
+            (_jr_runner(graph={"g-1-spec.md": ["g-2-spec.md"], "g-2-spec.md": ["g-1-spec.md"]}),
+             ["runner-graph-cycle: g-1-spec.md -> g-2-spec.md -> g-1-spec.md"]),
+            (_jr_runner(models={"review": {"model": "x", "effort": None}}),
+             ["runner: unknown role 'review' in models (roles: writing, revision, split, execution, audit, commit)"]),
+            (_jr_runner(start_commit="HEAD"), ["runner: 'start_commit' must be a commit sha, 'declined' or 'none'"]),
+            (_jr_runner(parallel=0), ["runner: 'parallel' must be an integer >= 1"]),
+            (_jr_runner(sessions=None), ["runner: 'sessions' must be a list"]),
+        ]
+        for runner, expected in cases:
+            with self.subTest(expected=expected[0]):
+                self.assertEqual(j2._runner_errors(runner), expected)
+
+
+class RunnerValidateTest(unittest.TestCase):
+    def _journal(self, tmp, runner):
+        path = _j2_journal(tmp, plans={"a-impl": {}})
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["runner"] = runner
+        return _j2_write(path, json.dumps(data, indent=2))
+
+    def test_a_valid_runner_validates_and_survives_journal_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._journal(tmp, _jr_runner())
+            self.assertEqual(j2.journal_validate(path), {"ok": True, "errors": []})
+            j2.journal_question(path, "plan-chain-runner", os.path.join(tmp, "a-impl.md"), "writing",
+                                "stage-failed: writing", options=["retry", "stop"])
+            self.assertEqual(j2.journal_load(path)["runner"], _jr_runner())
+            self.assertEqual(_j2_run("journal-validate", path), (0, {"ok": True, "errors": []}))
+
+    def test_unknown_spec_and_cycle_fail_journal_validate(self):
+        cases = [
+            (_jr_runner(graph={"g-3-spec.md": ["g-1-spec.md"]}), ["runner: graph key 'g-3-spec.md' is not in specs"]),
+            (_jr_runner(graph={"g-1-spec.md": ["g-2-spec.md"], "g-2-spec.md": ["g-1-spec.md"]}),
+             ["runner-graph-cycle: g-1-spec.md -> g-2-spec.md -> g-1-spec.md"]),
+            (None, ["runner: must be an object"]),
+        ]
+        for runner, expected in cases:
+            with self.subTest(expected=expected[0]), tempfile.TemporaryDirectory() as tmp:
+                path = self._journal(tmp, runner)
+                self.assertEqual(j2.journal_validate(path), {"ok": False, "errors": expected})
+                self.assertEqual(_j2_run("journal-validate", path), (1, {"ok": False, "errors": expected}))
+
+    def test_runner_errors_come_after_the_other_structure_errors_and_stop_the_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._journal(tmp, _jr_runner(version=2))
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            data["plans"][0]["stages"]["writing"]["status"] = "done"  # a replay error, hidden by structure errors
+            data["events"].append({"kind": "note"})
+            _j2_write(path, json.dumps(data))
+            errors = j2.journal_validate(path)["errors"]
+        self.assertEqual(errors[-1], "runner: 'version' must be 1")
+        self.assertFalse(any("stored status" in error for error in errors), errors)
+
+
+class RunnerSchemaTest(unittest.TestCase):
+    def test_runner_schema_names_match_the_code(self):
+        path = os.path.join(os.path.dirname(_J2_TOOL), "..", "assets", "chain-journal.schema.json")
+        with open(path, encoding="utf-8") as fh:
+            schema = json.load(fh)
+        self.assertEqual(schema["properties"]["runner"], {"$ref": "#/definitions/runner"})
+        self.assertNotIn("runner", schema["required"])  # optional section
+        runner = schema["definitions"]["runner"]
+        props = runner["properties"]
+        self.assertEqual(runner["required"], ["version", "profile", "specs", "graph", "models", "sessions"])
+        self.assertEqual(props["version"], {"const": j2.RUNNER_VERSION})
+        self.assertEqual(tuple(props["profile"]["enum"]), j2.RUNNER_PROFILES)
+        self.assertEqual(tuple(props["models"]["propertyNames"]["enum"]), j2.ROLES)
+        self.assertEqual(props["start_commit"]["pattern"], j2.RUNNER_START_COMMIT_RE.pattern)
+        self.assertEqual(tuple(props["sessions"]["items"]["properties"]["end"]["enum"]), j2.RUNNER_SESSION_ENDS + (None,))
+
+
 if __name__ == "__main__":
     unittest.main()

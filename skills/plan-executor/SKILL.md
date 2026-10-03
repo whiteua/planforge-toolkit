@@ -5,6 +5,8 @@ description: Use when executing a ready implementation plan, staged roadmap, or 
 
 # plan-executor
 
+If the only argument is `help`: show this skill's USAGE.md in the dialogue language (without a spec or plan: the language of the user's message; commands and keys as they are) and do nothing else.
+
 ## When to use
 
 Use this skill when the plan already exists and the job is execution, not planning: staged plans from `plan-splitter`, plans from `plan-writing` (`### Task N:` headings), or other plans with explicit task headings.

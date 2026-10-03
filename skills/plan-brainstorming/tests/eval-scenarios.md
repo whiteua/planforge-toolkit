@@ -193,6 +193,21 @@ must be strengthened, not the test loosened.
   the journal; a journal named after the spec file (`…-spec-chain.json`) instead of the `Backlog`
   goal.
 
+## Scenario 20: Amend mode changes the spec in place
+
+- **Setup:** `auth-v2-spec.md` (Russian, Deep, `> Backlog: auth-v2`) is approved; its journal
+  `auth-v2-chain.json` has the `writing` stage `done`. The user runs
+  `/plan-brainstorming auth-v2-spec.md` and asks to drop SMS login from Components and move it to
+  Out of Scope.
+- **Trigger:** The user approves the edited spec.
+- **Expected (PASS):** The dialogue is in Russian and covers only this change; the spec file is
+  edited in place, `spec-check` exits `0`, the self-review runs, the user approves; only the new
+  Out of Scope item goes through `backlog-append`. One closing report names
+  `/plan-chain-runner continue` (or `/plan-writing auth-v2-spec.md`) as the next step.
+- **Red flags (FAIL):** The tier, the approaches or untouched sections are asked again; a second
+  spec file is written; `plan-writing` is invoked; `journal-path --create`, `journal-event` or a
+  hand edit touches the journal.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

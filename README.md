@@ -42,6 +42,7 @@ Each skill is an independent, installable module. Together they form a coherent 
 | [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | `plan-brainstorming` (chain settings, `BACKLOG.md`) | Persistent progress ledger with resume, plan-drift and settings-drift detection, strictly ordered units with retry-first policy, risk-scaled gates, read/write consent per external system, foreign-change detection against an expected tree with per-file restore, rollback snapshots in hidden git refs (no branch commits), run diff, findings to `BACKLOG.md` |
 | [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan (or every part of a split plan) until it is error-free | `plan-brainstorming` (chain settings) | Set-algebraic flow analysis (new/resolved/persisted/reintroduced), SHA-1 issue fingerprinting, two-phase separation (audit ≠ implement), single gate authority (regression/churn/unchanged/stuck/limit), 10-class error taxonomy, immutable append-only review trail, batch mode over split parts, preset and stop policy from the chain settings |
 | [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report; optionally fix the code and re-audit (`fix` / `auto`) | `plan-brainstorming` (chain settings, `BACKLOG.md`) | task-census completeness gate, evidence anchors (`path#Lx-Ly`) verified against the workspace, confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only audit invariant (report and `BACKLOG.md` only), separated fix → re-audit loop with protected plan, snapshot diff and bounded cycles |
+| [`plan-chain-runner`](skills/plan-chain-runner/) | Run the approved specs of one goal through writing → revision → [split] → execution → audit → commit after one start dialogue; questions are collected in the chain journal | all six pipeline skills (`plan-brainstorming` for the journal and settings) | Dependency-graph scheduler (`run-next`), host profiles (`claude-code`, `github-copilot`, `fallback`) with a model per role, artifact trust through `journal-reconcile`, session mark with heartbeat outside the working tree, ETA from the journal's history, `continue` / `discuss` / `status`, `help` |
 | [`writing-skills`](skills/writing-skills/) | Create, test, and deploy new agent skills using TDD methodology | — | Red-green-refactor for skills, subagent-based behavioural testing |
 
 ---
@@ -74,6 +75,7 @@ Each skill is an independent, installable module. Together they form a coherent 
   └───────────────────────────────────────────┘
 
   plan-iterative-revision  ← use at any stage to clean up a plan; on a roadmap it verifies every part
+  plan-chain-runner        ← runs the whole chain for approved specs, by their dependencies
 ```
 
 ---
@@ -128,7 +130,7 @@ The CLI auto-detects which agents are installed on your machine. Use `--agent` t
 #### Recipes
 
 ```bash
-# Install all 7 skills — CLI auto-detects your agent
+# Install all 8 skills — CLI auto-detects your agent
 npx skills add whiteua/planforge-toolkit
 
 # Install all skills globally (available in every project on this machine)
@@ -173,13 +175,13 @@ cd planforge-toolkit
 ```bash
 # macOS / Linux
 DEST="$HOME/.claude/skills"
-for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
+for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision plan-chain-runner writing-skills; do
   ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 
 # Windows PowerShell (run as Administrator)
 $src = "$PWD\skills"; $dest = "$env:USERPROFILE\.claude\skills"
-foreach ($s in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","writing-skills")) {
+foreach ($s in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","plan-chain-runner","writing-skills")) {
   New-Item -ItemType SymbolicLink -Path "$dest\$s" -Target "$src\$s"
 }
 ```
@@ -189,14 +191,14 @@ foreach ($s in @("plan-brainstorming","plan-writing","plan-splitter","plan-execu
 ```bash
 # macOS / Linux
 DEST="$HOME/.copilot/skills"; mkdir -p "$DEST"
-for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
+for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision plan-chain-runner writing-skills; do
   ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 
 # Windows PowerShell (run as Administrator)
 $src = "$PWD\skills"; $dest = "$env:USERPROFILE\.copilot\skills"
 New-Item -ItemType Directory -Force -Path $dest
-foreach ($s in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","writing-skills")) {
+foreach ($s in @("plan-brainstorming","plan-writing","plan-splitter","plan-executor","plan-resolver","plan-iterative-revision","plan-chain-runner","writing-skills")) {
   New-Item -ItemType SymbolicLink -Path "$dest\$s" -Target "$src\$s"
 }
 ```
@@ -207,14 +209,14 @@ foreach ($s in @("plan-brainstorming","plan-writing","plan-splitter","plan-execu
 # macOS / Linux — adjust DEST for your agent
 DEST="$HOME/.codex/skills"   # or ~/.cursor/skills, ~/.agents/skills, etc.
 mkdir -p "$DEST"
-for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision writing-skills; do
+for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-resolver plan-iterative-revision plan-chain-runner writing-skills; do
   ln -s "$PWD/skills/$skill" "$DEST/$skill"
 done
 ```
 
 ### Skill dependencies
 
-> `plan-writing` reads contract files from `plan-brainstorming`, and `plan-splitter`'s deep verification (step 8) runs `plan-iterative-revision`. `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through `plan-brainstorming`'s helper script, and `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it; without it they warn and work without the settings. Each pair must be installed in the **same parent directory**.
+> `plan-writing` reads contract files from `plan-brainstorming`, and `plan-splitter`'s deep verification (step 8) runs `plan-iterative-revision`. `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through `plan-brainstorming`'s helper script, and `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it; without it they warn and work without the settings. `plan-chain-runner` loads that script too (it needs it for the journal; without it only `settings-load` and `model-pick` without `--journal` work) and launches the six pipeline skills by name. Each pair must be installed in the **same parent directory**.
 
 ---
 
@@ -326,6 +328,16 @@ The skill will guide you through the full brainstorming → spec → plan cycle.
 /plan-iterative-revision docs/plans/plan01-auth-impl.md preset=deep audit-only
 ```
 
+### Running the whole chain
+
+```
+/plan-chain-runner docs/plans/plan01-1-spec.md docs/plans/plan01-2-spec.md   # launch card, then the chain without questions
+/plan-chain-runner continue      # resume from the journal (also: продолжить)
+/plan-chain-runner discuss       # answer the open questions one by one (also: обсудить)
+/plan-chain-runner status        # summary only (also: статус)
+/plan-chain-runner help          # pipeline map; /plan-<skill> help shows that skill's USAGE.md
+```
+
 ### Version control
 
 No skill touches an external system without you. A database, API or remote service is reached only after you allow it for a named environment, separately for reading and for changes: `read=` and `write=` each take `run` (the whole run), `task` (ask before each task) or `deny`. The permission is never widened to another environment, changes on production are never allowed for a whole run, and an existing project script aimed at production is not permission. The spec records the environments with your own words, tasks that use them are marked `External` with `(read)` or `(write)`, and `plan-executor` asks before such a task unless that access is allowed for the whole run. A read allowed for the whole run also covers the read-only checks of `plan-iterative-revision` and `plan-resolver`.
@@ -366,7 +378,7 @@ This section documents the engineering techniques applied across the toolkit. Ea
 
 Cheap, exact operations (file parsing, counting, hashing, shell probes) run as CLI tool commands with machine-readable exit codes. Semantic judgment (is this task implemented? is this plan coherent?) stays inside `SKILL.md` reference docs and is never mixed with deterministic checks. This separation prevents hallucinations from contaminating objective results and keeps tool logic testable independently.
 
-**Used in:** `plan-resolver`, `plan-splitter`, `plan-executor`, `plan-brainstorming` (spec check, findings input), `plan-writing` (plan check)
+**Used in:** `plan-resolver`, `plan-splitter`, `plan-executor`, `plan-brainstorming` (spec check, findings input), `plan-writing` (plan check), `plan-chain-runner` (scheduler)
 
 ---
 
@@ -558,7 +570,7 @@ One `BACKLOG.md` at the repository root collects what the chain deferred: Out of
 
 One `<goal>-chain.json` next to the spec records, for each plan of the goal, seven stages (`writing`, `revision`, `split`, `execution`, `diffs`, `audit`, `commit`) with the statuses `pending`, `running`, `done`, `stopped`, `failed`, `skipped`, the artifacts each skill produced and an append-only event log. Every skill marks its own stage through `brainstorm_tool.py journal-event`, which refuses a transition outside the state machine (`illegal-transition`); a finished stage re-opens only for a named reason (`drift`, `audit-open`, `recommit`, `user-request`). The SHA-256 of the stage input stored on `done` turns a changed spec or plan into a drift question; the skill that owns the stage asks it and re-runs the stage (`--reason drift`) or keeps its result for the changed input. A run without a confirmation channel records its question (`Qn`, `open → answered → applied`) and stops; the next run reads `journal-show`, applies the answer and continues. Writes go through a lock file (`journal-locked` after 10 s, takeover of a lock older than 60 s) and an atomic replace; `journal-reconcile` restores the statuses from the artifacts after a crash and `journal-validate` replays the events. Manual runs keep the journal too; a skill without `plan-brainstorming` beside it works without one.
 
-**Used in:** all six pipeline skills
+**Used in:** all six pipeline skills and `plan-chain-runner`
 
 ---
 
@@ -590,7 +602,39 @@ Only `plan-executor` commits, through `commit-run`, after the audit: in a chain 
 
 Everything the user sees — questions, answer options, status lines, gates, summaries, stop reports — is in the language of the first task statement; only parser tokens stay in English. The language is detected by one deterministic rule (Cyrillic letters over 5% of all letters → Russian), exposed as `detect-lang` and as the `lang` field of `spec-check` and `plan-check`.
 
-**Used in:** all six pipeline skills
+**Used in:** all six pipeline skills and `plan-chain-runner`
+
+---
+
+### Host profiles
+
+`plan-chain-runner` has one core (start dialogue, dependency graph, loop, scheduling rules, `continue`, `discuss`, progress lines) and a profile per host, chosen at start from the tools it has. The `claude-code` profile (Claude Code) launches each stage as an `Agent` with the model of its role (with `subagent_type: planforge-<role>` when you agreed to agent-definition files that also set the effort); the `github-copilot` profile (GitHub Copilot CLI) uses the `task` tool with a model, and the effort is inherited from the session; the `fallback` profile runs every stage in the same session, one at a time. A missing capability moves the runner to the next profile. Models and effort per role come from `~/.planforge/runner.json` (built-in defaults when it is missing), are shown in the launch card for confirmation and recorded in the journal; a model the host refuses is replaced by the role's `fallback` (`model-pick --unsupported`).
+
+**Used in:** `plan-chain-runner`
+
+---
+
+### Dependency-graph scheduler
+
+`chain_tool.py run-next` decides what runs now from the journal alone. The stages of one plan go strictly in order (writing → revision → split → execution → diffs → audit → commit). Independent specs are written, revised and split in parallel, up to `parallel`. Execution, diffs, audit and commit run for one plan at a time, and nothing else is issued while an audit runs, because the resolver fingerprints the whole working tree and the executor stops on foreign changes. A spec that depends on another starts only after that spec's commit; when its audit stayed open, the dependent spec waits for your `accept` or `fix`. A plan with an open question waits with the specs that depend on it, and the rest go on; a failed stage is retried once, then asked about. The runner handles each agent as it returns and tells `run-next` which agents are still in flight (`--in-flight`), so a fast plan is not held up by a long execution of another. A plan stopped inside the code stages keeps them (its changes are uncommitted in the shared tree): the other plans' execution waits as `code-busy`, and `status` and `discuss` show such waits. After a `rewrite` answer on a `drift:` question, the later stages of that plan are redone without asking again. Questions the scheduler acts on carry fixed prefixes (`open-audit:`, `not-confirmed:`, `stage-failed:`, `drift:`) and are answered with fixed tokens.
+
+**Used in:** `plan-chain-runner`
+
+---
+
+### Artifact trust
+
+The runner does not believe an agent's report. After every agent it runs `journal-reconcile` and `journal-show`: a stage counts as done only when the journal and the files the skill left say so. An agent whose stage the journal does not confirm — whatever it reported, an error or silence included, and one silent for 60 minutes — is launched once more, then the stage gets a `not-confirmed:` question and its plan waits. An executor that ran out of context leaves `execution` running; a new executor agent continues from the ledger until the stage is `done`, `failed` or `stopped`.
+
+**Used in:** `plan-chain-runner`
+
+---
+
+### Runner sessions
+
+A run in progress is marked by a session file outside the working tree, `~/.planforge/sessions/<sha1 of the journal path>.json`, with a heartbeat at every step and at least every 10 minutes. A mark younger than 30 minutes means another runner is active, and you decide whether to continue here; an older mark is abandoned, unless a stage is still `running` in the journal, and then you are asked too. The mark is created exclusively and carries the session id: a runner whose mark was taken over gets `session-taken-over` on its next heartbeat and stops without writing. The journal keeps only the history (`runner.sessions`: start, end and how it ended). While an audit runs, the runner writes nothing into the journal, not even a question, so the resolver's read-only fingerprint stays valid.
+
+**Used in:** `plan-chain-runner`
 
 ---
 

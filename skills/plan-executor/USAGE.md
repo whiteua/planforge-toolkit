@@ -9,6 +9,7 @@ In VS Code Copilot chat, type:
 ```
 /plan-executor <plan-or-roadmap-path>
 /plan-executor <plan-or-roadmap-path> commit     # after the audit: commit the run's result
+/plan-executor help                              # show this quick reference in the dialogue language, nothing else
 ```
 
 ### Usage Examples

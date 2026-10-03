@@ -17,6 +17,8 @@ allowed-tools:
 
 # Plan Splitter
 
+If the only argument is `help`: show this skill's USAGE.md in the dialogue language (without a spec or plan: the language of the user's message; commands and keys as they are) and do nothing else.
+
 Decomposes one large plan into parts. Each part is a self-contained file an agent can execute
 without the original; a roadmap holds the dependency graph. The skill creates the roadmap and
 the part files next to the source plan and **never edits the plan itself**.

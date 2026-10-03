@@ -6,6 +6,8 @@ Turn ideas into validated design specs through collaborative dialogue.
 
 ```
 /plan-brainstorming <goal-file-path>
+/plan-brainstorming <spec-file-path>   # amend mode: change an approved spec in place
+/plan-brainstorming help   # show this quick reference in the dialogue language, nothing else
 ```
 
 ### Usage Examples
@@ -22,6 +24,9 @@ Turn ideas into validated design specs through collaborative dialogue.
 
 # From the unchecked items of the shared backlog (optionally one section)
 /plan-brainstorming BACKLOG.md values-fix
+
+# Amend an approved spec in place (for example after /plan-chain-runner discuss)
+/plan-brainstorming .docs/.plans/my-feature/plan01-spec.md
 ```
 
 You can also simply describe your idea in chat and mention "brainstorming" / "design" / "spec".
@@ -33,6 +38,7 @@ You can also simply describe your idea in chat and mention "brainstorming" / "de
 | Goal file path | Optional | Path to a `.md` file describing the idea. If omitted, describe the idea inline after the command. |
 | Findings JSON | Optional | Path to a `.json` file (or inline JSON) with an array of findings: `file`, `line` (optional), `summary`, `failure_scenario`. Switches to findings mode. |
 | `BACKLOG.md` [section] | Optional | The shared backlog at the repository root. Its unchecked items (of one section, when given) become the problem statement; the first question is which items go into this spec. After the spec is approved, its Out of Scope items are appended back to `BACKLOG.md`. |
+| Spec file path (`*-spec.md`) | Optional | An approved spec with `# Goal`. Switches to amend mode: only the change is discussed, the spec is edited in place and re-checked, no new plan is written. |
 
 ### Findings mode
 
@@ -45,6 +51,10 @@ The input is a list of defects instead of an idea. The agent:
 5. Runs `brainstorm_tool.py findings-coverage` so that no finding id is lost.
 
 Spec path: `review01.json` → `review01-spec.md` next to it. With inline JSON the agent asks for the path.
+
+### Amend mode
+
+The input is an approved spec that must change. The agent discusses only the change, edits the spec in place, runs `spec-check` and the self-review, and asks for your approval; new Out of Scope items go to `BACKLOG.md`. It writes no new plan: the chain journal sees the changed spec, and the next `/plan-chain-runner continue` (or `/plan-writing <spec>`) asks whether to rewrite the plan.
 
 ## Process (what happens)
 

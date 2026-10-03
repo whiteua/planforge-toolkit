@@ -7,6 +7,7 @@ the plan, and repeat until the plan is clean or a stop gate fires.
 
 ```
 /plan-iterative-revision <plan-path> [preset=...] [stop_policy=...] [interaction=...] [audit-only]
+/plan-iterative-revision help   # show this quick reference in the dialogue language, nothing else
 ```
 
 ### Usage Examples

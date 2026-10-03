@@ -96,6 +96,19 @@ case) fails with exit 1, and the user section is found regardless of case.
 - `plan-resolver` records the files its fix phase changed (`fix_files`) in the journal, and its
   closing gate names `/plan-executor <plan> commit`.
 - `plan-check` and the revision's `bootstrap` return `journal`; `record` returns `journal_event`.
+- New skill `plan-chain-runner`: after one start dialogue (graph of the specs, models per role,
+  chain settings, environments, an optional start commit) it runs the approved specs of one goal
+  through writing, revision, split, execution, audit and commit, schedules them by their
+  dependencies, launches agents with the model of each role on Claude Code, GitHub Copilot CLI or in
+  one session, reports progress and ETA, stops with questions in the chain journal and resumes with
+  `continue` / `discuss` (`продолжить` / `обсудить`). Its scheduler is `chain_tool.py`; models
+  per role live in `~/.planforge/runner.json`.
+- `help` as the only argument of any pipeline skill shows its `USAGE.md` in the dialogue language;
+  `/plan-chain-runner help` shows the pipeline map.
+- `plan-brainstorming` amend mode: given an approved spec, it discusses only the change, edits the
+  spec in place and re-checks it; the journal turns the change into a `drift` question for the plan.
+- `journal-validate` accepts the optional `runner` section of the journal (types, graph specs, no
+  cycles).
 - Fixes: a `> **Source:**` line and a link target in `<…>` are read in roadmaps and parts;
   `**External:**` lines inside code blocks no longer count; `backlog-append` keeps the file mode of
   `BACKLOG.md` and writes to the target of a symlinked `BACKLOG.md`.
@@ -114,6 +127,7 @@ case) fails with exit 1, and the user section is found regardless of case.
   `baseline-head-unknown`. Commit such a run yourself or start a new run.
 - Nothing to migrate for the journal: the first skill that runs creates it. Old
   `<plan>-followups.json` files stay as they are and are not read.
+- Journals without a `runner` section stay valid; `plan-chain-runner` adds it at its start.
 
 ## 2026-09-30
 

@@ -5,6 +5,8 @@ description: "Use when an approved spec (a `*-spec.md` from plan-brainstorming) 
 
 # Writing Plans
 
+If the only argument is `help`: show this skill's USAGE.md in the dialogue language (without a spec or plan: the language of the user's message; commands and keys as they are) and do nothing else.
+
 Turn an approved spec into an implementation plan for an engineer who knows
 nothing about this codebase: exact files, complete code, exact commands and
 expected output, bite-sized tasks. DRY. YAGNI. TDD.
@@ -81,8 +83,8 @@ and the chain runner. `J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/b
   The `journal` of the last `plan-check` result must be this `<journal>`; `null` or another path
   means the plan's `**Spec:**` line does not lead to the spec: fix the link and re-run
   `plan-check`.
-- **Questions.** A decision this skill would ask about (an old spec without settings, the scope
-  check, a deviation) without a confirmation channel: `J journal-question <journal> --skill plan-writing --plan <plan> --stage writing --text "<question>" [--option "<option>"]...`
+- **Questions.** A decision this skill would ask about (an old spec without settings, unless the brief carries the answers — see 1. Spec Preflight; the scope
+  check; a deviation) without a confirmation channel: `J journal-question <journal> --skill plan-writing --plan <plan> --stage writing --text "<question>" [--option "<option>"]...`
   (the stage becomes `stopped`), then `J journal-export-findings <journal>`, then stop with a short
   report naming the question id. With a confirmation channel ask as usual and record the
   question with its answer: the same command with `--answer "<answer>"`.
@@ -102,7 +104,7 @@ Run `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" spec-
 
 Tier: the `tier` field of the result. `Quick` / `Standard` / `Deep` are used as-is. Missing or unknown: use **Standard** and announce "Spec has no Tier line; defaulting to Standard."
 
-**Settings.** `spec-check` also returns the chain settings: `chain`, `environments`, `backlog` (the spec's `> Chain:`, `> Environment:`, `> Backlog:` lines). They stay in the spec: do not copy them into the plan; `**Spec:**` is how every later skill finds them. An old spec has none of these lines (`chain` and `backlog` empty, `environments` empty). It cannot be rewritten (one owner per artifact), so ask as now: when steps touch external systems, which environments and with which rights, changes named first and separately from reads; in the same message propose the chain defaults from `spec-contract.md` and the backlog section (default: the plan name without `-impl`) for the user to confirm or edit. Write the answers into the plan header: `**Chain:**` with all four keys, `**Environments:**` with `read=`/`write=`, `**Backlog:**`. Settings in the plan header replace the spec's settings as a whole, so never add them to a plan whose spec has settings: if such a spec lacks an environment the steps need, stop and send the user back to `plan-brainstorming`.
+**Settings.** `spec-check` also returns the chain settings: `chain`, `environments`, `backlog` (the spec's `> Chain:`, `> Environment:`, `> Backlog:` lines). They stay in the spec: do not copy them into the plan; `**Spec:**` is how every later skill finds them. An old spec has none of these lines (`chain` and `backlog` empty, `environments` empty). It cannot be rewritten (one owner per artifact), so ask as now: when steps touch external systems, which environments and with which rights, changes named first and separately from reads; in the same message propose the chain defaults from `spec-contract.md` and the backlog section (default: the plan name without `-impl`) for the user to confirm or edit. When the brief of a `plan-chain-runner` agent already carries these answers (the runner asked them in its start card: each environment with its rights, the user's question and answer quoted verbatim and the date, the chain settings, the backlog section), do not ask again and record no question: take them as they are. Write the answers into the plan header: `**Chain:**` with all four keys, `**Environments:**` with `read=`/`write=`, `**Backlog:**`. Settings in the plan header replace the spec's settings as a whole, so never add them to a plan whose spec has settings: if such a spec lacks an environment the steps need, stop and send the user back to `plan-brainstorming`.
 
 ## 2. Scope Check
 

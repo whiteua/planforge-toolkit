@@ -1,0 +1,26 @@
+{
+  "profiles": {
+    "claude-code": {
+      "parallel": 3,
+      "roles": {
+        "writing": {"model": "fable", "effort": "high"},
+        "revision": {"model": "fable", "effort": "high"},
+        "split": {"model": "opus", "effort": "medium"},
+        "execution": {"model": "opus", "effort": "medium"},
+        "audit": {"model": "fable", "effort": "high"},
+        "commit": {"model": "sonnet", "effort": "low"}
+      }
+    },
+    "github-copilot": {
+      "parallel": 3,
+      "roles": {
+        "writing": {"model": "claude-opus-5.5", "effort": null, "fallback": "gpt-5-mini"},
+        "revision": {"model": "claude-opus-5.5", "effort": null, "fallback": "gpt-5-mini"},
+        "split": {"model": "claude-sonnet-5.5", "effort": null, "fallback": "gpt-5-mini"},
+        "execution": {"model": "claude-sonnet-5.5", "effort": null, "fallback": "gpt-5-mini"},
+        "audit": {"model": "claude-opus-5.5", "effort": null, "fallback": "gpt-5-mini"},
+        "commit": {"model": "gpt-5-mini", "effort": null, "fallback": "gpt-5-mini"}
+      }
+    }
+  }
+}

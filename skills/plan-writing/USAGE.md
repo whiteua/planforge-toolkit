@@ -6,6 +6,7 @@ Transform an approved spec into a detailed, bite-sized implementation plan.
 
 ```
 /plan-writing <spec-file-path>
+/plan-writing help   # show this quick reference in the dialogue language, nothing else
 ```
 
 ### Usage Examples

@@ -5,6 +5,8 @@ description: "Use before implementing a new feature, component, or behavior chan
 
 # Brainstorming Ideas Into Designs
 
+If the only argument is `help`: show this skill's USAGE.md in the dialogue language (without a spec or plan: the language of the user's message; commands and keys as they are) and do nothing else.
+
 Turn ideas into approved designs and specs through collaborative dialogue:
 understand the project context, ask questions one at a time, present the
 design, get approval, write the spec, hand off to `plan-writing`.
@@ -34,6 +36,8 @@ Once this skill runs, every request goes through the process: a todo list, a sin
   [--section <section>]`; the unchecked items are the problem statement. The first question
   is which items go into this spec (multiple choice, one option per item). Only the user
   marks an item `[x]`: never edit BACKLOG.md lines yourself (see Backlog).
+- **Amend**: `/plan-brainstorming <…>-spec.md`, an existing spec (the file name ends in
+  `-spec.md` and the file has a `# Goal` heading). Change that spec in place; see Amend mode.
 
 ## Language
 
@@ -89,7 +93,7 @@ item for the whole checklist is enough.
 9. **Self-review** — see below.
 10. **User review** — ask the user to review the spec file; on approval, append to BACKLOG.md (see Backlog), create the chain journal (see Chain journal), then invoke `plan-writing`.
 
-The terminal state is invoking `plan-writing`. Do not invoke any other skill after brainstorming.
+The terminal state is invoking `plan-writing` (in amend mode: the closing report, see Amend mode). Do not invoke any other skill after brainstorming.
 
 ## Understanding the Idea
 
@@ -207,6 +211,36 @@ The journal is not a gate:
   continue without the journal;
 - exit `1` `journal-write-failed` (the file system refused the write, e.g. a read-only journal) →
   say it in one line with the error text and continue without the journal.
+
+## Amend mode
+
+The input is an approved spec that must change: an answer given in `/plan-chain-runner discuss`
+that touches the spec, or the user's own request. You own the spec: edit the file in place and
+never write a second spec beside it. This mode replaces the Checklist; Asking Questions,
+Designing, Self-Review, the User Review Gate and Backlog still apply. Dialogue language:
+`detect-lang <spec>`.
+
+1. Read the spec with its `> Tier:` and settings lines. Restate the requested change in one
+   sentence: it is the fidelity anchor of the self-review. Before any edit, `journal-path <spec>`
+   (without `--create`) and, when that journal exists, `journal-show <journal>`: a stage `audit`
+   that is `running` means a `plan-resolver` audit may be fingerprinting the working copy, and
+   any edit would invalidate it. Then edit nothing: say that an audit is running and propose to
+   come back when it has ended (or to go on only if the user confirms no audit agent is working).
+2. Discuss only the change, one question per message; the rest of the approved spec is not
+   reopened. A change of the tier or of the `> Chain:` / `> Environment:` lines is proposed in one
+   message, as in Chain Settings.
+3. Present the changed sections and get approval for each.
+4. Edit the spec in place and run `spec-check` until it exits `0`, then the Self-Review: fidelity
+   compares the edit with the one-sentence change and with the Goal.
+5. User Review Gate: name what changed and wait for explicit approval of the file.
+6. After approval, append to BACKLOG.md only the Out of Scope items this change added (Backlog,
+   step 1).
+7. Close with one report and stop: the file, what changed, the BACKLOG lines. Do not invoke
+   `plan-writing` and do not create or edit the chain journal: the journal sees the changed spec
+   through the input hash of the `writing` stage, and the next `journal-reconcile` asks a
+   `drift: writing …` question whose answer `rewrite` rewrites the plan. Name the next step:
+   `/plan-chain-runner continue`, or `/plan-writing <spec>` without the runner (it runs the drift
+   check itself).
 
 ## Visual Companion
 

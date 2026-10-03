@@ -9,7 +9,8 @@
         "plan-brainstorming",
         "plan-writing",
         "plan-splitter",
-        "plan-executor"
+        "plan-executor",
+        "plan-chain-runner"
       ]
     },
     {

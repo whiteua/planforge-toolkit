@@ -16,6 +16,8 @@ allowed-tools:
 
 # Plan Iterative Revision
 
+If the only argument is `help`: show this skill's USAGE.md in the dialogue language (without a spec or plan: the language of the user's message; commands and keys as they are) and do nothing else.
+
 A two-phase loop over one master plan: **Phase A** audits the plan against the codebase,
 the helper script records the issues as `<basename>-review-<N>.md`; **Phase B** applies that
 review to the plan. It repeats until a stop gate fires. All bookkeeping (numbering, fingerprints,

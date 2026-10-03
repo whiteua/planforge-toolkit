@@ -7,6 +7,7 @@ dependency roadmap, each part executable in a single agent pass.
 
 ```
 /plan-splitter <plan-path> [verify=ask|all|none|a,c] [verify_depth=quick|standard|deep] [verify_mode=full-cycle|audit-only]
+/plan-splitter help   # show this quick reference in the dialogue language, nothing else
 ```
 
 ### Usage Examples

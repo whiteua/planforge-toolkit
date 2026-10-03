@@ -1350,5 +1350,151 @@ class GateSchedulerTest(_T2Case):
         self.assertEqual(ct._next_stage(_t2_state(entry, [fix])), ("commit", None))
 
 
+def _remove_dir_link(link):
+    """A directory symlink or junction is removed as a link, never through its target."""
+    if os.path.lexists(link):
+        os.rmdir(link) if os.name == "nt" else os.unlink(link)
+
+
+class SessionFileRealPathTest(HomeCase):
+    def test_f9_a_journal_through_a_linked_folder_has_the_same_mark(self):
+        real = os.path.join(self.tmp, "real")
+        os.makedirs(real)
+        with open(os.path.join(real, "goal-chain.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        link = os.path.join(self.tmp, "link")
+        try:
+            os.symlink(real, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            made = os.name == "nt" and subprocess.run(["cmd", "/c", "mklink", "/J", link, real],
+                                                      capture_output=True).returncode == 0
+            if not made:
+                self.skipTest("cannot create a symlink or a junction here")
+        self.addCleanup(_remove_dir_link, link)
+        self.assertEqual(ct._session_file(os.path.join(link, "goal-chain.json")),
+                         ct._session_file(os.path.join(real, "goal-chain.json")))
+
+
+class SessionTakeoverRollbackTest(JournalCase):
+    def setUp(self):
+        super().setUp()
+        self.folder, self.journal = self.make_journal("a-spec.md", "b-spec.md")
+        self.init(self.journal, self.folder)
+        self.begun = ct.session_begin(self.journal)  # the other window's live mark
+
+    def read(self, path):
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    def test_f11_a_failed_takeover_puts_the_other_mark_back(self):
+        mark, journal = self.read(self.begun["session_file"]), self.read(self.journal)
+        bt = ct._brainstorm()
+        with mock.patch.object(bt, "_atomic_write_text", side_effect=OSError("disk full")):
+            with self.assertRaises(bt.JournalError) as caught:
+                ct.session_begin(self.journal, takeover=True)
+        self.assertNotIn("not restored", str(caught.exception))
+        self.assertEqual((self.read(self.begun["session_file"]), self.read(self.journal)), (mark, journal))
+        self.assertEqual(ct.session_heartbeat(self.journal, self.begun["id"])["id"], self.begun["id"])
+
+    def test_f11_a_mark_that_cannot_be_put_back_is_named(self):
+        bt = ct._brainstorm()
+        with mock.patch.object(bt, "_atomic_write_text", side_effect=OSError("disk full")), \
+                mock.patch.object(ct, "_restore_mark", return_value=False):
+            with self.assertRaisesRegex(bt.JournalError, "; previous session mark not restored: "):
+                ct.session_begin(self.journal, takeover=True)
+
+    def test_f11_a_failed_claim_puts_the_other_mark_back(self):
+        mark, journal = self.read(self.begun["session_file"]), self.read(self.journal)
+        with mock.patch.object(ct, "_claim_mark", side_effect=OSError("disk full")):
+            with self.assertRaises(ct._brainstorm().JournalError) as caught:
+                ct.session_begin(self.journal, takeover=True)
+        self.assertNotIn("not restored", str(caught.exception))
+        self.assertEqual((self.read(self.begun["session_file"]), self.read(self.journal)), (mark, journal))
+
+
+class JournalTimeFieldsTest(_T2Case):
+    def changed(self, change):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", done=("writing", "revision"))],
+                            questions=[_t2_question("Q1", "a-impl", "split", "why?")])
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        change(data)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return path
+
+    def test_f12_a_time_that_is_not_a_journal_time_is_journal_corrupt_with_its_field(self):
+        cases = (("plans[0].stages.revision.finished_at",
+                  lambda data: data["plans"][0]["stages"]["revision"].update(finished_at=5)),
+                 ("plans[0].stages.writing.started_at",
+                  lambda data: data["plans"][0]["stages"]["writing"].update(started_at="yesterday")),
+                 ("questions[0].asked_at",
+                  lambda data: data["questions"][0].update(asked_at="2026-10-02 02:00")))
+        for field, change in cases:
+            path = self.changed(change)
+            for command in ("run-next", "run-eta", "run-status"):
+                with self.subTest(field=field, command=command):
+                    code, out = self.run_main(command, path)
+                    self.assertEqual((code, out["ok"]), (2, False))
+                    self.assertTrue(out["errors"][0].startswith("journal-corrupt: "))
+                    self.assertIn(field + ": not a journal time", out["errors"][0])
+
+    def test_f12_journal_times_and_nulls_pass(self):
+        path = self.changed(lambda data: data["plans"][0]["stages"]["split"].update(started_at=None))
+        for command in ("run-next", "run-eta", "run-status"):
+            with self.subTest(command=command):
+                self.assertEqual(self.run_main(command, path)[0], 0)
+
+
+class SchedulerBugTest(_T2Case):
+    def test_f12_a_scheduler_error_on_a_sound_journal_is_scheduler_bug(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", done=("writing",))])
+        for command, target, exc in (("run-next", "_candidates", KeyError("next")),
+                                     ("run-status", "_candidates", AttributeError("'str' object has no attribute 'get'")),
+                                     ("run-eta", "_eta", TypeError("unsupported operand")),):
+            with self.subTest(command=command), mock.patch.object(ct, target, side_effect=exc):
+                code, out = self.run_main(command, path)
+                self.assertEqual((code, out), (1, {"ok": False, "errors": [f"scheduler-bug: {type(exc).__name__}: {exc}"]}))
+
+
+class CascadeStrictTest(unittest.TestCase):
+    def test_f13_the_cascade_takes_answers_strictly_after_the_stage_end(self):
+        self.assertNotIn("at or after", ct._cascade.__doc__)
+        self.assertIn("strictly after", ct._cascade.__doc__)
+        entry = _t2_plan("a-spec.md", done=("writing", "revision"))
+        later = _t2_question("Q2", "a-impl", "revision", "drift: revision input changed: a-impl.md")
+        for answered, expected in ((entry["stages"]["revision"]["finished_at"], []), ("2026-10-02T01:01:31Z", ["Q2"])):
+            rewrite = _t2_question("Q1", "a-impl", "writing", "drift: writing input changed: a-spec.md",
+                                   answer="rewrite", at=answered)
+            with self.subTest(answered=answered):
+                self.assertEqual([q["id"] for q in ct._cascade(_t2_state(entry, [rewrite, later]))], expected)
+
+
+PLAN_TOOL = Path(__file__).resolve().parents[2] / "plan-writing" / "scripts" / "plan_tool.py"
+
+
+class PlanIdContractTest(HomeCase):
+    def tool(self, script, *argv):
+        proc = subprocess.run([sys.executable, str(script), *argv], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_f10_the_runner_finds_the_plan_entry_plan_writing_registers(self):
+        bt = ct._brainstorm()
+        for name in ("a-spec.md", "Goal-Spec.md", "spec.md", "notes.md"):
+            with self.subTest(spec=name):
+                folder = os.path.join(self.tmp, name.replace(".", "_"))
+                os.makedirs(folder)
+                spec = os.path.join(folder, name)
+                with open(spec, "w", encoding="utf-8") as fh:
+                    fh.write("# Goal\n\nGoal text.\n")
+                plan = self.tool(PLAN_TOOL, "plan-path", spec)["impl_path"]
+                with open(plan, "w", encoding="utf-8") as fh:
+                    fh.write(f"# Plan\n\n**Spec:** {name}\n\n### Task 1: x\n")
+                journal = self.tool(BRAINSTORM, "journal-path", plan, "--create")["journal"]
+                entries = [(p["id"], p["spec"]) for p in bt.journal_load(journal)["plans"]]
+                self.assertEqual(entries, [(bt._journal_plan_id(ct._derived_plan(name)), name)])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,8 @@ Commands:
   run-status     <journal>
 
 Exit codes: 0 ok, 1 contract (graph-cycle, session-active, session-stale-running, session-taken-over,
-runner-missing, no-model), 2 usage or I/O error.
+runner-missing, no-model) or scheduler-bug (run-next, run-eta, run-status), 2 usage or I/O error
+(journal-corrupt included).
 """
 from __future__ import annotations
 
@@ -334,23 +335,22 @@ SESSION_ENDS = ("stopped", "complete", "interrupted")
 
 
 def _session_file(journal: str) -> str:
-    """$PLANFORGE_HOME/sessions/<sha1 of the absolute journal path>.json: outside the working copy,
-    so a heartbeat during an audit does not change the resolver's workspace fingerprint."""
-    key = hashlib.sha1(os.path.normcase(os.path.abspath(journal)).encode("utf-8")).hexdigest()
+    """$PLANFORGE_HOME/sessions/<sha1 of the real journal path>.json: outside the working copy, so a
+    heartbeat during an audit does not change the resolver's workspace fingerprint. realpath: a journal
+    reached through a symlink, a junction or a subst drive has the same mark as by its own path."""
+    key = hashlib.sha1(os.path.normcase(os.path.realpath(journal)).encode("utf-8")).hexdigest()
     return os.path.join(_home(), "sessions", key + ".json")
 
 
-def _read_session(path: str) -> Optional[Dict[str, Any]]:
-    """The session mark; None when it is missing or not a JSON object (such a mark counts as abandoned).
-    A PermissionError is retried for about a second, as journal_load does: on Windows a reader can meet
-    the moment a writer's os.replace swaps the file; a missing file is looked for once more for the same
-    reason. Still unreadable: InputError, never None, so a live mark is not taken for an absent one."""
+def _read_mark_bytes(path: str) -> Optional[bytes]:
+    """Raw bytes of the session mark; None when it is missing. A PermissionError is retried for about a
+    second, as journal_load does: on Windows a reader can meet the moment a writer's os.replace swaps the
+    file; a missing file is looked for once more for the same reason. Still unreadable: InputError."""
     deadline, missing = time.monotonic() + 1.0, 0
     while True:
         try:
             with open(path, "rb") as fh:
-                raw = fh.read()
-            break
+                return fh.read()
         except FileNotFoundError:
             missing += 1
             if missing > 1:
@@ -361,6 +361,15 @@ def _read_session(path: str) -> Optional[Dict[str, Any]]:
         except OSError as exc:
             raise InputError(f"cannot read {path}: {exc}") from exc
         time.sleep(0.05)
+
+
+def _read_session(path: str) -> Optional[Dict[str, Any]]:
+    """The session mark; None when it is missing or not a JSON object (such a mark counts as abandoned).
+    Read by _read_mark_bytes: still unreadable is an InputError, never None, so a live mark is not taken
+    for an absent one."""
+    raw = _read_mark_bytes(path)
+    if raw is None:
+        return None
     try:
         data = json.loads(raw.decode("utf-8"))
     except ValueError:
@@ -413,11 +422,23 @@ def _claim_mark(path: str, mark: Dict[str, Any]) -> bool:
     return True
 
 
+def _restore_mark(path: str, raw: bytes) -> bool:
+    """Put a mark displaced by --begin back byte for byte. Exclusive create: a mark another --begin
+    created meanwhile is kept. False when the mark could not be put back."""
+    try:
+        with open(path, "xb") as fh:
+            fh.write(raw)
+    except OSError:
+        return False
+    return True
+
+
 def session_begin(journal: str, host: Optional[str] = None, takeover: bool = False) -> Dict[str, Any]:
     """New session: the mark file and an entry in runner.sessions, both under the journal lock; the mark
     is created with O_EXCL. A fresh mark (younger than SESSION_STALE_SECONDS) is session-active, a stale
     one while a stage is running is session-stale-running, unless `takeover`; nothing is written then.
-    Journal sessions left open become interrupted."""
+    Journal sessions left open become interrupted. When the journal write or the creation of the mark fails,
+    the mark claimed here is removed and a mark it displaced (takeover, abandoned) is put back byte for byte."""
     bt = _brainstorm()
     journal = os.path.abspath(journal)
     path = _session_file(journal)
@@ -435,10 +456,17 @@ def session_begin(journal: str, host: Optional[str] = None, takeover: bool = Fal
             if running is not None:  # a foreground agent may run longer than 30 minutes without heartbeat
                 raise ChainError(f"session-stale-running: {journal}", plan=running[0], stage=running[1],
                                  age_seconds=age)
-        if os.path.exists(path):  # abandoned, unreadable or taken over
+        if os.path.exists(path):  # abandoned, unreadable or taken over: put back if the journal write fails
+            displaced[:] = [_read_mark_bytes(path)]
             bt._remove_quiet(path, retry_seconds=1.0)
-        if not _claim_mark(path, {"id": session_id, "host": host or runner.get("profile"), "journal": journal,
-                                  "heartbeat_at": now}):
+        try:
+            won = _claim_mark(path, {"id": session_id, "host": host or runner.get("profile"), "journal": journal,
+                                     "heartbeat_at": now})
+        except OSError:  # the file may be left half written: the rollback removes it and puts the displaced mark back
+            claimed.append(path)
+            raise
+        if not won:
+            displaced.clear()  # another --begin created its mark first: it stays, there is nothing to put back
             raise ChainError(f"session-active: {journal}", id=None, host=None, age_seconds=None)
         claimed.append(path)
         for item in runner["sessions"]:
@@ -448,11 +476,20 @@ def session_begin(journal: str, host: Optional[str] = None, takeover: bool = Fal
         return None if mark is None else {"id": mark.get("id"), "host": mark.get("host"), "age_seconds": age}
 
     claimed: List[str] = []
+    displaced: List[Optional[bytes]] = []
     try:
         previous = bt.journal_update(journal, mutate)
-    except BaseException as exc:  # the journal has no such session: the mark claimed for it goes too
-        if claimed and not bt._remove_quiet(path, retry_seconds=1.0) and isinstance(exc, Exception) and exc.args:
-            exc.args = (f"{exc.args[0]}; session mark not removed: {path}",) + exc.args[1:]
+    except BaseException as exc:  # the journal has no such session: its mark goes, the displaced one comes back
+        notes: List[str] = []
+        removed = True
+        if claimed:
+            removed = bt._remove_quiet(path, retry_seconds=1.0)
+            if not removed:
+                notes.append(f"session mark not removed: {path}")
+        if displaced and displaced[0] is not None and not (removed and _restore_mark(path, displaced[0])):
+            notes.append(f"previous session mark not restored: {path}")
+        if notes and isinstance(exc, Exception) and exc.args:
+            exc.args = (f"{exc.args[0]}; " + "; ".join(notes),) + exc.args[1:]
         raise
     return {"ok": True, "id": session_id, "session_file": path, "previous": previous}
 
@@ -523,16 +560,32 @@ def cmd_run_session(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 # journal (an audit may be running).
 
 
+JOURNAL_TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+
+
+def _time_errors(data: Dict[str, Any]) -> List[str]:
+    """Time fields the scheduler compares as strings (stage starts and ends, question times): each is
+    absent, null or a journal time YYYY-MM-DDTHH:MM:SSZ. Called on a journal without structure errors."""
+    fields = [(f"plans[{index}].stages.{stage}.{name}", record.get(name))
+              for index, entry in enumerate(data["plans"]) for stage, record in entry["stages"].items()
+              for name in ("started_at", "finished_at")]
+    fields += [(f"questions[{index}].{name}", question.get(name))
+               for index, question in enumerate(data["questions"]) for name in ("asked_at", "answered_at")]
+    return [f"{where}: not a journal time (YYYY-MM-DDTHH:MM:SSZ)" for where, value in fields
+            if value is not None and not (isinstance(value, str) and JOURNAL_TIME_RE.fullmatch(value))]
+
+
 def _runner_journal(journal: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """(journal, its runner section); a journal error of brainstorm_tool is an InputError (exit 2), and
-    so is a journal that fails journal-validate's structure checks (journal-corrupt with its errors).
-    The event replay is not checked: it decides nothing the scheduler reads."""
+    so is a journal that fails journal-validate's structure checks or has a time field the scheduler
+    cannot compare (journal-corrupt with its errors). The event replay is not checked: it decides
+    nothing the scheduler reads."""
     bt = _brainstorm()
     try:
         data = bt.journal_load(journal)
     except bt.InputError as exc:
         raise InputError(str(exc)) from exc
-    errors = bt._journal_structure_errors(data)
+    errors = bt._journal_structure_errors(data) or _time_errors(data)
     if errors:
         raise InputError(f"journal-corrupt: {journal}: " + "; ".join(errors))
     return data, _runner_of(data, journal)
@@ -776,8 +829,10 @@ def _in_code_phase(state: Dict[str, Any]) -> bool:
 
 def _cascade(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rule 9 cascade: open `drift: <stage>` questions (journal-reconcile) of a plan that has a drift
-    question of an earlier stage answered rewrite at or after this stage finished. The runner answers
-    them rewrite itself: the cascade asks the user nothing."""
+    question of an earlier stage answered rewrite strictly after this stage finished. An answer in the
+    same second as the stage end does not count (_answered_after compares strictly, so one answer moves
+    a stage once): that drift question stays open and is asked like any other. The runner answers the
+    cascade rewrite itself: the cascade asks the user nothing."""
     stages = list(_brainstorm().STAGES)
     found = []
     for question in state["questions"]:
@@ -1113,12 +1168,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ChainError as exc:
         code, result = 1, {"ok": False, "errors": [str(exc)], **exc.details}
     except (KeyError, TypeError, AttributeError) as exc:
-        # A journal that passes the structure checks with values of the wrong type (a number as a time):
-        # the read-only scheduler commands report it as journal-corrupt; elsewhere it is a bug.
+        # The journal readers check the structure and the time fields first (journal-corrupt, exit 2):
+        # what still fails in them is a bug of the scheduler, not a journal to rebuild. Elsewhere: raised.
         if getattr(args, "command", None) not in JOURNAL_READERS:
             raise
-        code, result = 2, {"ok": False, "errors": [f"journal-corrupt: {os.path.abspath(args.journal)}: "
-                                                   f"{type(exc).__name__}: {exc}"]}
+        code, result = 1, {"ok": False, "errors": [f"scheduler-bug: {type(exc).__name__}: {exc}"]}
     except Exception as exc:  # journal-locked, journal-missing, journal-corrupt keep their exit codes
         code = _brainstorm_exit(exc)
         if code is None:

@@ -553,6 +553,47 @@ class JournalCommitExportTest(JournalCase):
         self.assertEqual([(f["id"], f["file"], f["line"]) for f in parsed["findings"]],
                          [("F1", "a.py", 3), ("F2", "b.py", None)])
 
+    def record(self, count):
+        for n in range(1, count + 1):
+            bt.journal_finding(self.journal, "plan-resolver", self.plan, f"src/f{n}.py", f"Находка {n}.", f"Сбой {n}.")
+
+    def export(self, items):
+        followups = _write(os.path.join(self.dir, "alpha-followups.json"),
+                           json.dumps(items, ensure_ascii=False, indent=2) + "\n")
+        code, out = _run("journal-export-findings", self.journal)
+        with open(followups, encoding="utf-8") as fh:
+            return code, out, json.load(fh)
+
+    def test_bl33_export_keeps_the_file_items_the_journal_lacks(self):
+        self.record(8)
+        items = [{"file": "./src/f1.py" if n == 1 else f"src/f{n}.py", "line": None, "summary": f"Находка {n}.",
+                  "failure_scenario": f"Сбой {n}."} for n in range(1, 9)]
+        items[3:3] = [{"file": f"old/o{n}.py", "line": n, "summary": f"Старая {n}.", "failure_scenario": "Сбой."}
+                      for n in range(1, 7)]
+        code, out, exported = self.export(items)
+        self.assertEqual((code, out["count"], exported), (0, 14, items))
+
+    def test_bl33_journal_findings_missing_from_the_file_follow_by_id(self):
+        self.record(3)
+        kept = [{"file": "src/f2.py", "line": None, "summary": "Находка 2.", "failure_scenario": "Сбой 2."},
+                {"file": "old/o1.py", "line": 4, "summary": "Старая.", "failure_scenario": "Сбой."}]
+        code, out, exported = self.export(kept)
+        self.assertEqual((code, out["count"]), (0, 4))
+        self.assertEqual([(item["file"], item["summary"]) for item in exported],
+                         [("src/f2.py", "Находка 2."), ("old/o1.py", "Старая."),
+                          ("src/f1.py", "Находка 1."), ("src/f3.py", "Находка 3.")])
+
+    def test_bl33_a_file_that_is_not_a_json_list_is_left_as_it_is(self):
+        followups = os.path.join(self.dir, "alpha-followups.json")
+        for text in ("{broken", '{"findings": []}\n'):
+            with self.subTest(text=text):
+                _write(followups, text)
+                code, out = _run("journal-export-findings", self.journal)
+                self.assertEqual((code, out["ok"]), (2, False))
+                self.assertTrue(out["errors"][0].startswith("followups-unreadable: " + followups))
+                with open(followups, encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), text)
+
 
 class JournalSchemaTest(unittest.TestCase):
     def test_schema_names_match_the_code(self):

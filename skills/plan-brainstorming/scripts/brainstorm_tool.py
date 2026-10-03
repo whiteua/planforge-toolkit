@@ -1480,14 +1480,44 @@ def journal_add_commit(journal: str, plan: str, sha: str, subject: str, files: L
     return journal_update(journal, mutate)
 
 
+def _followups_items(path: str) -> List[Any]:
+    """Items of an existing <goal>-followups.json, [] when there is none. Not readable or not a JSON
+    list: followups-unreadable (exit 2), and the export leaves the file as it is."""
+    if not os.path.exists(path):
+        return []
+    try:
+        items = json.loads(_read_source(path))
+    except (InputError, ValueError) as exc:
+        raise InputError(f"followups-unreadable: {path}: {exc}") from exc
+    if not isinstance(items, list):
+        raise InputError(f"followups-unreadable: {path}: not a JSON list")
+    return items
+
+
+def _finding_key(file: Any, summary: Any) -> Optional[Tuple[str, str]]:
+    """file + summary as journal-finding compares them (path normalized, summary stripped); None for
+    an item without both strings."""
+    if not isinstance(file, str) or not isinstance(summary, str):
+        return None
+    return _normalize_path(file), summary.strip()
+
+
 def journal_export_findings(journal: str) -> Dict[str, Any]:
-    """Rewrite <goal>-followups.json next to the journal in the findings-parse input format."""
+    """Write <goal>-followups.json next to the journal in the findings-parse input format: the items
+    already in the file first, as they are and in their order, then the journal's findings the file
+    lacks (by file + summary), by id. A finding removed from the file by hand comes back from the journal."""
     data = journal_load(journal)
-    findings = sorted(data.get("findings") or [], key=lambda f: int(f["id"][1:]))
-    items = [{"file": f["file"], "line": f.get("line"), "summary": f["summary"],
-              "failure_scenario": f["failure_scenario"]} for f in findings]
     goal = _check_goal(str(data.get("goal") or ""))
     path = os.path.join(os.path.dirname(os.path.abspath(journal)), goal + FOLLOWUPS_SUFFIX)
+    items = _followups_items(path)
+    known = {_finding_key(item.get("file"), item.get("summary")) for item in items if isinstance(item, dict)}
+    for f in sorted(data.get("findings") or [], key=lambda f: int(f["id"][1:])):
+        key = _finding_key(f["file"], f["summary"])
+        if key is not None and key in known:
+            continue
+        known.add(key)
+        items.append({"file": f["file"], "line": f.get("line"), "summary": f["summary"],
+                      "failure_scenario": f["failure_scenario"]})
     try:
         _atomic_write_text(path, json.dumps(items, ensure_ascii=False, indent=2) + "\n")
     except OSError as exc:

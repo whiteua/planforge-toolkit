@@ -95,7 +95,8 @@ The user interrupts the run → `C run-session <journal> --end interrupted --id 
 ## Journal errors
 
 - `journal-locked` (exit `1`) → repeat once; still locked → stop with a short report (journal path, the command), `run-session --end stopped --id <id>`.
-- `journal-corrupt` (exit `2`) → stop with a report and propose `J journal-reconcile <journal> --rebuild`; after it, `continue` shows the card again (START.md, Rebuilt journal).
+- `journal-corrupt` (exit `2`) → stop with a report and propose `J journal-reconcile <journal> --rebuild`; after it, `continue` shows the card again (START.md, Rebuilt journal). If the rebuild answers `rebuilt: false`, the journal passed the structure checks and the error text names a time field: show the user that field and the journal path, let them set it by hand to `YYYY-MM-DDTHH:MM:SSZ` or `null`, and do not offer the rebuild again.
+- `scheduler-bug` (exit `1`, from `run-next`, `run-eta` or `run-status`) → the journal is sound and the error is in `chain_tool.py`: stop with a report (the command and the error text), `run-session --end stopped --id <id>`. Do not propose `journal-reconcile --rebuild`: it is offered only for `journal-corrupt`.
 - `journal-write-failed` → stop with the error text.
 
 ## Continue

@@ -22,6 +22,8 @@ When the profile's capability fails at run time (the tool refuses to start agent
 
 ## github-copilot
 
+**Unverified.** No probe of this profile has passed yet (Verified, Copilot CLI profile probe). The `task` tool with a `model` parameter, the model names, the inherited effort and the `--reasoning-effort` flag below are what the profile assumes, not observed behaviour.
+
 - GitHub Copilot CLI: `task` with `model: <runner.models[role].model>` and the brief as the prompt. Subagents run in parallel; the effort is inherited from the session (GitHub Copilot CLI 1.0.79, 2026-10-02), so the built-in effort is `null` for every role. The session's effort is set when the CLI starts (`--reasoning-effort <level>`); a role's effort that differs from it is said in the start card, it cannot be passed per agent.
 - Model names are Copilot's (`claude-opus-5.5`, `claude-sonnet-5.5`, `gpt-5-mini`); every role has the fallback `gpt-5-mini`.
 
@@ -50,6 +52,8 @@ When the profile's capability fails at run time (the tool refuses to start agent
 
 This table mirrors the built-in values of `chain_tool.py`; the script is the authority. With an invalid settings file (`settings-load` exit `2`) the runner offers this table for the run.
 
+**Unverified:** the `github-copilot` column (model names, inherited effort, fallback) is an assumption until the Copilot CLI profile probe passes (Verified).
+
 ## Verified
 
 Host behaviour this file relies on, as checked during implementation; one entry per check, newest last.
@@ -57,7 +61,13 @@ Host behaviour this file relies on, as checked during implementation; one entry 
 ### Copilot CLI profile probe — 2026-10-03
 
 - Verdict: not verified: copilot exited 126 with 18 events.
-- The model call failed with HTTP 402 (monthly quota exceeded). The probe ran with only `--allow-tool=task` and called no tools, but the CLI connected the MCP servers of the user's own Copilot config. A re-run must disable them first, for example `--disable-builtin-mcps` and `--disable-mcp-server <name>` for each configured server; check the flags in `copilot --help`.
+- The model call failed with HTTP 402 (monthly quota exceeded). The probe ran with only `--allow-tool=task` and called no tools, but the CLI connected the MCP servers of the user's own Copilot config, a production database among them.
+- **Do not start the probe before step 1 is done:** a probe with the user's MCP servers connected can reach the systems behind them.
+- Manual re-run, on the user's machine, on an environment the user allows:
+  1. Disable every MCP server for the run: `--disable-builtin-mcps` for the built-in GitHub server and `--disable-mcp-server <name>` for each server of the user's Copilot config (`~/.copilot`), one flag per server; the user names the servers. Check both flags in `copilot --help`; a flag that is missing → stop, the probe is not run.
+  2. In an empty temporary folder run `copilot -p "<prompt>" --model gpt-5-mini --reasoning-effort low --no-ask-user --no-custom-instructions --disable-builtin-mcps --disable-mcp-server <name> --allow-tool=task --deny-tool=write --deny-tool=shell --output-format json > events.jsonl`, with one `--disable-mcp-server` per server from step 1 and this prompt: `Call your task tool twice in one response so that two sub-agents run in parallel. First sub-agent: model gpt-5-mini, task: reply with only the word alpha. Second sub-agent: model claude-sonnet-5.5, task: reply with only the word beta. Use no other tool. When both finish, reply with the two words.`
+  3. In `events.jsonl` check that two `task` calls ran in parallel with the models asked for, and that no MCP tool was called.
+  4. Delete the temporary folder and record the outcome as a new entry in this section. Until a probe passes, the `github-copilot` profile stays Unverified.
 
 ### Claude Code agent-definition effort key — 2026-10-03
 

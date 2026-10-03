@@ -3,6 +3,7 @@ import json
 import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -234,6 +235,27 @@ class TestUnitFinishEvents(JournalCase):
         done = self.tool.unit_finish(self.exec_dir, "task-1", "pass")
         self.assertEqual(done["status"], "done")
         self.assertIn("journal-missing", done["journal_error"])
+
+
+class TestBrainstormToolLoadedOnce(JournalCase):
+    """F4: brainstorm_tool.py is executed once per process, however many journal calls a run makes."""
+
+    def test_one_load_for_a_run(self):
+        real = importlib.util.spec_from_file_location
+        loads = []
+
+        def counting(name, location=None, *args, **kwargs):
+            if str(location).endswith("brainstorm_tool.py"):
+                loads.append(location)
+            return real(name, location, *args, **kwargs)
+
+        with mock.patch.object(importlib.util, "spec_from_file_location", counting):
+            self.init()
+            self.tool.unit_begin(self.exec_dir)
+            self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+            self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(len(loads), 1, loads)
+        self.assertIs(self.tool._load_brainstorm_tool(), self.tool._load_brainstorm_tool())
 
 
 if __name__ == "__main__":

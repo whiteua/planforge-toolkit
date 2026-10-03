@@ -136,7 +136,7 @@ def _read_source(source: str) -> str:
     try:
         with open(source, "r", encoding="utf-8-sig") as fh:
             return fh.read()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:  # a file not in UTF-8 is unreadable input, not a crash
         raise InputError(f"cannot read {source}: {exc}") from exc
 
 
@@ -673,7 +673,7 @@ def cmd_coverage(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     try:
         with open(args.spec, "r", encoding="utf-8-sig") as fh:
             spec_text = fh.read()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:  # same rule as _read_source
         raise InputError(f"cannot read {args.spec}: {exc}") from exc
 
     expected = [entry["id"] for entry in findings]

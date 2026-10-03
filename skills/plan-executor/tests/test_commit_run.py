@@ -161,6 +161,23 @@ class TestChainFiles(RepoCase):
         for rel in ("docs/guide.md", "sub/BACKLOG.md", "docs/spec.md", "docs/g-impl-notes.txt",
                     "g-review-x.md", "g-chain.json.bak", "app.py"):
             self.assertFalse(self.tool._is_chain_file(rel), rel)
+        for rel, folder in (("docs/g-spec.md", "docs"), ("docs/g-impl-review-2.md", "docs"), ("g-spec.md", ""),
+                            ("BACKLOG.md", "docs")):
+            self.assertTrue(self.tool._is_chain_file(rel, folder), (rel, folder))
+        for rel, folder in (("api/openapi-spec.md", "docs"), ("docs/new/g-spec.md", "docs"),
+                            ("docs/g-spec.md", ""), ("sub/BACKLOG.md", "docs")):
+            self.assertFalse(self.tool._is_chain_file(rel, folder), (rel, folder))
+        self.assertTrue(self.tool._is_chain_file("api/openapi-spec.md"))  # no ledger: the name alone, as before
+
+    def test_plan_dir_of_the_ledger(self):
+        self.assertEqual(self.tool._plan_dir(self.tool._load(self.exec_dir)), "docs")
+        self.assertEqual(self.tool._plan_dir({"plan_path": self.plan, "workdir": None}, top=str(self.repo)), "docs")
+        self.assertEqual(self.tool._plan_dir({"plan_path": str(self.repo / "p-impl.md"),
+                                              "workdir": str(self.repo)}), "")
+        for led in (None, {}, {"plan_path": self.plan}, {"plan_path": str(self.root / "elsewhere-impl.md"),
+                                                          "workdir": str(self.repo)},
+                    {"plan_path": self.plan, "workdir": str(self.root / "missing")}):
+            self.assertIsNone(self.tool._plan_dir(led), led)
 
     def test_foreign_check_and_full_rollback_skip_only_chain_files(self):
         begun = self.tool.unit_begin(self.exec_dir)
@@ -295,7 +312,7 @@ class TestCommitRun(CommitCase):
         result = self.commit()
         self.assertEqual((result["ok"], result["empty"], result["files"]), (True, False, ["app.py", "new.py"]))
         self.assertEqual(result["excluded"], ["BACKLOG.md", "docs/plan01-impl.md", "notes-review-1.md"])
-        self.assertEqual(result["excluded_outside_chain"], [])
+        self.assertEqual(result["excluded_outside_chain"], ["notes-review-1.md"])  # outside the plan folder (F3)
         self.assertEqual(result["sha"], self.git("rev-parse", "HEAD"))
         self.assertEqual(result["subject"], "feat(plan01): add the feature")
         self.assertEqual(self.files_of(), ["app.py", "new.py"])
@@ -597,6 +614,150 @@ class TestCommitRunCli(CommitCase):
         self.git("add", "notes.txt")
         code, out = self.cli("commit-run", self.exec_dir, "--message-file", str(self.message))
         self.assertEqual((code, out["staged"]), (1, ["notes.txt"]))
+
+
+class TestProjectFilesNamedLikeChainFiles(CommitCase):
+    """F3: a chain-file name outside the run's plan folder is a project file: foreign changes and
+    excluded_outside_chain see it; the same name in the plan folder stays the pipeline's."""
+
+    def setUp(self):
+        super().setUp()
+        (self.repo / "api").mkdir()
+        self.write("api/openapi-spec.md", "v1\n")
+        self.commit_all()
+
+    def test_a_hand_edit_is_a_foreign_change(self):
+        self.init()
+        self.tool.unit_begin(self.exec_dir)
+        self.write("app.py", "x = 2\n")
+        self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+        self.write("api/openapi-spec.md", "v2, by hand\n")
+        self.write("docs/g-spec.md", "a spec of the next goal\n")
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(begun["reason"], "foreign-changes")
+        self.assertEqual(begun["foreign_changes"], [{"path": "api/openapi-spec.md", "status": "modified"}])
+
+    def test_commit_names_it_with_the_left_out_files(self):
+        self.run_plan({"app.py": "x = 2\n", "api/openapi-spec.md": "v2\n"})
+        result = self.commit()
+        self.assertEqual(result["files"], ["app.py"])
+        self.assertEqual(result["excluded"], ["api/openapi-spec.md"])
+        self.assertEqual(result["excluded_outside_chain"], ["api/openapi-spec.md"])
+
+
+class TestRollbackOfProjectFilesNamedLikeChainFiles(RepoCase):
+    """F3: with the ledger (--exec-dir) a rollback restores api/openapi-spec.md; the plan folder's own
+    files stay as they are; without the ledger the name alone decides, as before."""
+
+    def setUp(self):
+        super().setUp()
+        (self.repo / "api").mkdir()
+        self.write("api/openapi-spec.md", "v1\n")
+        self.write("docs/plan01-impl-review-1.md", "review 1\n")
+        self.commit_all()
+        self.led = self.init()
+        self.tool.unit_begin(self.exec_dir)
+        self.write("app.py", "x = 2\n")
+        self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+        self.write("api/openapi-spec.md", "v2, by hand\n")
+        self.write("docs/plan01-impl-review-1.md", "review 1, edited\n")
+        self.write("docs/g-spec.md", "next goal\n")
+
+    def read(self, rel):
+        return (self.repo / rel).read_text(encoding="utf-8")
+
+    def restore(self, **kwargs):
+        args = dict(workdir=str(self.repo), checkpoint_id=self.led["baseline_checkpoint"],
+                    exec_dir=self.exec_dir, paths=None)
+        args.update(kwargs)
+        return self.tool.cmd_checkpoint_restore(types.SimpleNamespace(**args))
+
+    def test_full_rollback_with_the_ledger_returns_the_project_file(self):
+        self.restore()
+        self.assertEqual((self.read("api/openapi-spec.md"), self.read("app.py")), ("v1\n", "x = 1\n"))
+        self.assertEqual(self.read("docs/plan01-impl-review-1.md"), "review 1, edited\n")
+        self.assertEqual(self.read("docs/g-spec.md"), "next goal\n")
+
+    def test_paths_rollback_with_the_ledger_takes_the_project_file(self):
+        out = self.restore(paths=["api/openapi-spec.md"])
+        self.assertEqual(out["restored"], ["api/openapi-spec.md"])
+        self.assertEqual(self.read("api/openapi-spec.md"), "v1\n")
+        events = self.tool._load(self.exec_dir)["foreign_events"]
+        self.assertEqual([(e["decision"], [p["path"] for p in e["paths"]]) for e in events],
+                         [("restored", ["api/openapi-spec.md"])])
+
+    def test_without_the_ledger_the_name_alone_decides(self):
+        self.restore(exec_dir=None)
+        self.assertEqual(self.read("api/openapi-spec.md"), "v2, by hand\n")
+        self.assertEqual(self.read("app.py"), "x = 1\n")
+
+
+class TestDirtyCheckUntrackedFolders(RepoCase):
+    """F6: git status lists an untracked folder as one entry (--untracked-files=normal); only such folders are
+    listed file by file (one ls-files call), and every file is judged by _is_chain_file."""
+
+    def setUp(self):
+        super().setUp()
+        self.commit_all()
+        self.calls = []
+        real = self.tool._git
+
+        def spy(workdir, *args, env=None):
+            self.calls.append(args)
+            return real(workdir, *args, env=env)
+
+        self.tool._git = spy
+
+    def detect(self, **kwargs):
+        return self.tool.checkpoint_detect(str(self.repo), **kwargs)
+
+    def commands(self, name):
+        return [args for args in self.calls if args[0] == name]
+
+    def test_a_folder_of_chain_files_is_clean_and_listed_once(self):
+        (self.repo / "docs" / "new").mkdir()
+        self.write("docs/new/plan02-spec.md", "x\n")
+        self.write("docs/new/plan02-impl.md", "x\n")
+        self.assertEqual(self.detect(), {"vcs": "git", "dirty": False})
+        self.assertIn("--untracked-files=normal", self.commands("status")[0])
+        lists = self.commands("ls-files")
+        self.assertEqual(len(lists), 1, lists)
+        self.assertIn(":(top,literal)docs/new", lists[0])
+
+    def test_a_project_file_in_the_folder_makes_it_dirty(self):
+        (self.repo / "docs" / "new").mkdir()
+        self.write("docs/new/plan02-spec.md", "x\n")
+        self.write("docs/new/other.md", "x\n")
+        self.assertTrue(self.detect()["dirty"])
+
+    def test_show_untracked_files_no_changes_nothing(self):
+        self.git("config", "status.showUntrackedFiles", "no")
+        (self.repo / "tools").mkdir()
+        self.write("tools/run.py", "x\n")
+        self.assertTrue(self.detect()["dirty"])
+
+    def test_a_failed_listing_counts_as_dirty(self):
+        (self.repo / "docs" / "new").mkdir()
+        self.write("docs/new/plan02-spec.md", "x\n")
+        real = self.tool._git
+
+        def failing(workdir, *args, env=None):
+            if args[0] == "ls-files":
+                raise self.tool.ToolError("ls-files failed", 1)
+            return real(workdir, *args, env=env)
+
+        self.tool._git = failing
+        self.assertTrue(self.detect()["dirty"])
+
+    def test_the_plan_folder_decides_with_plan_dir(self):  # F3
+        (self.repo / "api").mkdir()
+        self.write("api/openapi-spec.md", "x\n")
+        self.write("docs/g-spec.md", "x\n")
+        self.assertFalse(self.detect()["dirty"])  # no ledger: the name alone, as before
+        self.assertTrue(self.detect(plan_dir="docs")["dirty"])
+        (self.repo / "api" / "openapi-spec.md").unlink()
+        (self.repo / "api").rmdir()
+        self.assertFalse(self.detect(plan_dir="docs")["dirty"])
 
 
 if __name__ == "__main__":

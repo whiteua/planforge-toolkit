@@ -782,5 +782,36 @@ class SettingsCliTest(unittest.TestCase):
         self.assertEqual((out["chain_explicit"], out["chain"]["revision"], out["backlog"]), (False, "quick", "values-fix"))
 
 
+class NonUtf8InputTest(unittest.TestCase):
+    """F1: a file not in UTF-8 is an input error (JSON, exit 2), never a traceback."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.spec = os.path.join(self.tmp.name, "legacy-spec.md")
+        with open(self.spec, "wb") as fh:
+            fh.write("> Tier: Quick\n\n# Goal\n\nЦель в cp1251.\n".encode("cp1251"))
+        self.findings = os.path.join(self.tmp.name, "review01.json")
+        with open(self.findings, "w", encoding="utf-8") as fh:
+            json.dump(SAMPLE, fh, ensure_ascii=False)
+
+    def test_commands_report_json_and_exit_2(self):
+        for args in (("journal-path", self.spec), ("spec-check", self.spec),
+                     ("findings-coverage", self.findings, self.spec)):
+            with self.subTest(command=args[0]):
+                proc = subprocess.run([sys.executable, TOOL, *args], capture_output=True, encoding="utf-8")
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+                out = json.loads(proc.stdout)
+                self.assertFalse(out["ok"])
+                self.assertEqual(len(out["errors"]), 1, out["errors"])
+                self.assertTrue(out["errors"][0].startswith(f"cannot read {self.spec}: "), out["errors"])
+
+    def test_read_source_raises_input_error(self):
+        with self.assertRaises(ft.InputError) as ctx:
+            ft._read_source(self.spec)
+        self.assertIn("cannot read", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1829,5 +1829,18 @@ class TestExternalOutsideFences(PlanTestCase):
         self.assertEqual(self.tool._external_lines(inside_block), [])
 
 
+class TestSettingsSpecNotInUtf8(PlanTestCase):
+    """F1: the spec's read error reaches ledger-init as an input error (exit 2), not a crash."""
+
+    def test_spec_not_in_utf8_is_an_input_error(self):
+        (self.root / "plan01-spec.md").write_bytes("> Tier: Deep\n\n# Goal\n\nЦель.\n".encode("cp1251"))
+        plan = self.plan("# P\n\n**Spec:** plan01-spec.md\n\n### Task 1: A\n\n- [ ] **Step 1:** x\n")
+        with self.assertRaises(ValueError) as ctx:
+            self.init(plan)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("cannot read", str(ctx.exception))
+        self.assertFalse((Path(self.exec_dir) / "state.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

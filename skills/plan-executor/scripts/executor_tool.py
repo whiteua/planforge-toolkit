@@ -1,5 +1,6 @@
 import argparse
 from datetime import datetime, timezone
+import functools
 import hashlib
 import importlib.util
 import json
@@ -633,7 +634,7 @@ def _git(workdir, *args, env=None):
     return result.stdout
 
 
-def checkpoint_detect(workdir, journal=None):
+def checkpoint_detect(workdir, journal=None, plan_dir=None):
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
@@ -651,16 +652,32 @@ def checkpoint_detect(workdir, journal=None):
         excluded += _journal_pathspecs(workdir, journal, "top,exclude")
         # The pipeline's own files (_is_chain_file: followups, diffs, reviews, reports, specs and plans)
         # never make it dirty either; a *-chain.json other than the run's journal still does.
-        # -uall lists the files of an untracked folder one by one, so each is judged by its name.
-        out = _git(workdir, "status", "--porcelain", "-z", "--untracked-files=all", "--", ":/", *excluded)
-        items, paths = out.split("\0"), []
+        # --untracked-files=normal (it overrides status.showUntrackedFiles) shows an untracked folder as one
+        # "?? dir/" entry: only such folders are listed file by file, each file judged by its name (F6).
+        out = _git(workdir, "status", "--porcelain", "-z", "--untracked-files=normal", "--", ":/", *excluded)
+        items, paths, folders = out.split("\0"), [], []
         while items:
             item = items.pop(0)
             if len(item) > 3:
+                if item.startswith("?? ") and item.endswith("/"):
+                    folders.append(item[3:].rstrip("/"))
+                    continue
                 paths.append(item[3:])
                 if "R" in item[:2] or "C" in item[:2]:  # a rename or copy: the source path follows
                     paths.append(items.pop(0) if items else "")
-        dirty = any(not _is_chain_file(path) or _JOURNAL_NAME_RE.search(path) for path in paths)
+
+        def foreign(path):  # plan_dir: the run's plan folder when the caller knows it (F3)
+            return not _is_chain_file(path, plan_dir) or bool(_JOURNAL_NAME_RE.search(path))
+
+        dirty = any(foreign(path) for path in paths)
+        if folders and not dirty:
+            try:
+                listed = _git(workdir, "ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--",
+                              *[f":(top,literal){folder}" for folder in folders], *excluded)
+            except ToolError:
+                dirty = True  # the folder's files are unknown: dirty is the safe side
+            else:
+                dirty = any(foreign(path) for path in _z_list(listed))
         return {"vcs": "git", "dirty": dirty}
     return {"vcs": "none", "dirty": None}
 
@@ -749,7 +766,7 @@ def _z_list(output):
     return {item for item in output.split("\0") if item}
 
 
-def checkpoint_restore(workdir, checkpoint_id):
+def checkpoint_restore(workdir, checkpoint_id, plan_dir=None):
     """Make the working tree match a snapshot: rewrite its files and delete files added
     after it. The branch, HEAD and the user's index are not changed."""
     if checkpoint_detect(workdir)["vcs"] != "git":
@@ -759,7 +776,7 @@ def checkpoint_restore(workdir, checkpoint_id):
     snapshot_files = _z_list(_git(root, "ls-tree", "-r", "-z", "--name-only", checkpoint_id))
     current_files = _z_list(_git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"))
     # The shared backlog and the pipeline's files are not part of a rollback (the skills write them).
-    removed = sorted(rel for rel in current_files - snapshot_files if not _is_chain_file(rel))
+    removed = sorted(rel for rel in current_files - snapshot_files if not _is_chain_file(rel, plan_dir))
     for rel in removed:
         target = Path(root) / rel
         if target.is_file() or target.is_symlink():
@@ -767,7 +784,7 @@ def checkpoint_restore(workdir, checkpoint_id):
 
     def checkout(env):
         _git(root, "read-tree", checkpoint_id, env=env)
-        kept = _FOREIGN_IGNORED | {rel for rel in snapshot_files if _is_chain_file(rel)}
+        kept = _FOREIGN_IGNORED | {rel for rel in snapshot_files if _is_chain_file(rel, plan_dir)}
         _git(root, "--literal-pathspecs", "rm", "--cached", "-f", "-q", "--ignore-unmatch", "--", *sorted(kept),
              env=env)
         _git(root, "checkout-index", "-a", "-f", env=env)
@@ -797,12 +814,12 @@ def _same_as_tree(workdir, tree_ish, rels):
     return {rel for rel, blob, digest in zip(rels, blobs, hashes) if blob == digest}
 
 
-def checkpoint_restore_paths(workdir, tree_ish, paths):
+def checkpoint_restore_paths(workdir, tree_ish, paths, plan_dir=None):
     """Restore only `paths` from a snapshot or tree: changed and deleted files come back from it,
     files absent from it are deleted. Every path is checked before anything is written."""
     if checkpoint_detect(workdir)["vcs"] != "git":
         raise ToolError("not a git repository", 1)
-    wanted = sorted(rel for rel in {_safe_rel_path(raw) for raw in paths} if not _is_chain_file(rel))
+    wanted = sorted(rel for rel in {_safe_rel_path(raw) for raw in paths} if not _is_chain_file(rel, plan_dir))
     if not wanted:
         raise ToolError("paths-empty: nothing to restore after excluding BACKLOG.md and the chain files", 2)
     # Like snapshots and foreign changes, paths are relative to the repository root, not to workdir.
@@ -999,7 +1016,9 @@ def _foreign_check(led):
             result["warning"] = (f"expected_tree {expected} is missing from the object store; "
                                  "accept-changes resets it")
         else:
-            result["foreign_changes"] = [change for change in changes if not _is_chain_file(change["path"])]
+            folder = _plan_dir(led)  # a chain-file name outside the plan folder is a project file (F3)
+            result["foreign_changes"] = [change for change in changes
+                                         if not _is_chain_file(change["path"], folder)]
     return result
 
 
@@ -1267,27 +1286,39 @@ _DIFF_STRINGS = {
            "note": "Примечание", "binary": "двоичный файл", "fixed": "исправлено аудитом",
            "renamed": "переименован из", "empty": "Прогон не изменил файлов вне артефактов конвейера.",
            "truncated": "Показаны первые {shown} из {total} строк. Полный diff:",
-           "excluded": "Не включены (артефакты конвейера)", "ignored": "Не включены (игнорируются git)"},
+           "excluded": "Не включены (артефакты конвейера)", "ignored": "Не включены (игнорируются git)",
+           "posix": "(команда для оболочки POSIX: bash, zsh)"},
     "en": {"title": "Diff report", "plan": "Plan", "baseline": "Baseline snapshot", "last": "Last snapshot",
            "fixes": "Audit fixes: from the baseline snapshot to the working tree", "date": "Date",
            "summary": "Summary", "files": "Changes by file", "file": "File", "status": "Status",
            "note": "Note", "binary": "binary file", "fixed": "fixed by audit",
            "renamed": "renamed from", "empty": "The run changed no files outside the pipeline artifacts.",
            "truncated": "First {shown} of {total} lines shown. Full diff:",
-           "excluded": "Not included (pipeline artifacts)", "ignored": "Not included (ignored by git)"},
+           "excluded": "Not included (pipeline artifacts)", "ignored": "Not included (ignored by git)",
+           "posix": "(command for a POSIX shell: bash, zsh)"},
 }
 
 
+# Characters that would end or change a link target (a target is a URL): percent-encoded.
+_MD_TARGET_ESCAPES = {"%": "%25", "#": "%23", "`": "%60", "<": "%3C", ">": "%3E", "\\": "%5C"}
+# Characters that would end the link text or open a code span, emphasis or a tag in it: backslash-escaped.
+_MD_TEXT_RE = re.compile(r"([\\`*\[\]<>])")
+
+
 def _md_link(report_dir, path, text):
-    """[text](target) with the target relative to the report's folder; a target with a space or
-    parentheses goes in <...>; | is escaped because the link also sits in a table cell."""
+    """[text](target) with the target relative to the report's folder, percent-encoded where a character
+    would change the URL; a target with a space or parentheses goes in <...>; a file on another drive
+    (Windows) is an absolute file:// URI. | is escaped because the link also sits in a table cell."""
     try:
         target = os.path.relpath(path, report_dir).replace(os.sep, "/")
-    except ValueError:  # another drive on Windows
-        target = Path(path).as_posix()
-    if any(ch in target for ch in " ()"):
-        target = f"<{target}>"
-    return f"[{text}]({target})".replace("|", "\\|")
+    except ValueError:  # another drive on Windows: no relative path exists
+        target = Path(path).as_uri()  # already percent-encoded
+    else:
+        target = "".join(_MD_TARGET_ESCAPES.get(ch, ch) for ch in target)
+        if any(ch in target for ch in " ()"):
+            target = f"<{target}>"
+    label = _MD_TEXT_RE.sub(r"\\\1", text)
+    return f"[{label}]({target})".replace("|", "\\|")
 
 
 def _fence(text):
@@ -1296,9 +1327,17 @@ def _fence(text):
     return "`" * max(3, longest + 1)
 
 
-def _file_section(heading, diff_text, command, strings):
+def _code_span(text):
+    """Inline code for `text`: a backtick run longer than any inside it, padded when it holds backticks."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    tick, pad = "`" * (longest + 1), " " if longest else ""
+    return f"{tick}{pad}{text}{pad}{tick}"
+
+
+def _file_section(heading, diff_text, command, strings, posix=False):
     """Lines of one file's section: heading and a diff block; a diff longer than
-    DIFF_TRUNCATE_LINES keeps its first lines and names the command that shows it in full."""
+    DIFF_TRUNCATE_LINES keeps its first lines and names the command that shows it in full
+    (with a note when the command is for a POSIX shell only, see _top_literal)."""
     lines = diff_text.split("\n")  # not splitlines:  , \x0c and the like are inside a diff line
     if lines and lines[-1] == "":
         lines.pop()
@@ -1307,7 +1346,7 @@ def _file_section(heading, diff_text, command, strings):
     section = [heading, "", fence + "diff", body, fence]
     if len(lines) > DIFF_TRUNCATE_LINES:
         note = strings["truncated"].format(shown=DIFF_TRUNCATE_LINES, total=len(lines))
-        section += ["", f"{note} `{command}`"]
+        section += ["", f"{note} {_code_span(command)}" + (f" {strings['posix']}" if posix else "")]
     return section
 
 
@@ -1339,7 +1378,7 @@ def _render_diff_report(lang, plan_link, title, baseline, last, entries, fixes, 
         if entry["binary"]:
             continue  # a binary file is a table row only
         heading = f"### {entry['link']}" + (f" — {s['fixed']}" if entry["fixed"] else "")
-        lines += [""] + _file_section(heading, entry["diff"], entry["command"], s)
+        lines += [""] + _file_section(heading, entry["diff"], entry["command"], s, posix=entry.get("posix", False))
     return "\n".join(lines + tail) + "\n"
 
 
@@ -1401,7 +1440,7 @@ def run_diff_markdown(exec_dir, out_path, journal=None):
     root = os.path.realpath(_diff_git(led["workdir"], "rev-parse", "--show-toplevel").strip())
     plan = os.path.realpath(led["plan_path"])
     plan_dir_rel = os.path.relpath(os.path.dirname(plan), root) if _inside(plan, root) else ""
-    entries = {entry["path"]: dict(entry, fixed=False, target=last,
+    entries = {entry["path"]: dict(entry, fixed=False, target=last, posix=_posix_only(entry["path"]),
                                    command=f"git diff {baseline} {last} -- {_top_literal(entry['path'])}")
                for entry in _diff_entries(root, baseline, last)}
     fix_files = _audit_fix_files(led, journal) if journal else []
@@ -1414,7 +1453,10 @@ def run_diff_markdown(exec_dir, out_path, journal=None):
             if popped and popped["old_path"] and popped["old_path"] not in paths:
                 paths.append(popped["old_path"])  # the run's rename: its deletion stays in the report
         for entry in _diff_entries(root, baseline, tree, paths):
-            entries[entry["path"]] = dict(entry, fixed=True, target=tree,
+            # The old path of a run's rename is diffed with the fixes so its deletion stays in the report,
+            # but only the audit's own files are "fixed by audit" (F5).
+            entries[entry["path"]] = dict(entry, fixed=entry["path"] in fix_files, target=tree,
+                                          posix=_posix_only(entry["path"]),
                                           command=f"git diff {baseline} -- {_top_literal(entry['path'])}")
         # add -A skips ignored files, so no tree holds them: named, never dropped silently.
         ignored = sorted(rel for rel in _git_ignored(root, fix_files) if rel not in entries)
@@ -1436,9 +1478,20 @@ def run_diff_markdown(exec_dir, out_path, journal=None):
             "last": last, "files": files, "excluded": excluded, "fix_files": fix_files, "ignored": ignored}
 
 
+# In double quotes bash, zsh, PowerShell and cmd read a path alike unless it holds one of these.
+_POSIX_ONLY_CHARS = frozenset('"$`!\\')
+
+
+def _posix_only(rel):
+    """True when the full-diff command for `rel` needs POSIX single quotes (the report then says so)."""
+    return any(ch in _POSIX_ONLY_CHARS for ch in rel)
+
+
 def _top_literal(rel):
-    """A root-relative path as a shell-quoted literal pathspec for the full-diff command."""
-    return shlex.quote(f":(top,literal){rel}")
+    """A root-relative path as a literal pathspec for the full-diff command: in double quotes, or
+    shell-quoted for a POSIX shell when the path holds ", $, `, ! or \\ (_posix_only)."""
+    spec = f":(top,literal){rel}"
+    return shlex.quote(spec) if _posix_only(rel) else f'"{spec}"'
 
 
 def _git_ignored(root, rels):
@@ -1574,17 +1627,44 @@ def cmd_ledger_path(args):
     return locate_ledger(args.plan_path, args.workdir)
 
 
-# Files of the pipeline itself, by exact name in any folder, plus BACKLOG.md at the root: the skills write
-# them between units, so they are never a foreign change and a rollback never deletes or rewrites them.
-# Any other file stays watched, in the plan's folder too (diffs and commits use _is_pipeline_artifact).
+# Files of the pipeline itself: an exact name in the run's plan folder (any folder when no ledger tells
+# the folder), plus BACKLOG.md at the root. The skills write them between units, so they are never a foreign
+# change and a rollback never deletes or rewrites them. Any other file stays watched, in the plan's folder
+# too (diffs and commits use _is_pipeline_artifact), and so does a name like api/openapi-spec.md elsewhere.
 _CHAIN_FILE_RE = re.compile(
     r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
     r"|impl-roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
 
 
-def _is_chain_file(rel):
+def _is_chain_file(rel, plan_dir=None):
+    """True for BACKLOG.md at the root and for a _CHAIN_FILE_RE name in `plan_dir` (repository-root-relative,
+    "" for the root; _plan_dir). Without plan_dir (no ledger) the name alone decides, in any folder."""
     rel = str(rel).replace("\\", "/")
-    return rel in _FOREIGN_IGNORED or bool(_CHAIN_FILE_RE.fullmatch(rel.rsplit("/", 1)[-1]))
+    if rel in _FOREIGN_IGNORED:
+        return True
+    folder, _, name = rel.rpartition("/")
+    return bool(_CHAIN_FILE_RE.fullmatch(name)) and (plan_dir is None or folder == plan_dir)
+
+
+def _plan_dir(led, top=None):
+    """Repository-root-relative folder of the ledger's plan ("" for the root) for _is_chain_file. None when
+    it cannot be known: no ledger, no plan_path, no workdir and no `top`, no git, a plan outside the
+    repository; the chain files are then recognised by name only."""
+    if not led or not led.get("plan_path"):
+        return None
+    if top is None:
+        if not led.get("workdir"):
+            return None
+        try:
+            top = _git(led["workdir"], "rev-parse", "--show-toplevel").strip()
+        except (ToolError, OSError):
+            return None
+    top = os.path.realpath(top)
+    plan = os.path.realpath(led["plan_path"])
+    if not _inside(plan, top):
+        return None
+    folder = os.path.relpath(os.path.dirname(plan), top).replace(os.sep, "/")
+    return "" if folder == "." else folder
 
 
 # A chain file named like a journal: the dirty check leaves out only the run's own journal (by path).
@@ -1826,8 +1906,9 @@ def commit_run(exec_dir, message_file, journal=None):
     own = _run_journal(led)
     own = os.path.realpath(own) if own else None
     own = os.path.relpath(own, top).replace(os.sep, "/") if own and _inside(own, top) else None
+    chain_dir = _plan_dir(led, top)  # e.g. api/openapi-spec.md is a project file, not the pipeline's (F3)
     info = {"excluded": excluded, "excluded_outside_chain": [
-        rel for rel in excluded if not _is_chain_file(rel)
+        rel for rel in excluded if not _is_chain_file(rel, chain_dir)
         or (rel.endswith(("-chain.json", "-chain.json.lock")) and rel not in (own, f"{own}.lock"))]}
     if incomplete:
         info["incomplete"] = incomplete
@@ -1860,7 +1941,10 @@ def cmd_commit_run(args):
     return commit_run(args.exec_dir, args.message_file, journal=args.journal)
 
 
+@functools.lru_cache(maxsize=None)
 def _load_brainstorm_tool():
+    """plan-brainstorming's brainstorm_tool.py, loaded by path once per process (None when it is not
+    installed alongside). Tests swap it by replacing this function, which the cache does not affect."""
     path = Path(__file__).resolve().parents[2] / "plan-brainstorming" / "scripts" / "brainstorm_tool.py"
     if not path.is_file():
         return None
@@ -1877,7 +1961,10 @@ def _resolve_settings(plan_path):
     module = _load_brainstorm_tool()
     if module is None or not hasattr(module, "resolve_settings"):
         return None, BRAINSTORM_MISSING
-    return module.resolve_settings(str(Path(plan_path).resolve())), None
+    try:
+        return module.resolve_settings(str(Path(plan_path).resolve())), None
+    except getattr(module, "InputError", ValueError) as exc:  # e.g. a spec not in UTF-8: input error, exit 2
+        raise ToolError(str(exc), 2) from exc
 
 
 def cmd_ledger_init(args):
@@ -1904,6 +1991,7 @@ def cmd_ledger_init(args):
     fresh = not ledger_path(args.exec_dir).exists()
     if workdir and fresh:
         _check_exec_dir(args.exec_dir, workdir, allow_temp=getattr(args, "allow_temp", False))
+        # A fresh run has no ledger yet, so no plan_dir: chain files are recognised by name in any folder.
         detected_vcs = checkpoint_detect(workdir, journal=_journal_file(args.plan_path))
         if detected_vcs["dirty"] and not getattr(args, "allow_dirty", False):
             raise ToolError("dirty-worktree: uncommitted changes in workdir; ask the engineer (commit/stash or --allow-dirty)", 1)
@@ -2008,8 +2096,9 @@ def _after_restore(exec_dir, workdir, restored_paths=None):
         events = led.setdefault("foreign_events", [])
         events.append({"at": _utc_now(), "paths": restored_paths, "decision": "restored", "note": None})
         names = {entry["path"] for entry in restored_paths}
+        folder = _plan_dir(led)
         kept = [change for change in (_tree_diff(workdir, old, current) if old and current else [])
-                if change["path"] not in names and not _is_chain_file(change["path"])]
+                if change["path"] not in names and not _is_chain_file(change["path"], folder)]
         if kept:
             events.append({"at": _utc_now(), "paths": kept, "decision": "accepted",
                            "note": "kept while restoring other paths"})
@@ -2020,12 +2109,15 @@ def _after_restore(exec_dir, workdir, restored_paths=None):
 
 def cmd_checkpoint_restore(args):
     exec_dir = getattr(args, "exec_dir", None)
+    plan_dir = None
     if exec_dir:
-        _load(exec_dir)  # a missing or broken ledger fails before any file is touched
+        # A missing or broken ledger fails before any file is touched; its plan folder tells the pipeline's
+        # files from project files with the same names (F3). Without --exec-dir the name alone decides.
+        plan_dir = _plan_dir(_load(exec_dir))
     if getattr(args, "paths", None):
-        result = checkpoint_restore_paths(args.workdir, args.checkpoint_id, args.paths)
+        result = checkpoint_restore_paths(args.workdir, args.checkpoint_id, args.paths, plan_dir=plan_dir)
     else:
-        result = checkpoint_restore(args.workdir, args.checkpoint_id)
+        result = checkpoint_restore(args.workdir, args.checkpoint_id, plan_dir=plan_dir)
     if exec_dir:
         result["expected_tree"] = _after_restore(exec_dir, args.workdir, result.get("paths"))
     return result

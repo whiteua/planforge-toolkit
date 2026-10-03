@@ -1,12 +1,14 @@
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -166,6 +168,17 @@ class TestMarkdownHelpers(unittest.TestCase):
             self.assertEqual(link(report_dir, os.path.join(root, "my dir", "a b.py"), "my dir/a b.py"),
                              "[my dir/a b.py](<../../my dir/a b.py>)")
             self.assertEqual(link(root, os.path.join(root, "a|b.py"), "a|b.py"), "[a\\|b.py](a\\|b.py)")
+            self.assertEqual(link(root, os.path.join(root, "a]b`c.py"), "a]b`c.py"), "[a\\]b\\`c.py](a]b%60c.py)")
+            self.assertEqual(link(root, os.path.join(root, "50% #1.py"), "50% #1.py"),
+                             "[50% #1.py](<50%25 %231.py>)")
+
+    def test_a_target_on_another_drive_is_a_file_uri(self):  # F2
+        target = os.path.abspath(os.path.join(os.sep, "x", "a b#1.py"))
+        with mock.patch.object(self.tool.os.path, "relpath", side_effect=ValueError("path is on mount 'D:'")):
+            link = self.tool._md_link(os.getcwd(), target, "a b#1.py")
+        self.assertEqual(link, f"[a b#1.py]({Path(target).as_uri()})")
+        self.assertIn("%20", link)
+        self.assertIn("%23", link)
 
     def test_section_keeps_400_lines_and_names_the_full_diff_command(self):
         strings = self.tool._DIFF_STRINGS["en"]
@@ -176,6 +189,24 @@ class TestMarkdownHelpers(unittest.TestCase):
         self.assertIn('First 400 of 450 lines shown. Full diff: `git diff a b -- "x"`', text)
         short = "\n".join(self.tool._file_section("### y", "+a ``` b\n", "cmd", strings))
         self.assertEqual(short, "### y\n\n````diff\n+a ``` b\n````")
+
+    def test_top_literal_double_quotes_with_a_posix_fallback(self):  # F2
+        quote = self.tool._top_literal
+        self.assertEqual(quote("my dir/a.py"), '":(top,literal)my dir/a.py"')
+        self.assertEqual(quote("it's.py"), '":(top,literal)it\'s.py"')
+        self.assertFalse(self.tool._posix_only("it's.py"))
+        for rel in ('a"b.py', "a$b.py", "a`b.py", "a!b.py", "a\\b.py"):
+            self.assertEqual(quote(rel), shlex.quote(":(top,literal)" + rel), rel)
+            self.assertTrue(self.tool._posix_only(rel), rel)
+
+    def test_section_command_with_a_backtick_and_the_posix_note(self):  # F2
+        strings = self.tool._DIFF_STRINGS["en"]
+        diff = "".join(f"+l{i}\n" for i in range(450))
+        text = "\n".join(self.tool._file_section("### x", diff, "git diff a b -- ':(top,literal)a`b.py'", strings,
+                                                 posix=True))
+        self.assertIn("Full diff: `` git diff a b -- ':(top,literal)a`b.py' `` (command for a POSIX shell: bash, zsh)",
+                      text)
+        self.assertEqual(self.tool._DIFF_STRINGS["ru"]["posix"], "(команда для оболочки POSIX: bash, zsh)")
 
     def test_section_splits_only_on_newlines(self):  # e6: git lines may hold  , \x0c, \x1c
         strings = self.tool._DIFF_STRINGS["en"]
@@ -343,7 +374,7 @@ class TestRunDiffMarkdown(RunDiffCase):
         self.assertTrue(text.startswith("# Diff-отчёт: p1-impl\n"))
         self.assertIn("| Файл | Статус | + | − | Примечание |", text)
         self.assertRegex(text, r"Показаны первые 400 из \d+ строк\. Полный diff: "
-                               r"`git diff [0-9a-f]{40} [0-9a-f]{40} -- ':\(top,literal\)big\.py'`")
+                               r"`git diff [0-9a-f]{40} [0-9a-f]{40} -- \":\(top,literal\)big\.py\"`")
         self.assertIn("````diff\n", text)
         self.report()  # an existing report is overwritten, not appended to
         self.assertEqual(self.out.read_text(encoding="utf-8").count("# Diff-отчёт"), 1)
@@ -426,6 +457,19 @@ class TestDiffReportGateFixes(RunDiffCase):
         self.assertIn("rename from old.py", text.splitlines())
         self.assertIn("+fixed", text.splitlines())
 
+    def test_a_recreated_old_path_of_a_rename_is_not_marked_fixed(self):  # F5
+        self.init_repo({"old.py": self.BODY})
+        self.start()
+        self.unit("task-1", {"old.py": None, "new.py": self.BODY})
+        self.write("old.py", "recreated\n")
+        self.write("new.py", self.BODY + "fixed\n")
+        journal = write_journal(self.base, [audit_plan("p1-impl", ["new.py"])])
+        result = self.tool.run_diff_markdown(self.exec_dir, str(self.out), journal=journal)
+        lines = self.out.read_text(encoding="utf-8").splitlines()
+        self.assertEqual({f["path"]: f["fixed"] for f in result["files"]}, {"new.py": True, "old.py": False})
+        self.assertIn("### [old.py](../../old.py)", lines)
+        self.assertIn("### [new.py](../../new.py) — fixed by audit", lines)
+
     def test_user_git_config_does_not_change_the_diff(self):  # e3
         self.init_repo({"app.py": "x = 1\n"})
         for key, value in (("color.ui", "always"), ("color.diff", "always"), ("diff.noprefix", "true"),
@@ -460,7 +504,19 @@ class TestDiffReportGateFixes(RunDiffCase):
         result = self.tool.run_diff_markdown(self.exec_dir, str(self.out))
         text = self.out.read_text(encoding="utf-8")
         self.assertIn(f"Full diff: `git diff {result['baseline']} {result['last']} -- "
-                      f"':(top,literal)my dir/big file.py'`", text)
+                      f"\":(top,literal)my dir/big file.py\"`", text)
+        self.assertNotIn("POSIX", text)
+
+    def test_full_diff_command_for_a_quote_and_a_dollar(self):  # F2
+        self.init_repo({"app.py": "x = 1\n"})
+        self.start()
+        body = "".join(f"v{i} = {i}\n" for i in range(450))
+        self.unit("task-1", {"it's big.py": body, "cost$big.py": body})
+        result = self.tool.run_diff_markdown(self.exec_dir, str(self.out))
+        text = self.out.read_text(encoding="utf-8")
+        head = f"Full diff: `git diff {result['baseline']} {result['last']} -- "
+        self.assertIn(head + "\":(top,literal)it's big.py\"`\n", text)
+        self.assertIn(head + "':(top,literal)cost$big.py'` (command for a POSIX shell: bash, zsh)\n", text)
 
 
 class TestRunDiffCli(RunDiffCase):

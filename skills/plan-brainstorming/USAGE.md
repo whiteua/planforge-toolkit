@@ -79,7 +79,7 @@ The input is an approved spec that must change. The agent discusses only the cha
 
 ## Output
 
-A spec file saved to `<dir>/<plan-root>-spec.md` next to the goal file (or user-specified path). The skill does not commit it. After your approval it also creates the chain journal `<goal>-chain.json` next to the spec, where the later skills record their stages, questions and findings; the findings come back as `<goal>-followups.json` (`/plan-brainstorming <goal>-followups.json` starts the next cycle from them).
+A spec file saved to `<dir>/<plan-root>-spec.md` next to the goal file (or user-specified path). The skill does not commit it. After your approval it also creates the chain journal `<goal>-chain.json` next to the spec, where the later skills record their stages, questions and findings; the findings come back as `<goal>-followups.json` (`/plan-brainstorming <goal>-followups.json` starts the next cycle from them). The skill's script also owns the one parser of plan tasks, `brainstorm_tool.py plan-tasks <plan>`, which the later skills use instead of their own parsers.
 
 Language: the dialogue and the spec body follow the language of your input (a Russian goal gives a Russian spec). The `> Tier:` line and the section headings stay in English.
 

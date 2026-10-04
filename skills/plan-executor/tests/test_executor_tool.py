@@ -1842,5 +1842,35 @@ class TestSettingsSpecNotInUtf8(PlanTestCase):
         self.assertFalse((Path(self.exec_dir) / "state.json").exists())
 
 
+class TestSharedTaskParser(PlanTestCase):
+    """Contract plans take their units from brainstorm_tool.parse_plan_tasks; others keep the local parse."""
+
+    FIXTURE = ROOT.parent / "plan-writing" / "tests" / "fixtures" / "plan01-impl.md"
+
+    def test_local_parse_matches_on_the_reference_plan(self):
+        shared = self.tool.parse_tasks(str(self.FIXTURE))
+        self.tool._load_brainstorm_tool = lambda: None
+        self.assertEqual(self.tool.parse_tasks(str(self.FIXTURE)), shared)
+        self.assertEqual([u["id"] for u in shared["units"]], ["task-1", "task-1.1", "task-2"])
+
+    def test_next_task_heading_ends_a_unit_at_any_level(self):
+        plan = self.plan("### Task 1: A\nx\n#### Task 2: B\ny\n")
+        units = self.tool.parse_tasks(plan)["units"]
+        self.assertEqual([(u["id"], u["source"]["line_start"], u["source"]["line_end"]) for u in units],
+                         [("task-1", 1, 2), ("task-2", 3, 4)])
+        self.tool._load_brainstorm_tool = lambda: None
+        self.assertEqual(self.tool.parse_tasks(plan)["units"][0]["source"]["line_end"], 4)
+
+    def test_malformed_heading_keeps_the_local_parse(self):
+        units = self.tool.parse_tasks(self.plan("## Task 1: A\n\n## Task 2 — B\n"))["units"]
+        self.assertEqual([u["id"] for u in units], ["task-1", "task-2"])
+
+    def test_module_without_the_parser_keeps_the_local_parse(self):
+        import types
+        self.tool._load_brainstorm_tool = lambda: types.SimpleNamespace()
+        units = self.tool.parse_tasks(self.plan("## Task 1: A\n\n## Task 2: B\n"))["units"]
+        self.assertEqual([u["id"] for u in units], ["task-1", "task-2"])
+
+
 if __name__ == "__main__":
     unittest.main()

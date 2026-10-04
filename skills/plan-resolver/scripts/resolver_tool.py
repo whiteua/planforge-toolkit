@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import functools
 import hashlib
+import importlib.util
 import json
 import os
 import random
@@ -48,6 +50,8 @@ EVIDENCE_PROBE_RE = re.compile(r"evidence_probe\s*[:=]\s*\S", re.IGNORECASE)
 # A task closed on the executor's word (e.g. it needs an external system the audit may not touch).
 EXECUTOR_REPORTED_RE = re.compile(r"verification\s*[:=]\s*executor-reported", re.IGNORECASE)
 PLAN_CODE_FILE_RE = re.compile(r"^\s*[-*]\s*(?:Create|Modify|Delete|Move|Создать|Изменить)\s*:", re.IGNORECASE)
+# Files actions of a code task in the shared parser's `files` (the actions PLAN_CODE_FILE_RE matches).
+PLAN_CODE_ACTIONS = {"create", "modify", "delete", "move", "создать", "изменить"}
 
 
 def confidence_level(text_blob: str) -> str:
@@ -1223,8 +1227,42 @@ def _leading_id(match: "re.Match[str]") -> str:
 def normalize_plan_task_id(task_id: str) -> str:
     return task_id.lower()
 
+@functools.lru_cache(maxsize=None)
+def _load_brainstorm_tool():
+    """plan-brainstorming's brainstorm_tool.py, loaded by path once per process (None when it is not
+    installed alongside). Tests swap it by replacing this function, which the cache does not affect."""
+    skills = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(skills, "plan-brainstorming", "scripts", "brainstorm_tool.py")
+    if not os.path.isfile(path):
+        return None
+    spec = importlib.util.spec_from_file_location("brainstorm_tool", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _contract_tasks(text: str) -> Optional[List[Dict[str, object]]]:
+    """Tasks of a plan in the plan format contract by brainstorm_tool.parse_plan_tasks; None (the local
+    parse) without the parser, without contract task headings, or with a malformed task heading."""
+    parse = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parse is None:
+        return None
+    parsed = parse(text)
+    if not parsed["tasks"] or parsed["malformed"]:
+        return None
+    return parsed["tasks"]
+
+
 def plan_code_task_ids(text: str) -> List[str]:
     """Ids of plan tasks whose Files block creates or modifies code (not test-only, not checkpoints)."""
+    tasks = _contract_tasks(text)
+    if tasks is not None:
+        result: List[str] = []
+        for task in tasks:
+            task_id = normalize_plan_task_id(task["id"])
+            if task_id not in result and any(entry["action"] in PLAN_CODE_ACTIONS for entry in task["files"]):
+                result.append(task_id)
+        return result
     current = ""
     result: List[str] = []
     in_fence = False
@@ -1244,6 +1282,14 @@ def plan_code_task_ids(text: str) -> List[str]:
 
 
 def extract_plan_task_ids(text: str) -> List[str]:
+    tasks = _contract_tasks(text)
+    if tasks is not None:
+        ids: List[str] = []
+        for task in tasks:
+            task_id = normalize_plan_task_id(task["id"])
+            if task_id not in ids:
+                ids.append(task_id)
+        return ids
     found: List[Tuple[str, str]] = []
     in_fence = False
     for line in text.splitlines():

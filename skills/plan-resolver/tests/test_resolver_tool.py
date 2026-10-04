@@ -1032,5 +1032,34 @@ class FixLoopToolTests(unittest.TestCase):
         self.assertEqual(self.cycle([fixed_a, open_b], [fixed_a, open_b], 1)["action"], "stop-stalled")
 
 
+class SharedTaskParserTests(unittest.TestCase):
+    """Contract plans take their ids from brainstorm_tool.parse_plan_tasks; others keep the local parse."""
+
+    FIXTURE = ROOT.parent / "plan-writing" / "tests" / "fixtures" / "plan01-impl.md"
+
+    def load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("resolver_tool", str(TOOL))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_local_parse_matches_on_the_reference_plan(self) -> None:
+        module = self.load()
+        text = self.FIXTURE.read_text(encoding="utf-8")
+        shared = (module.extract_plan_task_ids(text), module.plan_code_task_ids(text))
+        module._load_brainstorm_tool = lambda: None
+        self.assertEqual((module.extract_plan_task_ids(text), module.plan_code_task_ids(text)), shared)
+        self.assertEqual(shared, (["1", "1.1", "2"], ["1", "1.1"]))
+
+    def test_contract_plan_ignores_other_numbered_headings(self) -> None:
+        module = self.load()
+        text = ("# P\n\n## A. Overview\n\n### Task 1: Code\n\n**Files:**\n- Modify: `src/a.py`\n\n"
+                "### Task 2: Tests\n\n**Files:**\n- Test: `tests/test_a.py`\n")
+        self.assertEqual((module.extract_plan_task_ids(text), module.plan_code_task_ids(text)), (["1", "2"], ["1"]))
+        module._load_brainstorm_tool = lambda: None
+        self.assertEqual(module.extract_plan_task_ids(text), ["a", "1", "2"])
+
+
 if __name__ == "__main__":
     unittest.main()

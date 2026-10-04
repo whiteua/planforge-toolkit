@@ -164,5 +164,18 @@ class TestPartIds(unittest.TestCase):
         self.assertIn('"lang"', proc.stdout)
 
 
+class TestSharedTaskParser(unittest.TestCase):
+    FIXTURE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "plan-writing", "tests",
+                                           "fixtures", "plan01-impl.md"))
+
+    def test_local_count_matches_on_the_reference_plan(self):
+        mod = _load_module()
+        with open(self.FIXTURE, encoding="utf-8") as fh:
+            text = fh.read()
+        shared = mod.count_tasks_in_original(text)
+        mod._load_brainstorm_tool = lambda: None
+        self.assertEqual((shared, mod.count_tasks_in_original(text)), (3, 3))
+
+
 if __name__ == "__main__":
     unittest.main()

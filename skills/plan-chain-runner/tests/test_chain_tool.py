@@ -1603,6 +1603,15 @@ class TextMetricsTest(_StatsCase):
         self.assertEqual(ct._count_plan_tasks(self.PLAN), 2)
         self.assertEqual(ct._count_plan_tasks("### Задача 1: Один\n\n### Задача 1.1: Два\n"), 2)
 
+    def test_task_count_falls_back_without_plan_brainstorming(self):
+        def missing():
+            raise ct.InputError("plan-brainstorming not installed alongside: x")
+
+        with mock.patch.object(ct, "_brainstorm", missing):
+            self.assertEqual(ct._count_plan_tasks("### Task 1: One\n\n### Task 2: Two\n"), 2)
+        # a malformed task heading keeps the local counter, which counts only `<id>:` headings
+        self.assertEqual(ct._count_plan_tasks("### Task 1: One\n\n### Task 2 — Two\n"), 1)
+
     def test_nested_fences_follow_commonmark(self):
         # a four-backtick block holds a three-backtick block and a task-like heading: all 6 lines are code
         text = "# P\n\n````markdown\n```bash\nrun\n```\n### Task 9: inside\n````\n\n### Task 1: One\n"

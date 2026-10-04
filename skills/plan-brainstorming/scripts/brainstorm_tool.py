@@ -8,6 +8,10 @@
 - findings-coverage: verifies that a spec mentions every finding id.
 - settings: chain settings, environments and backlog of a spec, plan, roadmap
   or part by the single reading rule (spec; plan header only for old specs).
+- plan-tasks: tasks of a plan by the plan format contract (`### Task N: <title>`): id, title,
+  line range, Files, Preconditions refs, size and SHA-1 of the body; malformed and duplicate
+  headings. The one task parser of plan_tool, executor_tool, resolver_tool, splitter_tool and
+  chain_tool (parse_plan_tasks, loaded by path).
 - detect-lang: dialogue language of a goal file or findings JSON
   (`ru` when more than 5% of the letters are Cyrillic, otherwise `en`).
 - journal-*: the chain journal <goal>-chain.json next to the spec: stages of
@@ -22,6 +26,7 @@ Commands:
   findings-parse    <findings.json|-> [--root DIR]
   findings-coverage <findings.json|-> <spec.md>
   settings          <spec|plan|roadmap|part.md>
+  plan-tasks        <plan|part.md>
   detect-lang       <file|->
   backlog-append    <root> --section S --source "skill, artifact" --item TEXT [--lang ru|en] [--plain] [--date D]
   backlog-parse     <BACKLOG.md> [--section S] [--state open|done|cancelled|all]
@@ -123,7 +128,18 @@ PLAN_ENV_RE = re.compile(
 )
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 LINK_TARGET_RE = re.compile(r"\[[^\]]*\]\((?P<target>[^)\s]+)\)")
-PLAN_TASK_RE = re.compile(r"^#{2,4}\s+(?:Task|Задача)\b")
+# Plan tasks (parse_plan_tasks): the task heading of the plan format contract, "### Task N: <title>";
+# a task-like heading without "<id>:" is malformed. Files lines follow executor_tool.extract_files.
+PLAN_TASK_HEADING_RE = re.compile(r"^(?P<hashes>#{2,4})\s+(?:Task|Задача)\s+(?P<id>\S+?)\s*:\s*(?P<title>\S.*?)\s*$")
+PLAN_TASKISH_RE = re.compile(r"^#{2,4}\s+(?:Task|Задача)\b", re.IGNORECASE)
+PLAN_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+")
+PLAN_CHECKPOINT_RE = re.compile(r"^Checkpoint\b", re.IGNORECASE)
+PLAN_FILES_BLOCK_RE = re.compile(r"^\*\*(?:files|файлы):\*\*\s*$", re.IGNORECASE)
+PLAN_FILE_ACTION_RE = re.compile(r"^\s*[-*]\s*(create|modify|test|delete|move|создать|изменить|тест)\s*:", re.IGNORECASE)
+PLAN_CODE_PATH_RE = re.compile(r"`([^`\s]+?\.[A-Za-z0-9]+)(?::(\d+(?:-\d+)?))?`")
+PLAN_MD_LINK_RE = re.compile(r"\[([^\]]+\.[A-Za-z0-9]+)\]\(([^)]+)\)")
+PLAN_PRECONDITIONS_RE = re.compile(r"^\*\*Preconditions:\*\*")
+PLAN_TASK_REF_RE = re.compile(r"\b(?:Task|Задача)\s+(\d+(?:\.\d+)*)\b")
 PLAN_FIELD_RE = re.compile(r"^\*\*(?P<name>Spec|Tier|Chain|Backlog):\*\*\s*(?P<value>.*?)\s*$")
 PLAN_ENVIRONMENTS_RE = re.compile(r"^\*\*Environments:\*\*\s*$")
 PLAN_ENV_ITEM_RE = re.compile(r"^\s*[-*]\s+`")
@@ -450,13 +466,110 @@ def _plan_environment(line: str, where: str, result: Dict[str, Any]) -> None:
         result["environments"].append(entry)
 
 
+def _plan_task_files(lines: List[str]) -> List[Dict[str, Any]]:
+    """{path, action, lines} of the **Files:** block of a task, by the rules of executor_tool.extract_files."""
+    files: List[Dict[str, Any]] = []
+    seen = set()
+    in_scope = False
+    for line in lines:
+        stripped = line.strip()
+        if PLAN_FILES_BLOCK_RE.match(stripped):
+            in_scope = True
+            continue
+        if in_scope and (PLAN_HEADING_RE.match(stripped)
+                         or (stripped.startswith("**") and not PLAN_FILE_ACTION_RE.match(line))):
+            in_scope = False
+        if not in_scope:
+            continue
+        action = PLAN_FILE_ACTION_RE.match(line)
+        candidates = [(m.group(1), None) for m in PLAN_MD_LINK_RE.finditer(line)]
+        candidates.extend((m.group(1), m.group(2)) for m in PLAN_CODE_PATH_RE.finditer(line))
+        for candidate, span in candidates:
+            path = candidate.strip().strip(".,;:")
+            path = (path[2:] if path.startswith("./") else path).replace("\\", "/")
+            if path and path not in seen:
+                seen.add(path)
+                files.append({"path": path, "action": action.group(1).lower() if action else None, "lines": span})
+    return files
+
+
+def _plan_task_refs(lines: List[str]) -> List[str]:
+    """Task ids named in the **Preconditions:** block (Task N, Task N.M, Задача N), in order, once each."""
+    refs: List[str] = []
+    in_block = False
+    for line in lines:
+        stripped = line.strip()
+        if PLAN_PRECONDITIONS_RE.match(stripped):
+            in_block = True
+        elif in_block and (stripped.startswith("**") or stripped.startswith("- [ ]") or PLAN_HEADING_RE.match(stripped)):
+            in_block = False
+        if in_block:
+            refs.extend(ref for ref in PLAN_TASK_REF_RE.findall(stripped) if ref not in refs)
+    return refs
+
+
+def parse_plan_tasks(text: str) -> Dict[str, Any]:
+    """Tasks of a plan by the plan format contract: `### Task N: <title>` headings outside code fences.
+
+    A task ends before the next task heading or the next heading of its level or higher. Lines are
+    1-based and inclusive (`lines[line_start-1:line_end]`). `sha1` (8 hex) and `size_bytes` cover the task's
+    text joined with newlines, without trailing blank lines. Task-like headings without `<id>:` go to
+    `malformed`, repeated ids to `duplicates`; ids stay as written (consumers normalise them)."""
+    lines = text.splitlines()
+    unfenced = _unfenced_lines(text)
+    visible = {number for number, _ in unfenced}
+    headings: List[Tuple[int, int, str]] = []
+    for number, line in unfenced:
+        heading = PLAN_HEADING_RE.match(line)
+        if heading:
+            headings.append((number, len(heading.group("hashes")), line))
+    tasks: List[Dict[str, Any]] = []
+    malformed: List[Dict[str, Any]] = []
+    for position, (number, level, line) in enumerate(headings):
+        match = PLAN_TASK_HEADING_RE.match(line)
+        if not match:
+            if PLAN_TASKISH_RE.match(line):
+                malformed.append({"line": number, "text": line})
+            continue
+        end = next((later - 1 for later, later_level, later_line in headings[position + 1:]
+                    if later_level <= level or PLAN_TASK_HEADING_RE.match(later_line)), len(lines))
+        block = lines[number - 1:end]
+        while block and not block[-1].strip():
+            block.pop()
+        body = "\n".join(block) + "\n"
+        inner = range(number + 1, end + 1)
+        plain = [lines[n - 1] for n in inner if n in visible]
+        tasks.append({
+            "id": match.group("id"),
+            "title": match.group("title"),
+            "level": level,
+            "line_start": number,
+            "line_end": end,
+            "checkpoint": bool(PLAN_CHECKPOINT_RE.match(match.group("title"))),
+            "section": next((h_line for _, h_level, h_line in reversed(headings[:position]) if h_level < level), None),
+            "files": _plan_task_files(plain),
+            "refs": _plan_task_refs(plain),
+            "size_bytes": len(body.encode("utf-8")),
+            "code_lines": sum(1 for n in inner if n not in visible and not FENCE_RE.match(lines[n - 1])),
+            "sha1": hashlib.sha1(body.encode("utf-8")).hexdigest()[:8],
+        })
+    positions: Dict[str, List[int]] = {}
+    for task in tasks:
+        positions.setdefault(task["id"], []).append(task["line_start"])
+    duplicates = [{"id": task_id, "lines": found} for task_id, found in positions.items() if len(found) > 1]
+    return {"tasks": tasks, "malformed": malformed, "duplicates": duplicates}
+
+
 def parse_plan_header(text: str) -> Dict[str, Any]:
     """Settings in a plan header (lines before the first task heading): written only for old specs."""
     result: Dict[str, Any] = {"spec": None, "tier": None, "chain": None, "environments": [],
                               "backlog": None, "errors": [], "warnings": []}
+    parsed = parse_plan_tasks(text)
+    starts = [task["line_start"] for task in parsed["tasks"]] + [item["line"] for item in parsed["malformed"]]
+    first_task = min(starts) if starts else None
     in_env_block = False
     for number, line in _unfenced_lines(text):
-        if PLAN_TASK_RE.match(line):
+        if first_task is not None and number >= first_task:
             break
         where = f"line {number}"
         if PLAN_ENVIRONMENTS_RE.match(line):
@@ -726,6 +839,14 @@ def cmd_coverage(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         "unknown": unknown,
         "warnings": [f"unknown finding ids mentioned: {', '.join(unknown)}"] if unknown else [],
     }
+
+
+def cmd_plan_tasks(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    try:
+        text = _read_source(args.plan)
+    except InputError:
+        raise InputError(f"plan-unreadable: {args.plan}") from None
+    return 0, dict(ok=True, **parse_plan_tasks(text))
 
 
 def cmd_settings(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
@@ -2525,6 +2646,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_bl_sweep.add_argument("--section", required=True, help="goal section of BACKLOG.md")
     p_bl_sweep.add_argument("--journal", help="the section's chain journal, when the search finds several")
     p_bl_sweep.set_defaults(func=cmd_backlog_sweep)
+    p_plan_tasks = sub.add_parser("plan-tasks", help="tasks of a plan by the plan format contract (shared task parser)")
+    p_plan_tasks.add_argument("plan", help="plan or part file")
+    p_plan_tasks.set_defaults(func=cmd_plan_tasks)
     p_settings = sub.add_parser("settings", help="chain settings, environments and backlog by the single reading rule")
     p_settings.add_argument("file", help="spec, plan, roadmap or part file")
     p_settings.set_defaults(func=cmd_settings)

@@ -660,5 +660,140 @@ class JournalTest(unittest.TestCase):
                 self.assertIsNone(pt._journal_for(FIXTURE), module)
 
 
+class LocalTaskParserTest(unittest.TestCase):
+    """_local_plan_tasks: the fallback of plan_tool without plan-brainstorming, in the shared parser's shape."""
+
+    KEYS = ("id", "title", "line_start", "line_end", "checkpoint", "code_lines")
+
+    def test_local_parse_matches_the_shared_parser_on_the_reference_plan(self):
+        lines = pt._split_lines(VALID)
+        shared, local_used = pt._plan_tasks(VALID, lines)
+        local = pt._local_plan_tasks(lines)
+        self.assertFalse(local_used)
+        self.assertEqual([{k: t[k] for k in self.KEYS} for t in local["tasks"]],
+                         [{k: t[k] for k in self.KEYS} for t in shared["tasks"]])
+        self.assertEqual((local["malformed"], local["duplicates"]), ([], []))
+
+    def test_plan_tasks_without_the_parser(self):
+        for module in (None, object()):
+            with mock.patch.object(pt, "_load_brainstorm_tool", return_value=module):
+                parsed, local_used = pt._plan_tasks(VALID, pt._split_lines(VALID))
+            self.assertTrue(local_used)
+            self.assertEqual([t["id"] for t in parsed["tasks"]], ["1", "1.1", "2"])
+
+    def test_local_malformed_and_duplicates(self):
+        text = VALID.replace("### Task 1.1:", "### Task 1:").replace("### Task 2: Checkpoint", "### Task 2 Checkpoint")
+        local = pt._local_plan_tasks(pt._split_lines(text))
+        self.assertEqual(local["duplicates"], [{"id": "1", "lines": [17, 56]}])
+        self.assertEqual(local["malformed"], [{"line": 74, "text": "### Task 2 Checkpoint — flag works end to end"}])
+
+
+class CheckPlanSharedParserTest(unittest.TestCase):
+    """check_plan takes tasks and bodies from the shared parser; the fallback keeps the verdict."""
+
+    def test_fallback_keeps_the_result_and_warns(self):
+        shared = pt.check_plan(VALID)
+        with mock.patch.object(pt, "_load_brainstorm_tool", return_value=None):
+            local = pt.check_plan(VALID)
+        self.assertEqual((local["tasks"], local["errors"]), (shared["tasks"], shared["errors"]))
+        self.assertEqual([(t["id"], t["line"]) for t in shared["tasks"]], [("1", 17), ("1.1", 56), ("2", 74)])
+        self.assertIn("plan-brainstorming not installed alongside", local["warnings"])
+        self.assertNotIn("plan-brainstorming not installed alongside", shared["warnings"])
+
+    def test_fallback_keeps_the_error_texts(self):
+        for broken in (VALID.replace("### Task 1.1:", "### Task 1:"),
+                       VALID.replace("### Task 1.1:", "### Task A:"),
+                       VALID.replace("### Task 1.1: Document", "### Task 1.1 Document"),
+                       VALID.replace("### Task 2: Checkpoint", "### Phase Checkpoint")):
+            shared = pt.check_plan(broken)["errors"]
+            with mock.patch.object(pt, "_load_brainstorm_tool", return_value=None):
+                self.assertEqual(pt.check_plan(broken)["errors"], shared)
+
+    def test_heading_of_task_level_closes_the_body(self):
+        code = "\n".join(f"z{i} = {i}" for i in range(120))
+        text = VALID.rstrip("\n") + "\n\n### Notes\n\n```python\n" + code + "\n```\n"
+        self.assertFalse(any(w.startswith("Task 2:") for w in pt.check_plan(text)["warnings"]))
+        with mock.patch.object(pt, "_load_brainstorm_tool", return_value=None):
+            local = pt.check_plan(text)["warnings"]
+        self.assertTrue(any(w.startswith("Task 2: 120 lines") for w in local), local)
+
+
+TRICKY = os.path.join(HERE, "fixtures", "tricky-impl.md")
+CHAIN = os.path.abspath(os.path.join(HERE, "..", "..", "plan-chain-runner", "scripts", "chain_tool.py"))
+
+
+def _load_by_path(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@unittest.skipUnless(all(os.path.isfile(p) for p in (BRAINSTORM, EXECUTOR, RESOLVER, SPLITTER)),
+                     "pipeline skills not installed alongside")
+class TaskParserContractTest(unittest.TestCase):
+    """One task parser: every consumer sees the tasks of brainstorm_tool.parse_plan_tasks."""
+
+    FIXTURES = (FIXTURE, TRICKY)
+
+    def parsed(self, path):
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        return text, _load_by_path("brainstorm_tool", BRAINSTORM).parse_plan_tasks(text)
+
+    def test_fixtures_are_contract_plans(self):
+        for path in self.FIXTURES:
+            text, parsed = self.parsed(path)
+            self.assertTrue(parsed["tasks"], path)
+            self.assertEqual((parsed["malformed"], parsed["duplicates"]), ([], []), path)
+            self.assertEqual(pt.check_plan(text)["errors"], [], path)
+
+    def test_tricky_boundaries(self):
+        _, parsed = self.parsed(TRICKY)
+        self.assertEqual([(t["id"], t["level"], t["line_start"], t["line_end"]) for t in parsed["tasks"]],
+                         [("1", 3, 15, 40), ("1.1", 3, 41, 57), ("2", 3, 64, 80), ("3", 4, 81, 96), ("4", 3, 97, 105)])
+        self.assertEqual([t["refs"] for t in parsed["tasks"]], [[], ["1"], ["1", "1.1"], ["2"], []])
+
+    def test_plan_check_sees_the_same_headings(self):
+        for path in self.FIXTURES:
+            text, parsed = self.parsed(path)
+            self.assertEqual([(t["id"], t["line"]) for t in pt.check_plan(text)["tasks"]],
+                             [(t["id"], t["line_start"]) for t in parsed["tasks"]], path)
+
+    def test_executor_units_have_the_same_lines(self):
+        for path in self.FIXTURES:
+            _, parsed = self.parsed(path)
+            code, out = _run(EXECUTOR, "parse-tasks", path)
+            self.assertEqual(code, 0, out)
+            self.assertEqual([(u["id"], u["source"]["line_start"], u["source"]["line_end"]) for u in out["units"]],
+                             [("task-" + t["id"], t["line_start"], t["line_end"]) for t in parsed["tasks"]], path)
+
+    def test_resolver_census_sees_the_same_ids(self):
+        for path in self.FIXTURES:
+            _, parsed = self.parsed(path)
+            with tempfile.TemporaryDirectory() as tmp:
+                report = os.path.join(tmp, "x-impl-report-1.md")
+                with open(report, "w", encoding="utf-8") as fh:
+                    fh.write("# r\n\n## Основные стадии плана\n\n- ✅ 1 Task\n")
+                _, out = _run(RESOLVER, "task-census", path, report)
+            self.assertEqual(out["plan_ids"], [t["id"].lower() for t in parsed["tasks"]], path)
+
+    def test_splitter_counts_the_same_tasks(self):
+        splitter = _load_by_path("splitter_tool", SPLITTER)
+        for path in self.FIXTURES:
+            text, parsed = self.parsed(path)
+            self.assertEqual(splitter.count_tasks_in_original(text), len(parsed["tasks"]), path)
+
+    def test_chain_runner_counts_the_same_tasks(self):
+        if not os.path.isfile(CHAIN):
+            self.skipTest("plan-chain-runner not installed alongside")
+        chain = _load_by_path("chain_tool", CHAIN)
+        if not hasattr(chain, "_count_plan_tasks"):
+            self.skipTest("chain_tool._count_plan_tasks not implemented yet (spec plan-refactoring-01-1)")
+        for path in self.FIXTURES:
+            text, parsed = self.parsed(path)
+            self.assertEqual(chain._count_plan_tasks(text), len(parsed["tasks"]), path)
+
+
 if __name__ == "__main__":
     unittest.main()

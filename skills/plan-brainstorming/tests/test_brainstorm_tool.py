@@ -897,5 +897,148 @@ class NonUtf8InputTest(unittest.TestCase):
         self.assertIn("cannot read", str(ctx.exception))
 
 
+TASKS_PLAN = "\n".join([
+    "# P",
+    "",
+    "## Phase 1: Core",
+    "",
+    "### Task 1: Parser",
+    "",
+    FENCE + "markdown",
+    "## Task 9: not a task",
+    FENCE,
+    "",
+    "#### Step notes",
+    "",
+    "### Notes",
+    "",
+    "### Task 1.1: Docs",
+    "",
+    "## Phase 2: Next",
+    "",
+    "#### Задача 2: Checkpoint — smoke",
+    "",
+    "### Task: no id",
+    "### Task 3 title",
+    "### Task 2: Again",
+    "",
+])
+
+
+class PlanTasksTest(unittest.TestCase):
+    """parse_plan_tasks: the one parser of `### Task N: <title>` for every pipeline script."""
+
+    def test_boundaries_sections_and_levels(self):
+        parsed = ft.parse_plan_tasks(TASKS_PLAN)
+        self.assertEqual([(t["id"], t["level"], t["line_start"], t["line_end"]) for t in parsed["tasks"]],
+                         [("1", 3, 5, 12), ("1.1", 3, 15, 16), ("2", 4, 19, 20), ("2", 3, 23, 23)])
+        self.assertEqual([t["section"] for t in parsed["tasks"]],
+                         ["## Phase 1: Core", "## Phase 1: Core", "## Phase 2: Next", "## Phase 2: Next"])
+        self.assertEqual([t["checkpoint"] for t in parsed["tasks"]], [False, False, True, False])
+        self.assertEqual(parsed["tasks"][0]["title"], "Parser")
+
+    def test_malformed_and_duplicates(self):
+        parsed = ft.parse_plan_tasks(TASKS_PLAN)
+        self.assertEqual(parsed["malformed"], [{"line": 21, "text": "### Task: no id"},
+                                               {"line": 22, "text": "### Task 3 title"}])
+        self.assertEqual(parsed["duplicates"], [{"id": "2", "lines": [19, 23]}])
+
+    def test_subtask_right_after_task_ends_it(self):
+        parsed = ft.parse_plan_tasks("### Task 1: A\nbody\n### Task 1.1: B\nmore\n")
+        self.assertEqual([(t["id"], t["line_start"], t["line_end"]) for t in parsed["tasks"]],
+                         [("1", 1, 2), ("1.1", 3, 4)])
+
+    def test_plan_without_tasks(self):
+        self.assertEqual(ft.parse_plan_tasks("# Plan\n\n1. step\n"), {"tasks": [], "malformed": [], "duplicates": []})
+
+
+class PlanTaskBodyTest(unittest.TestCase):
+    def test_code_lines_count_lines_inside_fences(self):
+        parsed = ft.parse_plan_tasks(TASKS_PLAN)
+        self.assertEqual([t["code_lines"] for t in parsed["tasks"]], [1, 0, 0, 0])
+
+    def test_sha1_ignores_line_endings_and_trailing_blank_lines(self):
+        base = ft.parse_plan_tasks("### Task 1: A\nbody\n")["tasks"][0]
+        crlf = ft.parse_plan_tasks("### Task 1: A\r\nbody\r\n\r\n\r\n")["tasks"][0]
+        changed = ft.parse_plan_tasks("### Task 1: A\nbody!\n")["tasks"][0]
+        self.assertEqual((crlf["sha1"], crlf["size_bytes"]), (base["sha1"], base["size_bytes"]))
+        self.assertEqual(base["size_bytes"], len("### Task 1: A\nbody\n"))
+        self.assertRegex(base["sha1"], r"^[0-9a-f]{8}$")
+        self.assertNotEqual(changed["sha1"], base["sha1"])
+
+
+FILES_PLAN = "\n".join([
+    "### Task 1: Files and refs",
+    "",
+    "**Files:**",
+    "- Create: `src/parser.py`",
+    "- Modify: `src/app.py:4-6` (current state / change / preserve)",
+    "- Test: [test_parser.py](tests/test_parser.py)",
+    "- `notes.txt`",
+    "",
+    "**Preconditions:**",
+    "- Task 1.2 is done; Задача 3 тоже, Task 1.2 again.",
+    "",
+    "**Postconditions:**",
+    "- Task 7 is not a precondition.",
+    "",
+    "- [ ] **Step 1: Do it**",
+    "",
+    "- Modify: `outside.py` is not in the Files block",
+    "",
+])
+
+
+class PlanTaskFilesRefsTest(unittest.TestCase):
+    def test_files_follow_executor_rules(self):
+        task = ft.parse_plan_tasks(FILES_PLAN)["tasks"][0]
+        self.assertEqual(task["files"], [
+            {"path": "src/parser.py", "action": "create", "lines": None},
+            {"path": "src/app.py", "action": "modify", "lines": "4-6"},
+            {"path": "test_parser.py", "action": "test", "lines": None},
+            {"path": "notes.txt", "action": None, "lines": None},
+        ])
+
+    def test_refs_come_from_preconditions_only(self):
+        task = ft.parse_plan_tasks(FILES_PLAN)["tasks"][0]
+        self.assertEqual(task["refs"], ["1.2", "3"])
+
+    def test_task_without_blocks(self):
+        task = ft.parse_plan_tasks("### Task 2: Checkpoint — x\n\n**Done when:** ok\n")["tasks"][0]
+        self.assertEqual((task["files"], task["refs"]), ([], []))
+        self.assertEqual(list(task), ["id", "title", "level", "line_start", "line_end", "checkpoint", "section",
+                                      "files", "refs", "size_bytes", "code_lines", "sha1"])
+
+
+class PlanTasksCliTest(unittest.TestCase):
+    def test_cli_prints_the_parse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "x-impl.md")
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(TASKS_PLAN)
+            code, out = _run("plan-tasks", path)
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["tasks"], ft.parse_plan_tasks(TASKS_PLAN)["tasks"])
+        self.assertEqual(len(out["malformed"]), 2)
+
+    def test_cli_unreadable_plan_is_exit_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "missing-impl.md")
+            code, out = _run("plan-tasks", missing)
+            self.assertEqual((code, out), (2, {"ok": False, "errors": [f"plan-unreadable: {missing}"]}))
+            legacy = os.path.join(tmp, "cp1251-impl.md")
+            with open(legacy, "wb") as fh:
+                fh.write("### Task 1: Задача\n".encode("cp1251"))
+            code, out = _run("plan-tasks", legacy)
+            self.assertEqual((code, out["errors"]), (2, [f"plan-unreadable: {legacy}"]))
+
+    def test_header_ends_at_the_first_task_heading_malformed_included(self):
+        text = "# X\n\n**Spec:** x-spec.md\n\n### Task: no id\n\n**Backlog:** not-header\n\n### Task 1: A\n"
+        result = ft.parse_plan_header(text)
+        self.assertEqual((result["spec"], result["backlog"]), ("x-spec.md", None))
+        self.assertFalse(hasattr(ft, "PLAN_TASK_RE"))
+
+
 if __name__ == "__main__":
     unittest.main()

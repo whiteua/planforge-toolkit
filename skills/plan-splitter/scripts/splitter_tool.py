@@ -54,7 +54,9 @@ Stdlib only. Python 3.8+.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -508,8 +510,28 @@ def count_tasks_in_stage(text: str) -> int:
     return sum(1 for line in _lines_outside_fences(section) if re.match(r"^\d+\.\s+\S", line))
 
 
+@functools.lru_cache(maxsize=None)
+def _load_brainstorm_tool():
+    """plan-brainstorming's brainstorm_tool.py, loaded by path once per process (None when it is not
+    installed alongside). Tests swap it by replacing this function, which the cache does not affect."""
+    skills = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(skills, "plan-brainstorming", "scripts", "brainstorm_tool.py")
+    if not os.path.isfile(path):
+        return None
+    spec = importlib.util.spec_from_file_location("brainstorm_tool", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def count_tasks_in_original(text: str) -> int:
-    """Task/Задача headings when the plan has them; otherwise top-level numbered items outside fences."""
+    """Tasks of a contract plan by brainstorm_tool.parse_plan_tasks (no malformed task heading);
+    otherwise Task/Задача headings when the plan has them, else top-level numbered items outside fences."""
+    parse = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parse is not None:
+        parsed = parse(text)
+        if parsed["tasks"] and not parsed["malformed"]:
+            return len(parsed["tasks"])
     lines = _lines_outside_fences(text)
     headings = sum(1 for line in lines if re.match(r"^#{2,4}\s*(?:Task|Задача)\s+\S+?\s*(?:[:\-]|—|\.\s)", line))
     if headings:

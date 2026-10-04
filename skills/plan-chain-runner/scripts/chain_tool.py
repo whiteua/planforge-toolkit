@@ -88,8 +88,16 @@ def _text_metrics_text(path: str) -> str:
 
 
 def _count_plan_tasks(text: str) -> int:
-    """`### Task N:` / `### Задача N:` headings outside code fences (the local counter until the shared
-    task parser of plan-brainstorming exists)."""
+    """Tasks of a contract plan by brainstorm_tool.parse_plan_tasks (no malformed task heading); otherwise,
+    and without plan-brainstorming, `### Task N:` / `### Задача N:` headings outside code fences."""
+    try:
+        parse = getattr(_brainstorm(), "parse_plan_tasks", None)
+    except InputError:
+        parse = None
+    if parse is not None:
+        parsed = parse(text)
+        if parsed["tasks"] and not parsed["malformed"]:
+            return len(parsed["tasks"])
     return sum(1 for line, in_code in _fenced_lines(text.splitlines()) if not in_code and _STATS_TASK_RE.match(line))
 
 

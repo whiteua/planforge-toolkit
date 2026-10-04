@@ -83,6 +83,7 @@ class InputError(Exception):
 
 
 SETTINGS_MISSING = "settings-source-missing"
+BRAINSTORM_MISSING = "plan-brainstorming not installed alongside"
 
 
 def _load_brainstorm_tool():
@@ -126,7 +127,7 @@ def _plan_settings(plan_path: Optional[str]) -> Tuple[Optional[Dict[str, Any]], 
         return None, [], []
     tool = _load_brainstorm_tool()
     if tool is None:
-        return None, [], ["plan-brainstorming not installed alongside"]
+        return None, [], [BRAINSTORM_MISSING]
     try:
         settings = tool.resolve_settings(plan_path)
     except tool.InputError as exc:  # the spec at **Spec:** cannot be read (not UTF-8): a JSON error, exit 2
@@ -196,6 +197,38 @@ def _split_lines(text: str) -> List[Tuple[int, str, bool]]:
     return result
 
 
+def _local_plan_tasks(lines: List[Tuple[int, str, bool]]) -> Dict[str, Any]:
+    """Fallback without plan-brainstorming: task headings by TASK_HEADING_RE, a body that ends at the
+    next task heading or a `#`/`##` heading; the shape of brainstorm_tool.parse_plan_tasks."""
+    heads = [(n, line) for n, line, fenced in lines if not fenced and TASK_HEADING_RE.match(line)]
+    tasks: List[Dict[str, Any]] = []
+    for index, (start, line) in enumerate(heads):
+        stop = heads[index + 1][0] if index + 1 < len(heads) else len(lines) + 1
+        # A top-level heading ends the task (e.g. a closing section).
+        end = next((n - 1 for n, row, fenced in lines if start < n < stop and not fenced and TOP_HEADING_RE.match(row)),
+                   stop - 1)
+        match = TASK_HEADING_RE.match(line)
+        tasks.append({"id": match.group("id"), "title": match.group("title"), "line_start": start, "line_end": end,
+                      "checkpoint": bool(CHECKPOINT_TITLE_RE.match(match.group("title"))),
+                      "code_lines": sum(1 for n, row, fenced in lines
+                                        if start < n <= end and fenced and not FENCE_RE.match(row))})
+    malformed = [{"line": n, "text": line} for n, line, fenced in lines
+                 if not fenced and TASKISH_HEADING_RE.match(line) and not TASK_HEADING_RE.match(line)]
+    positions: Dict[str, List[int]] = {}
+    for task in tasks:
+        positions.setdefault(task["id"], []).append(task["line_start"])
+    duplicates = [{"id": task_id, "lines": found} for task_id, found in positions.items() if len(found) > 1]
+    return {"tasks": tasks, "malformed": malformed, "duplicates": duplicates}
+
+
+def _plan_tasks(text: str, lines: List[Tuple[int, str, bool]]) -> Tuple[Dict[str, Any], bool]:
+    """Tasks by the shared parser brainstorm_tool.parse_plan_tasks; (fallback result, True) without it."""
+    parse = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parse is None:
+        return _local_plan_tasks(lines), True
+    return parse(text), False
+
+
 def detect_lang_text(text: str) -> str:
     """`ru` when more than 5% of the letters are Cyrillic, otherwise `en` (no letters -> `en`)."""
     letters = [ch for ch in text if ch.isalpha()]
@@ -210,11 +243,10 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
     errors: List[str] = []
     warnings: List[str] = []
     lines = _split_lines(text)
+    parsed, local = _plan_tasks(text, lines)
 
     # Header: everything before the first task heading.
-    first_task_line = next(
-        (n for n, line, fenced in lines if not fenced and TASK_HEADING_RE.match(line)), None
-    )
+    first_task_line = parsed["tasks"][0]["line_start"] if parsed["tasks"] else None
     header = {}
     for number, line, fenced in lines:
         if first_task_line is not None and number >= first_task_line:
@@ -268,36 +300,26 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
     elif tier not in TIERS:
         errors.append(f"unknown tier '{tier}' (allowed: {', '.join(TIERS)})")
 
-    # Task boundaries.
-    tasks: List[Dict[str, Any]] = []
-    for number, line, fenced in lines:
-        if fenced:
-            continue
-        match = TASK_HEADING_RE.match(line)
-        if match:
-            task_id = match.group("id")
-            title = match.group("title")
-            if not TASK_ID_RE.match(task_id):
-                errors.append(f"line {number}: task id '{task_id}' must be N or N.M")
-            tasks.append({
-                "id": task_id,
-                "title": title,
-                "line": number,
-                "checkpoint": bool(CHECKPOINT_TITLE_RE.match(title)),
-            })
-        elif OLD_CHECKPOINT_RE.match(line):
-            errors.append(f"line {number}: use '### Task N: Checkpoint — <what it proves>' instead of 'Phase Checkpoint'")
-        elif TASKISH_HEADING_RE.match(line):
-            errors.append(f"line {number}: malformed task heading, expected '### Task N: <title>': {line}")
+    # Task boundaries: brainstorm_tool.parse_plan_tasks (the shared parser), else _local_plan_tasks.
+    if local and BRAINSTORM_MISSING not in warnings:
+        warnings.append(BRAINSTORM_MISSING)
+    tasks: List[Dict[str, Any]] = [
+        {"id": t["id"], "title": t["title"], "line": t["line_start"], "end": t["line_end"],
+         "checkpoint": t["checkpoint"], "code_lines": t["code_lines"]}
+        for t in parsed["tasks"]
+    ]
+    heading_errors = [(t["line"], f"line {t['line']}: task id '{t['id']}' must be N or N.M")
+                      for t in tasks if not TASK_ID_RE.match(t["id"])]
+    heading_errors += [(n, f"line {n}: use '### Task N: Checkpoint — <what it proves>' instead of 'Phase Checkpoint'")
+                       for n, line, fenced in lines if not fenced and OLD_CHECKPOINT_RE.match(line)]
+    heading_errors += [(m["line"], f"line {m['line']}: malformed task heading, expected '### Task N: <title>': {m['text']}")
+                       for m in parsed["malformed"]]
+    errors.extend(message for _, message in sorted(heading_errors, key=lambda item: item[0]))
     if not tasks:
         errors.append("no task headings found ('### Task N: <title>')")
-
-    seen: Dict[str, int] = {}
-    for task in tasks:
-        if task["id"] in seen:
-            errors.append(f"line {task['line']}: duplicate task id {task['id']} (first at line {seen[task['id']]})")
-        else:
-            seen[task["id"]] = task["line"]
+    repeats = [(n, f"line {n}: duplicate task id {d['id']} (first at line {d['lines'][0]})")
+               for d in parsed["duplicates"] for n in d["lines"][1:]]
+    errors.extend(message for _, message in sorted(repeats, key=lambda item: item[0]))
 
     if tier == "Quick" and any(task["checkpoint"] for task in tasks):
         errors.append("checkpoint tasks are not used on the Quick tier")
@@ -315,18 +337,8 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
     line_counts: Dict[str, Optional[int]] = {}
     created: set = set()
     oversized: List[str] = []
-    for index, task in enumerate(tasks):
-        start = task["line"]
-        end = tasks[index + 1]["line"] if index + 1 < len(tasks) else None
-        body = [
-            (n, line, fenced) for n, line, fenced in lines
-            if n > start and (end is None or n < end)
-        ]
-        # A top-level heading ends the task (e.g. a closing section).
-        for position, (n, line, fenced) in enumerate(body):
-            if not fenced and TOP_HEADING_RE.match(line):
-                body = body[:position]
-                break
+    for task in tasks:
+        body = [(n, line, fenced) for n, line, fenced in lines if task["line"] < n <= task["end"]]
         plain = [line for _, line, fenced in body if not fenced]
         label = f"Task {task['id']}"
 
@@ -445,7 +457,7 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
                 errors.append(f"line {n}: malformed size line, expected '**Size:** <N> lines — <reason>': {line.strip()}")
         if sized:
             oversized.append(task["id"])
-        code_lines = sum(1 for _, line, fenced in body if fenced and not FENCE_RE.match(line))
+        code_lines = task["code_lines"]
         if code_lines > MAX_CODE_LINES_ERROR and not sized:
             errors.append(
                 f"{label}: {code_lines} lines of code (limit {MAX_CODE_LINES}, error above {MAX_CODE_LINES_ERROR}) "
@@ -483,7 +495,7 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
         "tier": tier,
         "lang": lang,
         "environments": environments,
-        "tasks": [{k: task.get(k, []) for k in ("id", "title", "checkpoint", "external")} for task in tasks],
+        "tasks": [{k: task.get(k, []) for k in ("id", "title", "line", "checkpoint", "external")} for task in tasks],
         "settings": settings,
         "task_count": task_count,
         "plan_bytes": plan_bytes,

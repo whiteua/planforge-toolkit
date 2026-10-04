@@ -550,6 +550,14 @@ The agent hands its findings to the tool as JSON; the tool renders the review fi
 
 ---
 
+### Shared task parser
+
+`brainstorm_tool.py plan-tasks` (`parse_plan_tasks`) is the one parser of plan tasks: for each `### Task N: <title>` outside code fences it returns the id, title, 1-based line range (a task ends at the next task heading or a heading of its level or higher), the `**Files:**` entries, the task ids named in `**Preconditions:**`, the body's size, code line count and SHA-1, plus malformed and duplicate headings. `plan-check`, the executor's units, the resolver's `task-census`, the splitter's task count and the runner's `run-stats` read this result, so every stage sees the same tasks and boundaries; plans outside the contract and installations without `plan-brainstorming` keep each script's own parser. A contract test in `plan-writing/tests` runs all consumers on a reference plan and a fixture of tricky cases.
+
+**Used in:** `plan-brainstorming`, `plan-writing`, `plan-executor`, `plan-resolver`, `plan-splitter`, `plan-chain-runner`
+
+---
+
 ### Size budgets
 
 One plan's budget is 40 tasks or 150000 bytes, defined once as `SIZE_BUDGET` in `brainstorm_tool.py`. Before a plan exists, `spec-check` estimates a spec's volume (`estimate_tasks = Components items × tier factor 1/2/3 + Testing Strategy items`), and `plan-brainstorming` shows the estimate in the Chain Settings message and proposes several specs of one goal above the budget. After the plan is written, `plan-check` returns `size_class` (`small`/`medium`/`large`) and the warning `plan-oversized`; `plan-writing`'s hand-off advises decomposition instead of a task-count split rule, and in a chain the warning rides on the `writing` event and the runner prints it as one progress line without stopping. Every later stage costs in proportion to the plan's size, so the budget is checked where it is still cheap to change the scope. A contract test keeps the fallback in `plan_tool.py` and the splitter gate's thresholds equal to `SIZE_BUDGET`.

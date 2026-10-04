@@ -286,14 +286,61 @@ def _task_weight(plan_weight, title, section_text):
     return plan_weight
 
 
+def _contract_tasks(text):
+    """The plan's tasks by plan-brainstorming's shared parser (brainstorm_tool.parse_plan_tasks).
+
+    None when the parser is not installed alongside, when the plan has no contract task heading,
+    or when a task-like heading breaks the contract (malformed): those plans keep the local parse."""
+    parse = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parse is None:
+        return None
+    parsed = parse(text)
+    if not parsed["tasks"] or parsed["malformed"]:
+        return None
+    return parsed
+
+
+def _contract_units(plan_path, text, parsed):
+    """Units `task-<id>` of a contract plan; parallel_group from the nearest Phase/Stage section."""
+    if parsed["duplicates"]:
+        first = min(parsed["duplicates"], key=lambda item: item["lines"][1])
+        raise ToolError(f"duplicate-unit-id: task-{first['id']}", 2)
+    lines = text.splitlines()
+    weight = _plan_weight(text)
+    path = str(Path(plan_path).resolve())
+    units = []
+    group = None
+    for task in parsed["tasks"]:
+        section = _TASK_RE.match(task["section"] or "")
+        if section and section.group(2).lower() in _GROUP_KEYWORDS:
+            group = f"{section.group(2).lower()}-{section.group(3)}"
+        body = "\n".join(lines[task["line_start"] - 1:task["line_end"]])
+        units.append(
+            {
+                "id": f"task-{task['id']}",
+                "title": task["title"],
+                "weight": _task_weight(weight, task["title"], body),
+                "depends": [units[-1]["id"]] if units else [],
+                "parallel_group": group,
+                "source": {"path": path, "line_start": task["line_start"], "line_end": task["line_end"]},
+            }
+        )
+    return {"units": units}
+
+
 def parse_tasks(plan_path):
     """Extract execution units from a whole plan.
 
-    If the plan has `Task`/`Задача` headings, only those are units: `Phase`/`Stage`
-    headings become their parallel_group and `Step` headings are ignored. Otherwise
-    every recognised heading is a unit. Units run strictly in document order.
+    A plan in the plan format contract (`### Task N: <title>`) takes its units from the shared
+    parser of plan-brainstorming (`_contract_tasks`). Otherwise: if the plan has `Task`/`Задача`
+    headings, only those are units: `Phase`/`Stage` headings become their parallel_group and
+    `Step` headings are ignored; without them every recognised heading is a unit. Units run
+    strictly in document order.
     """
     text = _read_text(plan_path)
+    parsed = _contract_tasks(text)
+    if parsed is not None:
+        return _contract_units(plan_path, text, parsed)
     lines = text.splitlines()
     headings = list(_headings(lines))
     matches = []

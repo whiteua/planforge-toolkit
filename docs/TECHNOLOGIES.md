@@ -180,6 +180,7 @@ The full skill pipeline (`brainstorming → writing → [splitter] → executor 
 | DO-178C | RTCA, 2012 | Immutable traceability, formal gates, independent audit |
 | Terraform workflow | HashiCorp, 2014 | Immutable plan, state ledger, confirmation gates |
 | MetaGPT | Tsinghua University, 2023 | Multi-agent pipeline with role specialisation and structured artifacts |
+| Single source of truth for a format | Don't Repeat Yourself (Hunt & Thomas, 1999); consumer-driven contract tests (Pact, 2013) | `parse_plan_tasks` in `brainstorm_tool.py` is the one parser of plan tasks; plan-check, the executor, the resolver, the splitter and the runner read its result, and a contract test holds them equal |
 
 ---
 

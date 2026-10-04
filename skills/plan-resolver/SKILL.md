@@ -30,23 +30,26 @@ report; the plan is never modified. Committing is not the resolver's job: its ga
 
 ## Modes
 
-The mode is the last argument when it is `fix`, `next` or `auto` (`auto` takes an optional cycle
-limit, default `2`).
+The mode is the last argument when it is `fix`, `next`, `auto` or `full` (`auto` takes an optional
+cycle limit, default `2`).
 
 | Call | Mode |
 |---|---|
 | `<plan> [reports...]` | **audit**: one audit pass; list the plan first, then earlier reports in order |
+| `<plan> [reports...] full` | **audit**, always a full pass: `bootstrap … --full` (`pass_type: subsequent-full`); the closing pass after `full-audit-required` (FIX-LOOP.md) |
 | `[<plan>] fix` / `[<plan>] next` | one FIX → AUDIT cycle, then stop |
 | `<plan> auto [limit]` | AUDIT → FIX → AUDIT … until `-final` or the limit |
 
-`fix`/`next`/`auto` start with `TOOL discover` (FIX-LOOP.md, "Start"), which builds the report
-list; without a plan path, `fix`/`next` take the plan from the conversation or the single plan
-with an open last report.
+`fix`/`next`/`auto`, and `full` without listed reports, start with `TOOL discover` (FIX-LOOP.md,
+"Start"), which builds the report list (`full` passes `plans_list` to `bootstrap … --full`, so
+`/plan-resolver <plan> full` audits after the last report); without a plan path, `fix`/`next` take
+the plan from the conversation or the single plan with an open last report.
 
 ```text
 /plan-resolver docs/plan-impl.md docs/plan-impl-report-1.md
 /plan-resolver docs/plan-impl.md fix
 /plan-resolver docs/plan-impl.md auto
+/plan-resolver docs/plan-impl.md docs/plan-impl-report-1.md docs/plan-impl-report-2.md full
 ```
 
 ## Tool
@@ -65,20 +68,28 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
 
 ## AUDIT phase (summary; WORKFLOW.md is authoritative)
 
-1. `TOOL bootstrap <workspace-root> <plan> [reports...]`: exit `64` means the plan is closed;
-   say so and write nothing. Copy `report_header` into the report frontmatter as is.
+1. `TOOL bootstrap <workspace-root> <plan> [reports...]`, with `--full` after the reports when the
+   user's last argument is `full`: exit `64` means the plan is closed; say so and write nothing.
+   Copy `report_header` into the report frontmatter as is (`audit_scope: full`, `audit_tasks: all`).
 2. `TOOL preflight <plan-dir> <next-open-name> <next-final-name>`: on failure stop before auditing.
    Then the journal start (WORKFLOW.md, Chain journal): stage `audit` → `running`.
 3. Start fingerprint: `TOOL fingerprint-workspace <workspace-root> <start-json>` (temp file outside
    the workspace).
-4. One audit pass (AUDIT.md): `first` over the plan, or `subsequent` over the last report plus a
-   full re-scan of the plan. Every closed item and every issue carries an evidence anchor
+4. One audit pass (AUDIT.md) by `bootstrap.pass_type`: `first` over the whole plan;
+   `subsequent` → `TOOL rescan-scope <plan> <last-report> --snapshot <start-json>` decides:
+   `incremental` → `TOOL carry-forward` writes the new report's draft (closed lines copied by the
+   script) and the pass re-audits only its `<!-- reaudit -->` tasks, read by their plan line
+   ranges, and its `<!-- re-verify -->` issues; `full` → the whole plan against the last report,
+   as `subsequent-full` always does. Every closed item and every issue carries an evidence anchor
    `path#Lx-Ly` that points at real code; probes are read-only.
-5. Report name: `-final` only when there are no issues and every task is `✅` or
-   `not-applicable`; otherwise the open name.
-6. Write exactly one new report (never overwrite an existing one). Defects outside the plan go
-   into its Additional Context and are recorded after step 9 (AUDIT.md, "Defects outside the
-   plan").
+5. Report name: `-final` only after a full pass (`audit_scope: full`) with no open issue and every
+   task `✅` or `not-applicable`. An incremental pass that closes everything keeps the open name
+   with `consecutive_open_invocations: 0`, and `cycle-check` asks for a full pass
+   (`full-audit-required`). Otherwise the open name.
+6. Write exactly one new report (never overwrite an existing one; an incremental pass fills the
+   draft `carry-forward` wrote), then `TOOL evidence-fingerprint <report> --snapshot <start-json>
+   --plan <plan>` (again after any later rewrite of the report). Defects outside the plan go into
+   its Additional Context and are recorded after step 9 (AUDIT.md, "Defects outside the plan").
 7. `TOOL task-census <plan> <report>`: exit `1` → add the uncovered tasks to the same report.
 8. `TOOL validate-report <report> --root <workspace-root> --plan <plan>`: one rewrite of the same
    report is allowed to fix it; copy every `[WARNING]` line into the report's validator-warnings section.
@@ -87,9 +98,11 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
    when it lies inside the workspace root). Drift → rewrite the same report
    with the single blocker issue `probe-mutated-workspace`, run only the validator again, stop OPEN.
    Then the journal end (WORKFLOW.md, Chain journal): `journal-finding` per defect outside the
-   plan, `journal-event` stage `audit` `done` with the report's status, `journal-export-findings`.
+   plan, `journal-event` stage `audit` `done` with the report's status and scope,
+   `journal-export-findings`.
 10. Human gate: report path, status, counts, next action (audit mode with open issues: suggest
-    `/plan-resolver <plan> fix`). Inside `fix`/`next`/`auto` the gate is printed once, when the
+    `/plan-resolver <plan> fix`; an incremental report with nothing open: suggest
+    `/plan-resolver <plan> full`). Inside `fix`/`next`/`auto` the gate is printed once, when the
     loop stops (FIX-LOOP.md, "Stop and human gate"), not after every audit. If `bootstrap.stuck_open.ask_required` is true and the report
     stayed open, say that five audits in a row ended open and ask how to proceed instead of
     proposing another pass. Every gate also names the commit: `/plan-executor <plan> commit`

@@ -8,6 +8,7 @@ re-audit (the plan is never modified).
 
 ```
 /plan-resolver <plan-path> [report-1-path] [report-2-path] ...   # audit
+/plan-resolver <plan-path> [report-1-path] ... full                # audit, always a full pass (closes after an incremental one)
 /plan-resolver [plan-path] fix                                     # one fix → re-audit cycle
 /plan-resolver [plan-path] next                                    # same as fix; continue after auto stops
 /plan-resolver <plan-path> auto [limit]                            # audit → fix → audit loop, limit default 2
@@ -22,6 +23,9 @@ re-audit (the plan is never modified).
 
 # Second pass — list previous reports in order for delta analysis
 /plan-resolver docs/plans/plan01-impl.md docs/plans/plan01-impl-report-1.md
+
+# Closing full pass after an incremental one (cycle-check: full-audit-required)
+/plan-resolver docs/plans/plan01-impl.md docs/plans/plan01-impl-report-1.md docs/plans/plan01-impl-report-2.md full
 
 # Fix the issues of the latest open report, then re-audit (reports discovered automatically)
 /plan-resolver docs/plans/plan01-impl.md fix
@@ -44,6 +48,7 @@ the reports are discovered next to the plan.
 | Previous reports | No | Audit mode: earlier report files in order |
 | `fix` / `next` | No | Fix the latest open report's issues in code, then re-audit once |
 | `auto [limit]` | No | Loop audit → fix → audit until `-final` or `limit` fix cycles (default 2) |
+| `full` | No | Audit mode, last token: a full pass even where `rescan-scope` would choose an incremental one; after an incremental pass only a full one may write `-final` |
 
 ## What Happens
 
@@ -52,12 +57,13 @@ Audit pass
 1. BOOTSTRAP      — validate the plan and reports, next report number (exit 64: plan already closed)
 2. PREFLIGHT      — the report file can be created; the chain journal marks the audit stage running
 3. FINGERPRINT    — workspace snapshot before the audit
-4. AUDIT          — trace every task and known issue to real code lines (read-only probes allowed)
-5. WRITE REPORT   — exactly one new report; defects outside the plan go to its Additional Context
-6. CENSUS + VALIDATE — every plan task covered; structure, statuses and evidence anchors verified against the code
-7. ASSERT-READONLY — nothing but the report and BACKLOG.md changed
-8. JOURNAL        — defects outside the plan → journal + BACKLOG.md (journal-finding); audit stage done with the report's status; <goal>-followups.json rewritten
-9. NEXT ACTION    — status, counts, suggested command; the commit command /plan-executor <plan> commit
+4. SCOPE          — later passes: rescan-scope compares the last report's evidence fingerprint with the snapshot → incremental or full
+5. AUDIT          — full: trace every task and known issue to real code lines; incremental: carry-forward drafts the report and only the tasks on changed evidence, open tasks and open issues are re-audited (read-only probes allowed)
+6. WRITE REPORT   — exactly one new report; defects outside the plan go to its Additional Context; evidence-fingerprint adds the hashes of its evidence files
+7. CENSUS + VALIDATE — every plan task covered; structure, statuses and evidence anchors verified against the code
+8. ASSERT-READONLY — nothing but the report and BACKLOG.md changed
+9. JOURNAL        — defects outside the plan → journal + BACKLOG.md (journal-finding); audit stage done with the report's status and scope; <goal>-followups.json rewritten
+10. NEXT ACTION   — status, counts, suggested command; the commit command /plan-executor <plan> commit
 
 Fix cycle (fix / next / auto)
 1. DISCOVER       — reports of the plan; closed → stop, none → audit first
@@ -66,8 +72,9 @@ Fix cycle (fix / next / auto)
 4. FIX            — minimal code changes per issue (applied / needs-user / skipped)
 5. DIFF           — changed files from the snapshot diff, plan and reports untouched; recorded as the audit's fix_files in the journal
 6. MARK-FIX       — outcome per issue in the report's Fix Log
-7. AUDIT          — subsequent pass → next report
-8. CYCLE-CHECK    — complete / ask-user / stop-stalled / stop-limit / continue (auto)
+7. AUDIT          — subsequent pass (incremental when the evidence allows, in the same session) → next report
+8. CYCLE-CHECK    — complete / full-audit-required / ask-user / stop-stalled / stop-limit / continue (auto)
+9. FULL PASS      — after full-audit-required: auto runs the closing full pass (a fresh subagent when available) while cycles remain; fix/next name /plan-resolver <plan> full
 ```
 
 Code changes stay uncommitted in the working tree for your review. The resolver never commits:
@@ -79,7 +86,7 @@ Code changes stay uncommitted in the working tree for your review. The resolver 
 | File | When | Meaning |
 |---|---|---|
 | `<base>-report-N.md` | issues or open tasks remain | open report |
-| `<base>-report-N-final.md` | every task ✅/not-applicable, no open issues | closing report |
+| `<base>-report-N-final.md` | after a full pass: every task ✅/not-applicable, no open issues | closing report |
 
 ## Task Statuses
 
@@ -118,6 +125,10 @@ the read-only check); never delegates fixes to other skills.
 | `auto` stopped: ask-user | Remaining issues need a decision | Answer, update the plan if needed, re-run |
 | `auto` stopped: stop-stalled | A cycle closed nothing | Check the Fix Log; fix manually |
 | `auto` stopped: stop-limit | Issues remain after the limit | Review, then `/plan-resolver next` |
+| `use-full-pass` from `carry-forward` | `rescan-scope` chose a full pass (plan changed, old report, too many tasks touched) | Audit the whole plan; there is no draft |
+| `unfilled placeholder` | A `<!-- reaudit -->` or `<!-- re-verify -->` marker is left in an incremental report | Fill the stub or re-verify the issue |
+| `final report requires a full pass` | `-final` written after an incremental pass | Keep the report open; run the full pass (`full`) |
+| `snapshot-root-mismatch` | The snapshot was taken of another workspace | Fingerprint this workspace |
 
 ## Pipeline Position
 

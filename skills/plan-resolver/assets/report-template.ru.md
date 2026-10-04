@@ -8,6 +8,8 @@ consecutive_open_invocations: {{consecutive_open_invocations}}
 previous_report_path: {{previous_report_path}}
 previous_report_sha256: {{previous_report_sha256}}
 language: ru
+audit_scope: {{audit_scope}}
+audit_tasks: {{audit_tasks}}
 ---
 # Отчет о выполнении плана {{audit_iteration}}
 
@@ -26,3 +28,7 @@ language: ru
 ## Задача
 
 {{task}}
+
+## Отпечаток улик
+
+{{evidence_fingerprint}}

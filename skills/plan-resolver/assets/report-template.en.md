@@ -8,6 +8,8 @@ consecutive_open_invocations: {{consecutive_open_invocations}}
 previous_report_path: {{previous_report_path}}
 previous_report_sha256: {{previous_report_sha256}}
 language: en
+audit_scope: {{audit_scope}}
+audit_tasks: {{audit_tasks}}
 ---
 # Plan Implementation Report {{audit_iteration}}
 
@@ -26,3 +28,7 @@ language: en
 ## Task
 
 {{task}}
+
+## Evidence fingerprint
+
+{{evidence_fingerprint}}

@@ -386,6 +386,8 @@ Cheap, exact operations (file parsing, counting, hashing, shell probes) run as C
 
 A hash of all relevant workspace files is taken at the start of a pass and asserted again at the end. Any file mutation during a nominally read-only operation, other than the explicitly allowed outputs (the resolver's report and appended lines of `BACKLOG.md`), fails the `assert-readonly` check immediately. This catches accidental writes by the agent itself, not just intentional mutations.
 
+The resolver also writes the SHA-256 of its evidence files into every report (`## Evidence fingerprint`: the files its anchors and the plan tasks' `Files` name), taken from the audit's start snapshot. The next pass compares that table with its own snapshot (`rescan-scope`) and re-audits only the tasks whose evidence changed, plus open tasks and the tasks of open issues; the closed lines of the other tasks are copied by script (`carry-forward`). A changed plan, an older report without the table or more than half of the tasks touched give a full pass, and only a full pass may close the plan with `-final`.
+
 **Used in:** `plan-resolver` (`plan-splitter` hashes only the source plan and the part files to detect drift)
 
 ---
@@ -400,7 +402,7 @@ Before a resolver report is accepted, a tool parses the plan and extracts every 
 
 ### Evidence anchors (`path#Lx-Ly`)
 
-Every `✅` verdict in a resolver report must be backed by a concrete code reference in `path#Lx-Ly` format, and `validate-report --root` checks that the file exists and the line range is inside it, for closed tasks and for issue evidence alike: a report that cites code that is not there is invalid. On subsequent passes, the agent re-reads the referenced lines before reusing an anchor; if the lines have shifted or the content changed, the anchor is treated as stale and the verdict is re-derived from fresh evidence.
+Every `✅` verdict in a resolver report must be backed by a concrete code reference in `path#Lx-Ly` format, and `validate-report --root` checks that the file exists and the line range is inside it, for closed tasks and for issue evidence alike: a report that cites code that is not there is invalid. On subsequent passes, the agent re-reads the referenced lines before reusing an anchor; if the lines have shifted or the content changed, the anchor is treated as stale and the verdict is re-derived from fresh evidence. An incremental pass carries an anchor over without re-reading it only while the file's hash in the evidence fingerprint is unchanged; an anchor on a changed file sends its task to the re-audit.
 
 **Used in:** `plan-resolver`
 

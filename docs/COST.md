@@ -109,6 +109,17 @@ with a third of the cross-checks, and the reviews' output shrinks from the first
 resolver's issue counts on the next goals (`quality`) show whether the quality held. Spec 7 (skeleton)
 records the skeleton's share of the plan here (expected ≤ 45 % on `fix-03`).
 
+Spec 6 (incremental resolver) is judged the same way: on goals with two or more resolver passes and on
+output tokens. With one FIX cycle the incremental audit after the fix comes on top of the closing full
+pass, so the input is not lower than today's single full audit after FIX; the input saving starts with
+the second cycle (`auto` with several cycles, repeated `fix`/`next`). The output drops at once: the
+model writes only the re-audited lines and `carry-forward` copies the rest (on `fix-03` the stages
+section of report 1 is about 53 KB). The reads model counts an incremental report as the plan's header
+plus the tasks of `audit_tasks` plus every file of its evidence table; on `fix-03` that table names 54
+files of 1.34 MB, more than the plan (551 KB), so until the model counts only the changed files
+(BACKLOG, section `plan-refactoring-01`) `bytes_read_est` overstates an incremental pass, and the
+comparison uses `bytes_written` and the output tokens.
+
 ## How to compare
 
 1. Before a change: `run-stats <journal> --json-out before.json` on a finished run of a reference

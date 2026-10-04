@@ -23,6 +23,9 @@ def render(template: str, language: str) -> str:
         "{{consecutive_open_invocations}}": "0",
         "{{previous_report_path}}": "null",
         "{{previous_report_sha256}}": "null",
+        "{{audit_scope}}": "full",
+        "{{audit_tasks}}": "all",
+        "{{evidence_fingerprint}}": "| File | SHA-256 |\n|---|---|\n| src/app.py | " + "c" * 64 + " |",
         "{{plan_stages}}": "- ✅ 1. Bootstrap implemented evidence_anchor: src/app.py#L1-L9"
         if language == "en"
         else "- ✅ 1. Bootstrap реализован evidence_anchor: src/app.py#L1-L9",
@@ -57,6 +60,9 @@ class TemplateContractTests(unittest.TestCase):
                 data = json.loads(process.stdout)
                 self.assertEqual(process.returncode, 0, data)
                 self.assertTrue(data["valid"])
+                self.assertEqual(data["warnings"], [])  # audit_scope is in the frontmatter
+                heading = "## Evidence fingerprint" if language == "en" else "## Отпечаток улик"
+                self.assertIn(f"\n{heading}\n\n| File | SHA-256 |\n", rendered)
 
 
 if __name__ == "__main__":

@@ -290,12 +290,15 @@ In a chain, the preset and the stop policy come from the `Chain` setting of the 
 **Invoke:**
 ```
 /plan-resolver <plan-path> [previous-report-1] [previous-report-2] ...   # audit
+/plan-resolver <plan-path> [previous-report-1] ... full   # audit, always a full pass (closes after an incremental one)
 /plan-resolver [plan-path] fix     # fix the latest open report's issues, then re-audit once
 /plan-resolver [plan-path] next    # same as fix; use after auto stops
 /plan-resolver <plan-path> auto [limit]   # audit → fix → audit until final, max 2 fix cycles by default
 ```
 
 In audit mode, always provide the full list of previous reports for delta analysis. `fix`/`next`/`auto` discover the reports next to the plan. The fix phase records each outcome (`applied` / `needs-user` / `skipped`) in the report's "Fix Log" section; only the following audit can mark an issue `✅ fixed`. Code changes are left uncommitted: the files the fix phase changed are recorded in the chain journal (`fix_files`), and the closing gate names `/plan-executor <plan> commit` to commit them with the run. The resolver itself never runs a git command that changes anything.
+
+**Incremental re-audit.** Every report ends with an evidence fingerprint: the SHA-256 of each file its anchors and the plan tasks' `Files` name, taken at the start of the audit. The next pass (`rescan-scope`) re-audits only the tasks whose evidence changed, the tasks not yet `✅` and the tasks of open issues; `carry-forward` copies the other lines of the last report by script, so the agent reads only those tasks (by their plan line ranges) and the changed code. A changed plan, an older report without a fingerprint or more than half of the tasks touched give a full pass. An incremental pass never writes `-final`: when it closes everything, a full pass follows (in `auto` by a fresh subagent when the host has them; by hand `/plan-resolver <plan> <reports…> full`).
 
 **Report types:**
 
@@ -314,7 +317,7 @@ In audit mode, always provide the full list of previous reports for delta analys
 | ‼️ | Deviates from the plan |
 | `not-applicable` | Explanatory item, nothing to implement |
 
-**Invariants:** The resolver never edits the plan. An audit pass never edits code or previous reports and creates exactly one report (plus appended lines in `BACKLOG.md` for defects outside the plan; `assert-readonly` allows only these two paths), validated with `validate-report --root` (structure, statuses, anchors pointing at real lines) and `task-census` (every plan task covered). The fix phase edits code only; previous reports change only through the Fix Log (`mark-fix`). With `read=run` in the settings, tasks marked `External (read)` are re-checked by the audit itself instead of being closed on the executor's record.
+**Invariants:** The resolver never edits the plan. An audit pass never edits code or previous reports and creates exactly one report (plus appended lines in `BACKLOG.md` for defects outside the plan; `assert-readonly` allows only these two paths), validated with `validate-report --root` (structure, statuses, anchors pointing at real lines) and `task-census` (every plan task covered). The fix phase edits code only; previous reports change only through the Fix Log (`mark-fix`). With `read=run` in the settings, tasks marked `External (read)` are re-checked by the audit itself instead of being closed on the executor's record. Every report carries its evidence fingerprint (`evidence-fingerprint`), and only a full pass may write `-final`.
 
 **Prerequisites:** Python ≥ 3.8 in PATH.
 

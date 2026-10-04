@@ -1061,5 +1061,692 @@ class SharedTaskParserTests(unittest.TestCase):
         self.assertEqual(module.extract_plan_task_ids(text), ["a", "1", "2"])
 
 
+def load_resolver():
+    """resolver_tool.py as a module (the script is not a package)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("resolver_tool", str(TOOL))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class StubLineTests(unittest.TestCase):
+    """carry-forward stubs (`- 12.1 Title <!-- reaudit -->`) keep their id and title for the census and the validator."""
+
+    def test_html_comments_do_not_hide_the_id_or_the_title(self) -> None:
+        module = load_resolver()
+        self.assertEqual(module.extract_stage_id("  - 12.1 Child <!-- reaudit -->"), "12.1")
+        self.assertEqual(module.extract_stage_id("- <!-- reaudit --> 40. Title"), "40")
+        self.assertEqual(module.clean_stage_title("- 40. Title <!-- reaudit -->", ""), "Title")
+        self.assertEqual(module.clean_stage_title("  - 12.1 Child <!-- reaudit -->", ""), "Child")
+        self.assertEqual(module.SECTION_ALIASES["evidence"], ("## Отпечаток улик", "## Evidence fingerprint"))
+
+
+def scoped_report(fields: str, final: bool = False) -> str:
+    """valid_report with frontmatter lines added after `language` (e.g. audit_scope, audit_tasks)."""
+    return valid_report(final=final).replace("language: ru\n", "language: ru\n" + fields)
+
+
+class AuditScopeFieldTests(unittest.TestCase):
+    """audit_scope / audit_tasks in the frontmatter (spec 6): validated, optional for old reports."""
+
+    def validate(self, name: str, text: str, *extra: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / name
+            write(report, text)
+            write(Path(tmp) / "main-plan.md", "### Task 1: A\n\n### Task 1.1: B\n\n### Task 2: C\n")
+            args = [arg.replace("{plan}", str(Path(tmp) / "main-plan.md")) for arg in extra]
+            return read_json(run_tool("validate-report", str(report), *args))
+
+    def test_old_report_without_fields_is_valid_and_read_as_full(self) -> None:
+        data = self.validate("main-plan-report-1.md", valid_report())
+        self.assertTrue(data["valid"], data)
+        self.assertIn("[WARNING] audit_scope is missing: the report is read as a full pass", data["warnings"])
+
+    def test_scope_and_task_forms(self) -> None:
+        for fields in ("audit_scope: full\naudit_tasks: all\n", "audit_scope: incremental\naudit_tasks: [1, 1.1]\n",
+                       "audit_scope: incremental\naudit_tasks: []\n"):
+            data = self.validate("main-plan-report-1.md", scoped_report(fields), "--plan", "{plan}")
+            self.assertTrue(data["valid"], (fields, data))
+            self.assertFalse(any("audit_scope" in w for w in data["warnings"]), data)
+        data = self.validate("main-plan-report-1.md", scoped_report("audit_scope: partial\n"))
+        self.assertIn("audit_scope must be full or incremental", data["errors"])
+        for tasks in ("1, 2", "[1, x y]", "[1;2]"):
+            data = self.validate("main-plan-report-1.md", scoped_report(f"audit_scope: incremental\naudit_tasks: {tasks}\n"))
+            self.assertIn("audit_tasks must be all or a list of task ids like [7, 8, 12.1]", data["errors"], tasks)
+
+    def test_audit_tasks_must_name_plan_tasks(self) -> None:
+        text = scoped_report("audit_scope: incremental\naudit_tasks: [1, 9, 1.1]\n")
+        data = self.validate("main-plan-report-1.md", text, "--plan", "{plan}")
+        self.assertIn("audit_tasks names tasks the plan does not have: 9", data["errors"])
+        self.assertTrue(self.validate("main-plan-report-1.md", text)["valid"])  # without --plan ids are not checked
+
+    def test_incremental_without_tasks_warns(self) -> None:
+        data = self.validate("main-plan-report-1.md", scoped_report("audit_scope: incremental\n"))
+        self.assertTrue(data["valid"], data)
+        self.assertIn(
+            "[WARNING] audit_scope: incremental without audit_tasks: run-stats counts this pass as full", data["warnings"]
+        )
+
+    def test_open_incremental_report_without_issues_and_zero_counter_is_valid(self) -> None:
+        # everything closed after an incremental pass: an open report (not -final) with the counter reset
+        text = scoped_report("audit_scope: incremental\naudit_tasks: [1]\n", final=True)
+        self.assertIn("consecutive_open_invocations: 0", text)
+        data = self.validate("main-plan-report-2.md", text)
+        self.assertTrue(data["valid"], data)
+
+
+class FinalReportScopeTests(unittest.TestCase):
+    """`-final` only after a full pass: an incremental pass never closes the plan."""
+
+    def test_final_report_requires_a_full_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-2-final.md"
+            write(report, scoped_report("audit_scope: incremental\naudit_tasks: [1]\n", final=True))
+            data = read_json(run_tool("validate-report", str(report)))
+            self.assertIn("final report requires a full pass (audit_scope: full)", data["errors"])
+            write(report, scoped_report("audit_scope: full\naudit_tasks: all\n", final=True))
+            data = read_json(run_tool("validate-report", str(report)))
+            self.assertTrue(data["valid"], data)
+
+
+EVIDENCE_OK = (
+    "\n## Отпечаток улик\n\n| File | SHA-256 |\n|---|---|\n"
+    f"| src/app.py | {'c' * 64} |\n| notes/local.md | excluded |\n| src/gone.py | missing |\n"
+)
+
+
+class PlaceholderAndEvidenceRowTests(unittest.TestCase):
+    """validate-report rejects unfilled carry-forward markers and malformed evidence rows."""
+
+    def validate(self, text: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-2.md"
+            write(report, text)
+            return read_json(run_tool("validate-report", str(report)))
+
+    def test_unfilled_stub_and_unverified_issue_are_errors(self) -> None:
+        stub = valid_report().replace(
+            "- ✅ 1. Подготовка evidence_anchor: src/app.py#L1-L3", "- 1. Подготовка <!-- reaudit -->"
+        )
+        data = self.validate(stub)
+        self.assertIn("unfilled placeholder <!-- reaudit -->: 1 left", data["errors"])
+        reverify = valid_report().replace("| Невыполненный контракт\n", "| Невыполненный контракт <!-- re-verify -->\n")
+        data = self.validate(reverify)
+        self.assertIn("unfilled placeholder <!-- re-verify -->: 1 left", data["errors"])
+
+    def test_evidence_rows(self) -> None:
+        data = self.validate(valid_report() + EVIDENCE_OK)
+        self.assertTrue(data["valid"], data)
+        for bad in (f"| src/app.py | {'c' * 63} |", "| src/app.py | changed |", "{{evidence_fingerprint}}", "| | missing |"):
+            data = self.validate(valid_report() + EVIDENCE_OK + bad + "\n")
+            self.assertTrue(any(e.startswith("evidence fingerprint row is malformed") and bad in e for e in data["errors"]), (bad, data))
+
+
+INC_PLAN = (
+    "# Plan\n\n"
+    "### Task 1: Alpha\n\n**Files:**\n- Modify: `src/a.py`\n- Test: `tests/test_a.py`\n\n"
+    "### Task 2: Beta\n\n**Files:**\n- Modify: `src/b.py`\n- Modify: `src/c.py`\n\n"
+    "### Task 2.1: Beta docs\n\n**Files:**\n- Modify: `docs/b.md`\n- Modify: `B.lang`\n\n"
+    "### Task 3: Checkpoint — suite\n\n- [ ] **Step 1:** Run: `pytest`\n\n**Done when:** green\n"
+)
+INC_FILES = {
+    "src/a.py": "a1\na2\n",
+    "src/b.py": "b1\nb2\n",
+    "src/c.py": "c1\n",
+    "tests/test_a.py": "t1\n",
+    "docs/b.md": "d1\n",
+    ".gitignore": "notes/\n",
+    "notes/n.md": "local notes\n",
+}
+INC_STAGES = (
+    "- ✅ 1. Alpha evidence_anchor: src/a.py#L1-L2\n"
+    "  - evidence_anchor: tests/test_a.py#L1-L1\n"
+    "- ✅ 2. Beta evidence_anchor: src/b.py#L1-L2\n"
+    "  - ✅ 2.1 Beta docs evidence_anchor: docs/b.md#L1-L1\n"
+    "- ✅ 3. Checkpoint — suite\n"
+    "  - evidence_probe: pytest → exit 0"
+)
+INC_ISSUE = (
+    "1) Ошибка 1: ⭕️ not-fixed | high | Beta breaks\n- **level**: high\n- **status**: ⭕️ not-fixed\n"
+    "- **title**: Beta breaks\n- **linked_items**: 1\n- **origin**: new\n- **evidence**: src/a.py#L2-L2\n"
+    f"- **description**: {LONG_DESCRIPTION}\n- **recommendations**: Исправить Alpha."
+)
+
+
+def inc_report(plan_sha: str, stages: str = INC_STAGES, issues: str = "Ошибок не найдено.", tail: str = "") -> str:
+    """An open first report of INC_PLAN with the pass fields of spec 6."""
+    return (
+        "---\nmaster_plan_path: main-plan.md\n"
+        f"master_plan_sha256: {plan_sha}\nmaster_plan_size: 1\naudited_at: 2026-10-04T10:00:00Z\n"
+        "audit_iteration: 1\nconsecutive_open_invocations: 1\nprevious_report_path: null\n"
+        "previous_report_sha256: null\nlanguage: ru\naudit_scope: full\naudit_tasks: all\n---\n"
+        "# Отчет о выполнении плана 1\n\n## Основные стадии плана\n\n"
+        f"{stages}\n\n## Список ошибок\n\n{issues}\n\n## Задача\n\nПроверить Alpha.\n{tail}"
+    )
+
+
+class EvidenceFileHelperTests(unittest.TestCase):
+    """Which files are evidence: anchors per stage item and Files per plan task."""
+
+    def test_anchor_files_per_stage_item_and_plan_files_per_task(self) -> None:
+        module = load_resolver()
+        self.assertEqual(module.anchor_path("`src/a.py#L1-L2"), "src/a.py")
+        self.assertEqual(module.anchor_path("src\\a.py#L3"), "src/a.py")
+        self.assertEqual(
+            module.stage_anchor_paths(inc_report("a" * 64)),
+            {"1": ["src/a.py", "tests/test_a.py"], "2": ["src/b.py"], "2.1": ["docs/b.md"], "3": []},
+        )
+        self.assertEqual(
+            module.plan_task_files(INC_PLAN),
+            {"1": ["src/a.py", "tests/test_a.py"], "2": ["src/b.py", "src/c.py"], "2.1": ["docs/b.md", "B.lang"], "3": []},
+        )
+        module._load_brainstorm_tool = lambda: None
+        self.assertIsNone(module.plan_task_files(INC_PLAN))
+
+
+class IncrementalFixture:
+    """A workspace with INC_PLAN, its files and an open first report; snapshots live in a second temp dir."""
+
+    def make(self, tmp: str, snaps: str, stages: str = INC_STAGES, issues: str = "Ошибок не найдено.", tail: str = ""):
+        root = Path(tmp)
+        write(root / "main-plan.md", INC_PLAN)
+        for rel, body in INC_FILES.items():
+            write(root / rel, body)
+        report = root / "main-plan-report-1.md"
+        write(report, inc_report(sha256(root / "main-plan.md"), stages, issues, tail))
+        start = Path(snaps) / "start.json"
+        process = run_tool("fingerprint-workspace", str(root), str(start))
+        assert process.returncode == 0, process.stdout
+        return root, report, start
+
+
+class EvidenceValueTests(IncrementalFixture, unittest.TestCase):
+    """The value of an evidence file: its SHA-256 in the snapshot, `excluded` or `missing`."""
+
+    def test_evidence_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, _report, start = self.make(tmp, snaps)
+            module = load_resolver()
+            files = json.loads(start.read_text(encoding="utf-8"))["files"]
+            self.assertEqual(module.evidence_value("src/a.py", files, str(root)), sha256(root / "src" / "a.py"))
+            self.assertEqual(module.evidence_value("notes/n.md", files, str(root)), "excluded")
+            self.assertEqual(module.evidence_value("src/ghost.py", files, str(root)), "missing")
+
+
+class EvidenceTableTests(IncrementalFixture, unittest.TestCase):
+    """Evidence files of a report: stage anchors, issue evidence and the plan tasks' Files."""
+
+    def test_table_covers_anchors_issue_evidence_and_plan_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, start = self.make(tmp, snaps, issues=INC_ISSUE)
+            module = load_resolver()
+            snapshot = json.loads(start.read_text(encoding="utf-8"))
+            table, warnings = module.evidence_table(report.read_text(encoding="utf-8"), INC_PLAN, snapshot)
+            self.assertEqual(sorted(table), ["docs/b.md", "src/a.py", "src/b.py", "src/c.py", "tests/test_a.py"])
+            self.assertEqual(table["src/c.py"], sha256(root / "src" / "c.py"))  # only in a Files block
+            self.assertNotIn("B.lang", table)  # a Files token that names no file is not evidence
+            self.assertEqual(warnings, [])
+
+    def test_excluded_and_missing_files(self) -> None:
+        stages = INC_STAGES.replace("docs/b.md#L1-L1", "notes/n.md#L1-L1").replace("src/b.py#L1-L2", "src/ghost.py#L1-L2")
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            _root, report, start = self.make(tmp, snaps, stages=stages)
+            module = load_resolver()
+            snapshot = json.loads(start.read_text(encoding="utf-8"))
+            table, warnings = module.evidence_table(report.read_text(encoding="utf-8"), INC_PLAN, snapshot)
+            self.assertEqual((table["notes/n.md"], table["src/ghost.py"]), ("excluded", "missing"))
+            self.assertIn("evidence-excluded (outside the snapshot): notes/n.md", warnings)
+
+    def test_without_the_task_parser_only_anchors_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            _root, report, start = self.make(tmp, snaps)
+            module = load_resolver()
+            module._load_brainstorm_tool = lambda: None
+            snapshot = json.loads(start.read_text(encoding="utf-8"))
+            table, warnings = module.evidence_table(report.read_text(encoding="utf-8"), INC_PLAN, snapshot)
+            self.assertNotIn("src/c.py", table)
+            self.assertTrue(any(w.startswith("plan-files-unavailable") for w in warnings), warnings)
+
+
+class EvidenceSectionTests(unittest.TestCase):
+    """The evidence section: rendered in the report's language, replaced whole, placed before the Fix Log."""
+
+    def test_render_and_place_the_section(self) -> None:
+        module = load_resolver()
+        section = module.render_evidence_section({"src/a.py": "c" * 64, "notes/n.md": "excluded"}, ru=True)
+        self.assertEqual(
+            section,
+            "## Отпечаток улик\n\n| File | SHA-256 |\n|---|---|\n| src/a.py | " + "c" * 64 + " |\n| notes/n.md | excluded |\n",
+        )
+        english = module.render_evidence_section({}, ru=False)
+        self.assertEqual(english, "## Evidence fingerprint\n\n| File | SHA-256 |\n|---|---|\n")
+        report = "# R\n\n## Задача\n\nX.\n"
+        appended = module.put_evidence_section(report, section)
+        self.assertEqual(appended, report + "\n" + section)
+        self.assertEqual(module.put_evidence_section(appended, english), report + "\n" + english)
+        log = "## Журнал исправлений\n\n- Ошибка 1: applied\n"
+        placed = module.put_evidence_section(report + "\n" + log, section)
+        self.assertEqual(placed, report + "\n" + section + "\n" + log)
+        self.assertEqual(module.put_evidence_section(placed, section), placed)
+
+
+class EvidenceFingerprintCommandTests(IncrementalFixture, unittest.TestCase):
+    """`evidence-fingerprint <report> --snapshot <start> --plan <plan>` writes the section in place."""
+
+    def run_evidence(self, report: Path, start: Path, plan: Path) -> subprocess.CompletedProcess:
+        return run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan", str(plan))
+
+    def test_section_is_appended_then_replaced_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, start = self.make(tmp, snaps)
+            process = self.run_evidence(report, start, root / "main-plan.md")
+            data = read_json(process)
+            self.assertEqual(process.returncode, 0, data)
+            self.assertEqual((data["file_count"], data["excluded"], data["missing"]), (5, [], []))
+            text = report.read_text(encoding="utf-8")
+            self.assertTrue(text.endswith(f"| tests/test_a.py | {sha256(root / 'tests' / 'test_a.py')} |\n"), text)
+            self.assertIn("\n## Отпечаток улик\n\n| File | SHA-256 |\n|---|---|\n| docs/b.md | ", text)
+            self.assertEqual(self.run_evidence(report, start, root / "main-plan.md").returncode, 0)
+            self.assertEqual(report.read_text(encoding="utf-8"), text)  # replaced, not appended twice
+            self.assertTrue(read_json(run_tool("validate-report", str(report), "--root", str(root)))["valid"])
+
+    def test_english_report_and_crlf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, start = self.make(tmp, snaps)
+            report.write_bytes(report.read_bytes().replace(b"language: ru", b"language: en").replace(b"\n", b"\r\n"))
+            self.assertEqual(self.run_evidence(report, start, root / "main-plan.md").returncode, 0)
+            raw = report.read_bytes()
+            self.assertIn(b"\r\n## Evidence fingerprint\r\n", raw)
+            self.assertEqual(raw.count(b"\r\n"), raw.count(b"\n"))
+
+    def test_bad_snapshot_is_exit_two(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps, tempfile.TemporaryDirectory() as other:
+            root, report, _start = self.make(tmp, snaps)
+            foreign = Path(snaps) / "other.json"
+            self.assertEqual(run_tool("fingerprint-workspace", other, str(foreign)).returncode, 0)
+            process = self.run_evidence(report, foreign, root / "main-plan.md")
+            self.assertEqual(process.returncode, 2, process.stdout)
+            self.assertTrue(read_json(process)["errors"][0].startswith("snapshot-root-mismatch"))
+            self.assertEqual(self.run_evidence(report, root / "main-plan.md", root / "main-plan.md").returncode, 2)
+
+
+class RescanHelperTests(unittest.TestCase):
+    """Helpers of rescan-scope: the evidence table of a report, parents, linked items, stub titles."""
+
+    def test_helpers(self) -> None:
+        module = load_resolver()
+        self.assertEqual(module.parse_evidence_table(valid_report() + EVIDENCE_OK),
+                         {"src/app.py": "c" * 64, "notes/local.md": "excluded", "src/gone.py": "missing"})
+        self.assertIsNone(module.parse_evidence_table(valid_report()))
+        self.assertEqual((module.parent_ids("12.1.3"), module.parent_ids("7")), (["12.1", "12"], []))
+        self.assertEqual(module.linked_ids("Task 16, 16.1; `2`, 99", ["2", "16", "16.1"]), ["16", "16.1", "2"])
+        item = {"title": "Alpha done evidence_anchor: src/a.py#L1-L2 confidence: high"}
+        self.assertEqual(module.stub_title(item), "Alpha done")
+
+
+class RescanScopeTests(IncrementalFixture, unittest.TestCase):
+    """rescan_scope: tasks to audit again from the last report's evidence fingerprint and the start snapshot."""
+
+    def scope(self, stages: str = INC_STAGES, issues: str = "Ошибок не найдено.", change=(), remove=(), plan_edit: str = "",
+              ratio: float = 0.5, fingerprint: bool = True) -> dict:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, start = self.make(tmp, snaps, stages=stages, issues=issues)
+            plan = root / "main-plan.md"
+            if fingerprint:
+                self.assertEqual(run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan", str(plan)).returncode, 0)
+            if plan_edit:
+                write(plan, INC_PLAN + plan_edit)
+            snapshot = json.loads(start.read_text(encoding="utf-8"))
+            for path in change:  # the file changed after the last report: another hash in this audit's start snapshot
+                snapshot["files"][path] = "0" * 64
+            for path in remove:  # the file is gone
+                del snapshot["files"][path]
+            return load_resolver().rescan_scope(str(plan), str(report), snapshot, ratio)
+
+    def test_nothing_changed_reaudits_only_the_probe_closed_checkpoint(self) -> None:
+        data = self.scope()
+        self.assertEqual((data["scope"], data["reason"]), ("incremental", "1 of 4 tasks touched"))
+        self.assertEqual((data["reaudit"], data["carry"]), (["3"], ["1", "2", "2.1"]))
+        self.assertEqual((data["changed_files"], data["missing_files"], data["plan_sha_changed"]), ([], [], False))
+
+    def test_a_changed_anchor_file_reaudits_its_task_and_the_parent(self) -> None:
+        data = self.scope(change=["docs/b.md"])
+        self.assertEqual(data["changed_files"], ["docs/b.md"])
+        self.assertEqual((data["reaudit"], data["carry"]), (["2", "2.1", "3"], ["1"]))
+        self.assertEqual(data["audit_tasks"], ["2", "2.1", "3"])
+        self.assertEqual(data["titles"], {"2": "Beta", "2.1": "Beta docs", "3": "Checkpoint — suite"})
+        self.assertEqual(data["line_ranges"], {"2": [9, 14], "2.1": [15, 20], "3": [21, 25]})
+
+    def test_a_file_named_only_in_the_plan_files_counts(self) -> None:
+        self.assertEqual(self.scope(change=["src/c.py"])["reaudit"], ["2", "3"])
+        data = self.scope(remove=["tests/test_a.py"])
+        self.assertEqual((data["missing_files"], data["reaudit"]), (["tests/test_a.py"], ["1", "3"]))
+
+    def test_open_items_linked_items_and_unverified_evidence(self) -> None:
+        stages = INC_STAGES.replace("- ✅ 2.1 Beta docs", "- ⚠️ 2.1 Beta docs").replace("docs/b.md#L1-L1", "notes/n.md#L1-L1")
+        data = self.scope(stages=stages, issues=INC_ISSUE)
+        self.assertEqual(data["reaudit"], ["1", "2", "2.1", "3"])
+        self.assertEqual(data["unverified_files"], ["notes/n.md"])
+        self.assertEqual(data["issues"], [{"id": 1, "status": "not-fixed", "linked_items": ["1"]}])
+        self.assertEqual((data["scope"], data["reason"]), ("full", "ratio"))  # 4 of 4 > 0.5
+
+    def test_full_scope_reasons(self) -> None:
+        data = self.scope(plan_edit="\n### Task 4: Gamma\n\n**Files:**\n- Modify: `src/c.py`\n")
+        self.assertEqual((data["scope"], data["reason"], data["plan_sha_changed"]), ("full", "plan-changed", True))
+        self.assertIn("4", data["reaudit"])  # a task new in the plan
+        self.assertEqual(self.scope(fingerprint=False)["reason"], "no-evidence-fingerprint")
+        self.assertEqual(self.scope(ratio=0.2)["reason"], "ratio")  # 1 of 4 > 0.2
+        self.assertEqual(self.scope(change=["src/b.py"])["reaudit"], ["2", "3"])  # a parent does not pull its children
+        self.assertEqual(self.scope(change=["src/b.py", "docs/b.md"])["reason"], "ratio")  # 3 of 4 > 0.5
+        data = self.scope(change=["src/b.py", "docs/b.md"], ratio=0.75)
+        self.assertEqual((data["scope"], data["reaudit"]), ("incremental", ["2", "2.1", "3"]))  # 3 of 4 <= 0.75
+
+
+class RescanScopeCommandTests(IncrementalFixture, unittest.TestCase):
+    """`rescan-scope <plan> <last_report> --snapshot <start> [--ratio]`: JSON on stdout, exit 2 on bad input."""
+
+    def test_cli_output_and_input_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps, tempfile.TemporaryDirectory() as other:
+            root, report, start = self.make(tmp, snaps)
+            plan = root / "main-plan.md"
+            self.assertEqual(run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan", str(plan)).returncode, 0)
+            process = run_tool("rescan-scope", str(plan), str(report), "--snapshot", str(start))
+            data = read_json(process)
+            self.assertEqual(process.returncode, 0, data)
+            self.assertEqual((data["scope"], data["reaudit"], data["ratio"]), ("incremental", ["3"], 0.5))
+            self.assertEqual((data["last_report"], data["root"]), (os.path.abspath(str(report)), os.path.abspath(tmp)))
+            foreign = Path(snaps) / "other.json"
+            self.assertEqual(run_tool("fingerprint-workspace", other, str(foreign)).returncode, 0)
+            process = run_tool("rescan-scope", str(plan), str(report), "--snapshot", str(foreign))
+            self.assertEqual(process.returncode, 2, process.stdout)
+            self.assertTrue(read_json(process)["errors"][0].startswith("snapshot-root-mismatch"))
+            self.assertEqual(run_tool("rescan-scope", str(plan), str(report), "--snapshot", str(plan)).returncode, 2)
+            self.assertEqual(run_tool("rescan-scope", str(plan), str(report), "--snapshot", str(start), "--ratio", "0").returncode, 2)
+            self.assertEqual(run_tool("rescan-scope", str(plan), str(root / "nope.md"), "--snapshot", str(start)).returncode, 2)
+
+
+class CarryStageLinesTests(unittest.TestCase):
+    """carry_stage_lines: closed lines copied by the script, a stub where the audit must write again."""
+
+    def test_carried_lines_are_byte_for_byte_and_stubs_keep_the_indent(self) -> None:
+        module = load_resolver()
+        titles = {"2": "Beta", "2.1": "Beta docs", "3": "Checkpoint — suite"}
+        body, carried = module.carry_stage_lines(inc_report("a" * 64), ["2", "2.1", "3"], titles)
+        self.assertEqual(
+            body,
+            "- ✅ 1. Alpha evidence_anchor: src/a.py#L1-L2\n"
+            "  - evidence_anchor: tests/test_a.py#L1-L1\n"
+            "- 2. Beta <!-- reaudit -->\n"
+            "  - 2.1 Beta docs <!-- reaudit -->\n"
+            "- 3. Checkpoint — suite <!-- reaudit -->",
+        )  # the detail line `evidence_probe: pytest` of re-audited task 3 is not carried
+        self.assertEqual(carried, 1)
+
+    def test_unknown_tasks_are_appended_and_json_inputs_are_read(self) -> None:
+        module = load_resolver()
+        titles = {"3": "Checkpoint — suite", "4": "Gamma", "4.1": "Gamma docs"}
+        body, _carried = module.carry_stage_lines(inc_report("a" * 64), ["3", "4", "4.1"], titles)
+        self.assertTrue(body.endswith(
+            "- 3. Checkpoint — suite <!-- reaudit -->\n- 4. Gamma <!-- reaudit -->\n  - 4.1 Gamma docs <!-- reaudit -->"
+        ), body)
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, data in (("bom.json", "﻿{\"x\": 1}".encode("utf-8")), ("utf16.json", json.dumps({"x": 1}).encode("utf-16"))):
+                (Path(tmp) / name).write_bytes(data)
+                self.assertEqual(module.load_json_input(str(Path(tmp) / name)), {"x": 1})
+
+
+FIXED_ISSUE = INC_ISSUE.replace("1) Ошибка 1: ⭕️ not-fixed", "1) Ошибка 1: ✅ fixed").replace(
+    "- **status**: ⭕️ not-fixed", "- **status**: ✅ fixed"
+)
+OPEN_ISSUE_2 = INC_ISSUE.replace("1) Ошибка 1:", "2) Ошибка 2:").replace("Beta breaks", "Docs stale")
+CARRY_TAIL = (
+    "\n## Предупреждения валидатора\n\n- [WARNING] something — принято\n"
+    "\n## Отпечаток улик\n\n| File | SHA-256 |\n|---|---|\n| src/a.py | " + "c" * 64 + " |\n"
+    "\n## Журнал исправлений\n\n- Ошибка 2: applied | files: docs/b.md\n"
+)
+
+
+class CarryIssueBlocksTests(unittest.TestCase):
+    """carry_issue_blocks: every issue block with its number; open ones marked for re-verification."""
+
+    def test_issue_blocks_keep_their_numbers_and_open_ones_are_marked(self) -> None:
+        text = inc_report("a" * 64, issues=FIXED_ISSUE + "\n\n" + OPEN_ISSUE_2, tail=CARRY_TAIL)
+        body, reverify = load_resolver().carry_issue_blocks(text)
+        self.assertTrue(body.startswith("1) Ошибка 1: ✅ fixed | high | Beta breaks\n"), body)
+        self.assertIn("\n\n2) Ошибка 2: ⭕️ not-fixed | high | Docs stale <!-- re-verify -->\n", body)
+        self.assertIn("- **title**: Docs stale\n", body)  # the title cycle-check matches stays as it was
+        self.assertTrue(body.endswith("- **recommendations**: Исправить Alpha."), body)
+        self.assertEqual(reverify, [2])
+
+
+CARRY_HEADER = {
+    "master_plan_path": "main-plan.md",
+    "master_plan_sha256": "a" * 64,
+    "master_plan_size": 1,
+    "audited_at": "2026-10-04T11:00:00Z",
+    "audit_iteration": 2,
+    "consecutive_open_invocations_if_open": 2,
+    "consecutive_open_invocations_if_final": 0,
+    "previous_report_path": "main-plan-report-1.md",
+    "previous_report_sha256": "b" * 64,
+    "language": "ru",
+    "audit_scope": "full",
+    "audit_tasks": "all",
+}
+
+
+class CarryForwardDraftTests(unittest.TestCase):
+    """carry_forward_draft: frontmatter from bootstrap.report_header, stages, issues, stub sections."""
+
+    def draft(self, reaudit, titles, audit_tasks):
+        text = inc_report("a" * 64, issues=FIXED_ISSUE + "\n\n" + OPEN_ISSUE_2, tail=CARRY_TAIL)
+        scope = {"scope": "incremental", "reaudit": reaudit, "titles": titles, "audit_tasks": audit_tasks}
+        return load_resolver().carry_forward_draft(text, scope, CARRY_HEADER)
+
+    def test_frontmatter_and_title_from_the_header(self) -> None:
+        draft, summary = self.draft(["2", "2.1", "3"], {"2": "Beta", "2.1": "Beta docs", "3": "Checkpoint — suite"}, ["2", "2.1", "3"])
+        self.assertTrue(draft.startswith(
+            "---\nmaster_plan_path: main-plan.md\nmaster_plan_sha256: " + "a" * 64 + "\nmaster_plan_size: 1\n"
+            "audited_at: 2026-10-04T11:00:00Z\naudit_iteration: 2\nconsecutive_open_invocations: 2\n"
+            "previous_report_path: main-plan-report-1.md\nprevious_report_sha256: " + "b" * 64 + "\nlanguage: ru\n"
+            "audit_scope: incremental\naudit_tasks: [2, 2.1, 3]\n---\n\n# Отчет о выполнении плана 2\n\n"
+            "## Основные стадии плана\n\n- ✅ 1. Alpha"
+        ), draft)
+        self.assertEqual((summary["carried"], summary["stubs"], summary["reverify_issues"]), (1, 3, [2]))
+
+    def test_sections_of_the_draft(self) -> None:
+        draft, _summary = self.draft(["3"], {"3": "Checkpoint — suite"}, ["3"])
+        self.assertIn("- 3. Checkpoint — suite <!-- reaudit -->\n\n## Список ошибок\n\n1) Ошибка 1: ✅ fixed", draft)
+        self.assertIn("Docs stale <!-- re-verify -->\n", draft)
+        self.assertTrue(draft.endswith(
+            "## Дополнительный контекст\n\n<!-- reaudit -->\n\n## Задача\n\n<!-- reaudit -->\n"
+        ), draft)
+        for section in ("## Предупреждения валидатора", "## Отпечаток улик", "## Журнал исправлений", "Проверить Alpha."):
+            self.assertNotIn(section, draft)
+
+
+class CarryForwardSetup(IncrementalFixture):
+    """A first report with its evidence, the rescan-scope result and a bootstrap header in the snapshot dir."""
+
+    def prepare(self, tmp: str, snaps: str):
+        root, report, start = self.make(tmp, snaps)
+        plan = root / "main-plan.md"
+        self.assertEqual(run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan", str(plan)).returncode, 0)
+        scope = read_json(run_tool("rescan-scope", str(plan), str(report), "--snapshot", str(start)))
+        scope_json, header_json = Path(snaps) / "scope.json", Path(snaps) / "header.json"
+        write(scope_json, json.dumps(scope))
+        write(header_json, json.dumps(dict(CARRY_HEADER, master_plan_sha256=sha256(plan))))
+        return root, report, scope, scope_json, header_json
+
+    def carry(self, report: Path, scope_json: Path, header_json: Path, out: Path) -> subprocess.CompletedProcess:
+        return run_tool("carry-forward", str(report), "--scope", str(scope_json), "--header", str(header_json), "--out", str(out))
+
+
+class CarryForwardCommandTests(CarryForwardSetup, unittest.TestCase):
+    """`carry-forward <last_report> --scope <json> --header <json> --out <draft>` writes the draft once."""
+
+    def test_writes_the_draft_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, _scope, scope_json, header_json = self.prepare(tmp, snaps)
+            out = root / "main-plan-report-2.md"
+            process = self.carry(report, scope_json, header_json, out)
+            data = read_json(process)
+            self.assertEqual(process.returncode, 0, data)
+            self.assertEqual((data["carried"], data["stubs"], data["audit_tasks"]), (3, 1, ["3"]))
+            self.assertIn("- 3. Checkpoint — suite <!-- reaudit -->\n", out.read_text(encoding="utf-8"))
+            process = self.carry(report, scope_json, header_json, out)
+            self.assertEqual(process.returncode, 2)  # reports are immutable
+            self.assertTrue(read_json(process)["errors"][0].startswith("report-exists"))
+
+    def test_accepts_the_bootstrap_result_utf16_json_and_keeps_crlf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, scope, _scope_json, header_json = self.prepare(tmp, snaps)
+            report.write_bytes(report.read_bytes().replace(b"\n", b"\r\n"))
+            utf16 = Path(snaps) / "scope16.json"
+            utf16.write_bytes(json.dumps(scope).encode("utf-16"))  # PowerShell `>` writes UTF-16 with a BOM
+            write(header_json, json.dumps({"valid": True, "report_header": CARRY_HEADER}))
+            out = root / "main-plan-report-2.md"
+            process = self.carry(report, utf16, header_json, out)
+            self.assertEqual(process.returncode, 0, process.stdout)
+            raw = out.read_bytes()
+            self.assertEqual(raw.count(b"\r\n"), raw.count(b"\n"))
+            self.assertIn("- ✅ 1. Alpha evidence_anchor: src/a.py#L1-L2\r\n".encode("utf-8"), raw)
+
+
+class CarryForwardGuardTests(CarryForwardSetup, unittest.TestCase):
+    """carry-forward refuses inputs inside the workspace, a scope of another report, a full scope, a bare header."""
+
+    def test_input_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, scope, scope_json, header_json = self.prepare(tmp, snaps)
+            out = root / "main-plan-report-2.md"
+
+            def error(process: subprocess.CompletedProcess, code: int) -> str:
+                self.assertEqual(process.returncode, code, process.stdout)
+                self.assertFalse(out.exists())
+                return read_json(process)["errors"][0]
+
+            inside = root / "scope.json"
+            write(inside, json.dumps(scope))
+            self.assertTrue(error(self.carry(report, inside, header_json, out), 2).startswith("inputs-inside-workspace"))
+            inside.unlink()
+            other = Path(snaps) / "other.json"
+            write(other, json.dumps(dict(scope, last_report=str(root / "main-plan-report-9.md"))))
+            self.assertTrue(error(self.carry(report, other, header_json, out), 2).startswith("scope-mismatch"))
+            write(other, json.dumps(dict(scope, scope="full", reason="ratio")))
+            self.assertEqual(error(self.carry(report, other, header_json, out), 1), "use-full-pass: rescan-scope chose a full pass (ratio)")
+            bare = dict(CARRY_HEADER)
+            del bare["language"]
+            write(other, json.dumps(bare))
+            self.assertEqual(error(self.carry(report, scope_json, other, out), 2), "header-missing-fields: language")
+            write(other, "not json")
+            self.assertTrue(error(self.carry(report, other, header_json, out), 2).startswith("bad-input-json"))
+
+
+class BootstrapFullTests(unittest.TestCase):
+    """`/plan-resolver <plan> [reports…] full` → `bootstrap … --full` → pass_type `subsequent-full`."""
+
+    def test_full_flag_and_scope_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root / "main-plan.md", "# Main\n")
+            data = read_json(run_tool("bootstrap", str(root), "main-plan.md", "--full"))
+            self.assertEqual((data["pass_type"], data["warnings"]), ("first", ["--full ignored on the first pass"]))
+            self.assertEqual((data["report_header"]["audit_scope"], data["report_header"]["audit_tasks"]), ("full", "all"))
+            write(root / "main-plan-report-1.md", valid_report())
+            data = read_json(run_tool("bootstrap", str(root), "main-plan.md", "main-plan-report-1.md", "--full"))
+            self.assertEqual((data["pass_type"], data["warnings"]), ("subsequent-full", []))
+            data = read_json(run_tool("bootstrap", str(root), "main-plan.md", "main-plan-report-1.md"))
+            self.assertEqual(data["pass_type"], "subsequent")
+
+
+class FullAuditRequiredTests(unittest.TestCase):
+    """cycle-check: an incremental pass that closes everything is followed by a full pass, which cannot stall."""
+
+    INCREMENTAL = "audit_scope: incremental\naudit_tasks: [1]\n"
+
+    def cycle(self, prev: str, new: str, cycle: int, limit: int = 2, new_name: str = "main-plan-report-3.md") -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            write(Path(tmp) / "main-plan-report-2.md", prev)
+            write(Path(tmp) / new_name, new)
+            process = run_tool("cycle-check", str(Path(tmp) / "main-plan-report-2.md"), str(Path(tmp) / new_name), str(cycle), str(limit))
+            self.assertEqual(process.returncode, 0, process.stdout)
+            return read_json(process)["action"]
+
+    def test_incremental_pass_with_everything_closed_needs_a_full_pass(self) -> None:
+        prev = issues_report([("⭕️ not-fixed", "high", "A")])
+        green = scoped_report(self.INCREMENTAL, final=True)  # open name, no issues, every stage ✅
+        self.assertEqual(self.cycle(prev, green, 1), "full-audit-required")
+        self.assertEqual(self.cycle(prev, green, 2, limit=2), "full-audit-required")  # the loop decides on the limit
+        # a full pass with the same content is not asked again (before spec 6 this was ask-user)
+        self.assertEqual(self.cycle(prev, scoped_report("audit_scope: full\naudit_tasks: all\n", final=True), 1), "ask-user")
+        open_stage = green.replace("- ✅ 1. Подготовка", "- ⚠️ 1. Подготовка")
+        self.assertEqual(self.cycle(prev, open_stage, 1), "ask-user")
+
+    def test_the_full_pass_after_it_completes_continues_or_hits_the_limit(self) -> None:
+        green = scoped_report(self.INCREMENTAL, final=True)
+        final = scoped_report("audit_scope: full\naudit_tasks: all\n", final=True)
+        self.assertEqual(self.cycle(green, final, 2, new_name="main-plan-report-3-final.md"), "complete")
+        found = issues_report([("⭕️ not-fixed", "high", "New A")], n=3)
+        self.assertEqual(self.cycle(green, found, 1), "continue")  # not stop-stalled: nothing was open before
+        self.assertEqual(self.cycle(green, found, 2), "stop-limit")
+
+
+CHAIN_TOOL = ROOT.parent / "plan-chain-runner" / "scripts" / "chain_tool.py"
+
+
+class IncrementalPassE2ETests(IncrementalFixture, unittest.TestCase):
+    """First pass with a fingerprint → code change → rescan-scope → carry-forward → filled draft → cycle-check."""
+
+    def test_incremental_pass_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report1, start1 = self.make(tmp, snaps, issues=INC_ISSUE)
+            plan = root / "main-plan.md"
+            self.assertEqual(run_tool("evidence-fingerprint", str(report1), "--snapshot", str(start1), "--plan", str(plan)).returncode, 0)
+            write(root / "src" / "a.py", "a1\na2 fixed\n")  # the FIX phase changes the anchored file
+
+            boot = read_json(run_tool("bootstrap", str(root), "main-plan.md", "main-plan-report-1.md"))
+            self.assertEqual(boot["pass_type"], "subsequent")
+            start2 = Path(snaps) / "start-2.json"
+            self.assertEqual(run_tool("fingerprint-workspace", str(root), str(start2), "--base", str(start1)).returncode, 0)
+            scope = read_json(run_tool("rescan-scope", str(plan), str(report1), "--snapshot", str(start2)))
+            self.assertEqual((scope["scope"], scope["changed_files"], scope["reaudit"]), ("incremental", ["src/a.py"], ["1", "3"]))
+            scope_json, header_json = Path(snaps) / "scope.json", Path(snaps) / "bootstrap.json"
+            write(scope_json, json.dumps(scope))
+            write(header_json, json.dumps(boot))
+            report2 = root / boot["next_open_name"]
+            process = run_tool("carry-forward", str(report1), "--scope", str(scope_json), "--header", str(header_json), "--out", str(report2))
+            self.assertEqual(process.returncode, 0, process.stdout)
+
+            census = read_json(run_tool("task-census", str(plan), str(report2)))
+            self.assertEqual((census["valid"], census["uncovered"]), (True, []))  # the stubs keep every id
+            data = read_json(run_tool("validate-report", str(report2), "--root", str(root), "--plan", str(plan)))
+            self.assertIn("unfilled placeholder <!-- reaudit -->: 4 left", data["errors"])
+
+            text = report2.read_text(encoding="utf-8")
+            text = text.replace("- 1. Alpha <!-- reaudit -->", "- ✅ 1. Alpha evidence_anchor: src/a.py#L1-L2")
+            text = text.replace("- 3. Checkpoint — suite <!-- reaudit -->", "- ✅ 3. Checkpoint — suite\n  - evidence_probe: pytest → exit 0")
+            text = text.replace("1) Ошибка 1: ⭕️ not-fixed | high | Beta breaks <!-- re-verify -->", "1) Ошибка 1: ✅ fixed | high | Beta breaks")
+            text = text.replace("- **status**: ⭕️ not-fixed", "- **status**: ✅ fixed")
+            text = text.replace("consecutive_open_invocations: 2", "consecutive_open_invocations: 0")
+            text = text.replace("<!-- reaudit -->", "Инкрементальный проход: всё закрыто, нужен полный проход.", 2)
+            write(report2, text)
+            self.assertEqual(run_tool("evidence-fingerprint", str(report2), "--snapshot", str(start2), "--plan", str(plan)).returncode, 0)
+            data = read_json(run_tool("validate-report", str(report2), "--root", str(root), "--plan", str(plan)))
+            self.assertTrue(data["valid"], data)
+            action = read_json(run_tool("cycle-check", str(report1), str(report2), "1", "2"))["action"]
+            self.assertEqual(action, "full-audit-required")
+            self.assertTrue(report2.read_text(encoding="utf-8").startswith("---\nmaster_plan_path: main-plan.md\n"))
+
+            if CHAIN_TOOL.is_file():  # run-stats (spec 1) reads the pass fields: the contract of the two specs
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("chain_tool", str(CHAIN_TOOL))
+                chain = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(chain)
+                self.assertEqual(chain._audit_scope(report2.read_text(encoding="utf-8"), frontmatter=True), ("incremental", ["1", "3"]))
+                self.assertEqual(chain._audit_scope(report1.read_text(encoding="utf-8"), frontmatter=True), ("full", None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,8 @@
 # Audit Pass
 
 How one AUDIT pass reads the plan, traces it to the code and decides statuses. The pass type comes
-from `bootstrap.pass_type`.
+from `bootstrap.pass_type`: `first`, `subsequent` (incremental or full, by `rescan-scope`) or
+`subsequent-full` (the user's `full`: always the full pass).
 
 ## First pass (`first`)
 
@@ -17,8 +18,9 @@ from `bootstrap.pass_type`.
    validation gap; a performance or ops risk the plan states explicitly; a failing read-only probe.
 5. Resolve statuses ([REPORT-FORMAT.md](REPORT-FORMAT.md)). The first pass never closes a task
    without checkable evidence or with low confidence.
-6. Write the report. `## Task` must be enough for an outside implementer: what to fix, where, how
-   to verify.
+6. Write the report (`audit_scope: full`, `audit_tasks: all` from `report_header`), then
+   `evidence-fingerprint` (WORKFLOW.md). `## Task` must be enough for an outside implementer: what
+   to fix, where, how to verify.
 
 If the caller (for example `plan-executor`'s hand-off) names units that were not completed, each of
 them is either shown open (`⭕️`/`⚠️`) or closed with an anchor that proves the code is there.
@@ -44,7 +46,37 @@ What the hand-off adds is read from the executor's ledger (`exec_dir`), not from
   user's quoted permission, or on production when only a test environment is permitted, is an
   issue (`ops`, `high`), even when its result was correct.
 
-## Subsequent pass (`subsequent`)
+## Subsequent pass (`subsequent`, `subsequent-full`)
+
+`subsequent`: right after the start fingerprint run `TOOL rescan-scope <plan> <LAST_REPORT>
+--snapshot <start-json>` and save its JSON in the OS temp dir. `scope: incremental` → the
+incremental pass; `scope: full` (`plan-changed`, `no-evidence-fingerprint`, `ratio`) → the full
+pass. `subsequent-full` skips `rescan-scope` and always runs the full pass.
+
+### Incremental pass
+
+1. `TOOL carry-forward <LAST_REPORT> --scope <tmp>/scope.json --header <tmp>/bootstrap.json --out
+   <bootstrap.next_open_path>`. The draft holds the frontmatter, every `carry` task with its
+   evidence byte for byte, one stub `- <id>. <title> <!-- reaudit -->` per `reaudit` task, every
+   issue of `LAST_REPORT` with its number (open ones marked `<!-- re-verify -->`), and
+   `<!-- reaudit -->` in `## Additional Context` and `## Task`.
+2. Read only the scope: each `reaudit` task by its `line_ranges` (Read with offset and limit; not
+   the whole plan and not a skeleton), the code of `changed_files` and `missing_files`, and the
+   files the task's anchors and `Files` name. Carried lines are neither re-read nor retyped.
+3. Replace each stub with the task's status line and evidence (Code tracing below); a parent takes
+   the worst marker of its children.
+4. For each `<!-- re-verify -->` issue: re-audit it as in part A of the full pass and remove the
+   marker; a closed issue stays as it is. New issues follow the old ones, numbered on; a carried
+   issue keeps its title (`cycle-check` matches issues by title).
+5. Write `## Additional Context` and `## Task` of this pass in place of their stubs.
+6. Every task `✅` or `not-applicable` and no open issue: keep the open name and set
+   `consecutive_open_invocations: 0`; only the following full pass may write `-final`.
+
+`validate-report` rejects any marker left (`unfilled placeholder`). A change outside the evidence
+files (a module an evidence file depends on) is invisible to this pass; the closing full pass sees
+it.
+
+### Full pass
 
 A. Re-audit the known issues of `LAST_REPORT` (`parse-report`):
 

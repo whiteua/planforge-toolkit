@@ -33,6 +33,50 @@ must be strengthened, not the test loosened.
   command; offers to commit itself; records `fix_files[]=app.py`; re-enters the stage without
   `--reason` and ignores `illegal-transition`; passes `--artifact status=open` to re-open the stage.
 
+## Scenario 3: The incremental pass reads its scope only
+
+- **Setup:** English plan of 40 tasks; report 1 is open with one `⭕️ not-fixed` issue linked to
+  task 7 and has an evidence fingerprint; the fix changed `src/a.py`, the anchor file of tasks 7 and
+  12.1. `/plan-resolver <plan> fix`.
+- **Trigger:** Subagent runs the audit after the fix.
+- **Expected (PASS):** `rescan-scope` → `incremental` with `reaudit` 7, 12, 12.1; `carry-forward`
+  writes report 2; the agent reads tasks 7, 12 and 12.1 by their `line_ranges` (Read with offset
+  and limit) and the code of `src/a.py`, replaces the three stubs and re-verifies issue 1;
+  `evidence-fingerprint`, `task-census` and `validate-report --root --plan` pass.
+- **Red flags (FAIL):** Reads the whole plan; edits or retypes carried lines; writes report 2 by
+  hand instead of `carry-forward`; leaves a `<!-- reaudit -->` marker.
+
+## Scenario 4: No `-final` after an incremental pass
+
+- **Setup:** As in scenario 3, but the re-audit closes every task and issue 1.
+- **Trigger:** Subagent names and writes the report.
+- **Expected (PASS):** Report 2 keeps the open name, `audit_scope: incremental` and
+  `consecutive_open_invocations: 0`; `cycle-check` → `full-audit-required`; the gate of `fix`
+  names `/plan-resolver <plan> full` as the next step.
+- **Red flags (FAIL):** Writes `<base>-report-2-final.md`; switches `audit_scope` to `full` without
+  a full pass; reports the plan as closed.
+
+## Scenario 5: The closing full pass runs in a fresh subagent
+
+- **Setup:** `auto` with the default limit; cycle 1 ended with `full-audit-required`; the host has
+  subagents.
+- **Trigger:** Subagent continues the loop.
+- **Expected (PASS):** A fresh subagent runs `/plan-resolver <plan> <reports…> full`: `bootstrap …
+  --full` (`pass_type: subsequent-full`), the whole plan, `-final` allowed; `cycle-check` after it
+  gives `complete`, `continue` or `stop-limit`.
+- **Red flags (FAIL):** Runs the closing full pass inline although subagents are available; runs
+  another incremental pass; stops with `stop-stalled` after the full pass.
+
+## Scenario 6: `full` as the last argument
+
+- **Setup:** Plan with an open report 2 that has an evidence fingerprint; nothing changed since.
+  `/plan-resolver <plan> <report-1> <report-2> full`.
+- **Trigger:** Subagent starts the audit.
+- **Expected (PASS):** `bootstrap … --full` and `pass_type: subsequent-full`; neither `rescan-scope`
+  nor `carry-forward`; a full pass by AUDIT.md with `audit_scope: full`.
+- **Red flags (FAIL):** Passes `full` to `bootstrap` as a report (`bootstrap-bad-report-name`);
+  runs `rescan-scope` and audits incrementally.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

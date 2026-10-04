@@ -19,10 +19,18 @@ consecutive_open_invocations: 1
 previous_report_path: review-plan-report-1.md      # null on the first pass
 previous_report_sha256: <64 hex>                    # null on the first pass
 language: ru
+audit_scope: full                                   # incremental: written by carry-forward
+audit_tasks: all                                    # incremental: [7, 8, 12, 12.1, 40]
 ---
 ```
 
 A `-final.md` report has `consecutive_open_invocations: 0`.
+
+`audit_scope` (`full` | `incremental`) and `audit_tasks` (`all`, or the plan's task ids the pass
+re-audited) say what the pass read; plan-chain-runner's `run-stats` reads them for its reads model.
+A report without them (older than this format) is read as `full`, with a warning, and so is
+`incremental` without `audit_tasks`. With `--plan` every id of `audit_tasks` must be a task of the
+plan. A `-final.md` report needs `audit_scope: full`.
 
 ## Sections
 
@@ -34,6 +42,7 @@ A `-final.md` report has `consecutive_open_invocations: 0`.
 | `## Дополнительный контекст` | `## Additional Context` | optional, never empty |
 | `## Задача` | `## Task` | yes |
 | `## Предупреждения валидатора` | `## Validator Warnings` | when the validator warned |
+| `## Отпечаток улик` | `## Evidence fingerprint` | written only by `evidence-fingerprint` |
 | `## Журнал исправлений` | `## Fix Log` | written only by `mark-fix` |
 
 ## Plan stages
@@ -79,6 +88,9 @@ Rules:
   open report, error in `-final`.
 - Propagation: a task takes its worst linked result; an open `critical`/`high` issue or missing or
   contradictory evidence forbids `✅`; `not-applicable` is ignored for closure.
+- A stub `- <id>. <title> <!-- reaudit -->` (written by `carry-forward`) has no marker yet: the
+  incremental pass replaces it with the task's line. A stub left in the report is an error
+  (`unfilled placeholder`), and so is `<!-- re-verify -->` left on an issue's head line.
 
 ## Issue blocks
 
@@ -110,6 +122,25 @@ A carry-over issue keeps its title, description and evidence field verbatim, als
 Copy each `[WARNING] …` line from `validate-report` verbatim into the warnings section, each with
 one line of action (what to check or fix, or why it is acceptable for this open pass).
 
+## Evidence fingerprint
+
+Written only by `evidence-fingerprint` ([WORKFLOW.md](WORKFLOW.md)), before the Fix Log or at the
+end; the templates end with the placeholder `{{evidence_fingerprint}}`, which the command replaces:
+
+```markdown
+## Evidence fingerprint
+
+| File | SHA-256 |
+|---|---|
+| skills/x/scripts/tool.py | <64 hex> |
+| BACKLOG.md | excluded |
+```
+
+One row per evidence file: the anchors of the stages section and of issue `evidence`, and the files
+of the plan tasks' `Files` blocks. The value is the file's SHA-256 at the start of the audit,
+`excluded` (outside the snapshot) or `missing` (an anchored file that does not exist); any other
+row is an error. The next pass compares the table with its own start snapshot (`rescan-scope`).
+
 ## Fix Log
 
 Written only by `mark-fix`, only in the report a FIX phase worked from:
@@ -123,4 +154,5 @@ States: `applied`, `needs-user`, `skipped`. The validator ignores this section.
 ## Final report
 
 `*-final.md` is valid only when every stage is `✅` or `not-applicable`, every issue (if any) is
-`✅ fixed`, every closed leaf has an anchor, and `consecutive_open_invocations` is `0`.
+`✅ fixed`, every closed leaf has an anchor, `consecutive_open_invocations` is `0`, and
+`audit_scope` is `full` (or absent in an older report).

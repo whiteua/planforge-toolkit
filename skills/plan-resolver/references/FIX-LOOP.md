@@ -22,7 +22,11 @@ show them and ask.
 2. `closed` → say the plan is closed, write nothing.
 3. `none` → `fix`/`next`: run a normal AUDIT (report 1) and stop, nothing to fix yet;
    `auto`: run AUDIT; if it is `-final`, finish.
-4. `open` → the cycle.
+4. `open` → the cycle, except when `open-issues` of the last report gives `open_count: 0` and its
+   frontmatter `audit_scope` (`parse-report`, `header`) is `incremental`: that is the
+   `full-audit-required` state and there is nothing to fix. `fix`/`next`/`auto` skip FIX and run the
+   closing full pass (`AUDIT(plans_list, full)`, "AUDIT after FIX"), then `cycle-check` as in the
+   cycle below; `fix`/`next` stop at its gate.
 
 ## Cycle
 
@@ -34,13 +38,19 @@ loop:
   FIX(LAST_REPORT)
   if no issue got `applied`: stop, action = ask-user
   discover <workspace-root> <plan>
-  AUDIT(plans_list)                        # subsequent pass → NEW_REPORT
+  AUDIT(plans_list)                        # subsequent pass, incremental or full → NEW_REPORT
   cycle-check LAST_REPORT NEW_REPORT cycle limit
+  full-audit-required and cycle < limit →
+    LAST_REPORT = NEW_REPORT; cycle += 1
+    discover <workspace-root> <plan>
+    AUDIT(plans_list, full)                # the closing full pass (AUDIT after FIX) → NEW_REPORT
+    cycle-check LAST_REPORT NEW_REPORT cycle limit   # never stop-stalled after it
   continue → LAST_REPORT = NEW_REPORT; cycle += 1; loop
-  otherwise → stop, human gate
+  otherwise → stop, human gate             # full-audit-required at the limit: next step `full`
 ```
 
-`fix`/`next` pass `cycle=1 limit=1`: any action but `complete` means stop and suggest `next`.
+`fix`/`next` pass `cycle=1 limit=1`: any action but `complete` means stop and suggest `next`;
+after `full-audit-required` the suggestion is `/plan-resolver <plan> full` instead.
 
 ## FIX phase
 
@@ -80,28 +90,42 @@ real-data migrations, secrets or external services.
 ## AUDIT after FIX
 
 Run AUDIT strictly by WORKFLOW.md with a new start fingerprint taken **after** FIX
-(`--base` = the previous audit's current snapshot). Prefer a fresh subagent
-(`/plan-resolver <plans_list...>`) so the audit does not inherit the fixer's confidence; otherwise
-audit inline, re-reading the code rather than relying on memory of the edits.
+(`--base` = the previous audit's current snapshot).
+
+- **Incremental** (`rescan-scope` → `incremental`): the same agent in the same session. The scope
+  is deterministic and `validate-report --root` checks every anchor; re-read the code of the
+  re-audited tasks rather than relying on memory of the edits.
+- **Full** (`rescan-scope` → `full`, and the closing pass after `full-audit-required`): a fresh
+  subagent when the host provides one, `/plan-resolver <plans_list...> full`, so the pass that may
+  write `-final` does not inherit the fixer's confidence; when `rescan-scope` chose `full`, the
+  session hands the pass over before writing anything. Without subagents the session runs it
+  itself with `bootstrap … --full`, and the gate says in one line that the full pass ran in the
+  session.
+
+The rule is fixed; there is no setting for audit isolation.
 
 ## Stop and human gate
 
 | `cycle-check.action` | Message |
 |---|---|
 | `complete` | path of the `-final` report; plan closed |
+| `full-audit-required` | the incremental pass closed everything; `auto` runs the closing full pass while `cycle < limit`; at the limit and in `fix`/`next`: next step `/plan-resolver <plan> full` |
 | `continue` | (`auto` only) next cycle, no question |
 | `ask-user` | only `needs-user` issues remain (or the audit was blocked by drift): list the questions |
 | `stop-stalled` | the cycle closed nothing; `claimed_not_fixed_ids`; manual review needed |
 | `stop-limit` | cycle limit reached; open issues; `/plan-resolver <plan> next` |
 
-Order of precedence: `complete` → `ask-user` → `stop-stalled` → `stop-limit` → `continue`.
+Order of precedence: `complete` → `full-audit-required` → `ask-user` → `stop-stalled` →
+`stop-limit` → `continue`. After the closing full pass `stop-stalled` cannot occur: the report
+before it had no open issue to close.
 The summary always lists the reports created, closed and open issues, and the changed files from
 the Fix Log.
 
 Every gate names the commit: `/plan-executor <plan> commit` commits the executor run's files and
 the recorded `fix_files`; the resolver itself never commits. Without a confirmation channel,
-`ask-user`, `stop-stalled` and `stop-limit` are recorded as a `journal-question` with the
-decision they need (WORKFLOW.md, Chain journal): the audit that ended the cycle already set the
+`ask-user`, `stop-stalled`, `stop-limit` and `full-audit-required` are recorded as a
+`journal-question` with the decision they need (WORKFLOW.md, Chain journal): the audit that ended
+the cycle already set the
 stage `done`, so first `journal-event … --stage audit --status running --reason audit-open` (the
 report is open), then the question (the stage becomes `stopped`), then
 `journal-export-findings`, then stop. The next start answers or stops on that question before

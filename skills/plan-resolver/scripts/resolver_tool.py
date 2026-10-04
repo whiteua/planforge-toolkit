@@ -104,11 +104,34 @@ SECTION_ALIASES = {
     "task": ("## Задача", "## Task"),
     "context": ("## Дополнительный контекст", "## Additional Context"),
     "fix_log": ("## Журнал исправлений", "## Fix Log"),
+    "evidence": ("## Отпечаток улик", "## Evidence fingerprint"),
 }
 LEVEL_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 FIX_STATES = ("applied", "needs-user", "skipped")
 FIX_LOG_LINE_RE = re.compile(
     r"^- (?:Ошибка|Error) (?P<id>\d+):\s*(?P<state>applied|needs-user|skipped)\b", re.IGNORECASE | re.MULTILINE
+)
+# Incremental re-audit: the pass scope in the frontmatter and the report's evidence fingerprint.
+AUDIT_SCOPES = ("full", "incremental")
+FULL_SCOPE_RATIO = 0.5
+REAUDIT_MARKER = "<!-- reaudit -->"
+REVERIFY_MARKER = "<!-- re-verify -->"
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->")
+AUDIT_TASK_ID_RE = re.compile(r"^[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*$")
+EVIDENCE_HEADER_RE = re.compile(r"^\|\s*(?:File|Файл)\s*\|\s*SHA-256\s*\|$", re.IGNORECASE)
+EVIDENCE_ROW_RE = re.compile(r"^\|\s*(?P<path>[^|\s][^|]*?)\s*\|\s*(?P<value>[0-9a-f]{64}|excluded|missing)\s*\|$")
+ISSUE_HEAD_RE = re.compile(r"^\s*(?P<num>\d+)\)\s*(?:Ошибка|Error)\b")
+# bootstrap.report_header fields carry-forward needs to write the draft's frontmatter.
+CARRY_HEADER_FIELDS = (
+    "master_plan_path",
+    "master_plan_sha256",
+    "master_plan_size",
+    "audited_at",
+    "audit_iteration",
+    "consecutive_open_invocations_if_open",
+    "previous_report_path",
+    "previous_report_sha256",
+    "language",
 )
 
 
@@ -308,7 +331,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         "previous_report_path": os.path.basename(str(last_report["abs_path"])) if last_report else None,
         "previous_report_sha256": last_report["sha256"] if last_report else None,
         "language": language,
+        "audit_scope": "full",
+        "audit_tasks": "all",
     }
+    if args.full and not report_items:
+        warnings.append("--full ignored on the first pass")
+    pass_type = "first" if not report_items else ("subsequent-full" if args.full else "subsequent")
     # Stuck-open gate: this many audits in a row ended with an open report (counting this
     # one if it stays open). At the limit the agent asks the user instead of auditing again.
     stuck_open = {
@@ -335,7 +363,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         "next_open_path": posix_rel(os.path.join(plan_dir_abs, next_open_name), workspace_root),
         "next_final_path": posix_rel(os.path.join(plan_dir_abs, next_final_name), workspace_root),
         "language": language,
-        "pass_type": "first" if not report_items else "subsequent",
+        "pass_type": pass_type,
         "report_header": report_header,
         "errors": [],
         "warnings": warnings,
@@ -801,7 +829,7 @@ def stage_status_marker(line: str) -> str:
 
 
 def clean_stage_title(line: str, marker: str) -> str:
-    cleaned = line.strip()
+    cleaned = HTML_COMMENT_RE.sub(" ", line).strip()
     cleaned = re.sub(r"^[-*+]\s+", "", cleaned)
     if cleaned.startswith("|") and cleaned.endswith("|"):
         parts = [part.strip() for part in cleaned.strip("|").split("|") if part.strip()]
@@ -816,7 +844,7 @@ def clean_stage_title(line: str, marker: str) -> str:
 
 
 def extract_stage_id(line: str) -> str:
-    cleaned = line.strip()
+    cleaned = HTML_COMMENT_RE.sub(" ", line).strip()
     cleaned = re.sub(r"^[-*+]\s+", "", cleaned)
     for token in ("✅", "⭕️", "⭕", "⚠️", "⚠", "‼️", "‼", "not-applicable"):
         cleaned = cleaned.replace(token, "")
@@ -968,6 +996,23 @@ def validate_header_value(field: str, value: Optional[str], errors: List[str]) -
     elif field == "language":
         if value not in VALID_LANGUAGES:
             errors.append("language must be ru or en")
+    elif field == "audit_scope":
+        if value not in AUDIT_SCOPES:
+            errors.append("audit_scope must be full or incremental")
+    elif field == "audit_tasks":
+        if parse_audit_tasks(value) is None:
+            errors.append("audit_tasks must be all or a list of task ids like [7, 8, 12.1]")
+
+
+def parse_audit_tasks(value: str) -> Optional[List[str]]:
+    """Ids of `audit_tasks: [7, 8, 12.1]` as written; [] for `all` and for an empty list; None when malformed."""
+    value = value.strip()
+    if value == "all":
+        return []
+    if not (value.startswith("[") and value.endswith("]")):
+        return None
+    ids = [item.strip().strip("'\"") for item in value[1:-1].split(",") if item.strip()]
+    return ids if all(AUDIT_TASK_ID_RE.match(item) for item in ids) else None
 
 
 def collect_ambiguous_anchors(text: str) -> Dict[str, str]:
@@ -1010,6 +1055,122 @@ def check_anchor(anchor: str, root: str) -> Optional[str]:
     return None
 
 
+def evidence_lines(section: str) -> List[str]:
+    """Rows of an evidence section without blank lines, the header row and the separator."""
+    rows: List[str] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if stripped and not set(stripped) <= set("|-: ") and not EVIDENCE_HEADER_RE.match(stripped):
+            rows.append(stripped)
+    return rows
+
+
+def anchor_path(anchor: str) -> str:
+    """The file of `path#Lx-Ly`, POSIX, without quoting characters around it."""
+    return anchor.split("#", 1)[0].replace("\\", "/").strip("`'\"()[]<>")
+
+
+def stage_anchor_paths(text: str) -> Dict[str, List[str]]:
+    """Anchor files per stage item id (phases and tasks of the stages section), in order, once each."""
+    phases, tasks, _ = parse_stage_items(text)
+    out: Dict[str, List[str]] = {}
+    for item in phases + tasks:
+        paths = out.setdefault(str(item["id"]), [])
+        for match in ANCHOR_RE.finditer(str(item["raw_text"])):
+            path = anchor_path(match.group(0))
+            if path and path not in paths:
+                paths.append(path)
+    return out
+
+
+def plan_task_files(plan_text: str) -> Optional[Dict[str, List[str]]]:
+    """Paths of each plan task's Files block by brainstorm_tool.parse_plan_tasks, keyed by the normalized
+    task id; None without the parser or for a plan outside the task heading contract."""
+    tasks = _contract_tasks(plan_text)
+    if tasks is None:
+        return None
+    out: Dict[str, List[str]] = {}
+    for task in tasks:
+        paths = out.setdefault(normalize_plan_task_id(task["id"]), [])
+        for entry in task["files"]:
+            path = str(entry["path"]).replace("\\", "/")
+            if path not in paths:
+                paths.append(path)
+    return out
+
+
+def evidence_value(path: str, files: Dict[str, str], root: str) -> str:
+    """SHA-256 of `path` in the snapshot; `excluded` for a file the snapshot skips; `missing` when there is none."""
+    if path in files:
+        return str(files[path])
+    return "excluded" if os.path.isfile(os.path.join(root, path)) else "missing"
+
+
+def evidence_table(report_text: str, plan_text: str, snapshot: Dict[str, object]) -> Tuple[Dict[str, str], List[str]]:
+    """{path: SHA-256 | excluded | missing} for the evidence files of a report: the anchors of its stage items
+    and issue evidence, and the files of the plan tasks' Files blocks; plus warnings."""
+    root = os.path.abspath(str(snapshot.get("root") or ""))
+    files = dict(snapshot["files"])
+    table: Dict[str, str] = {}
+    for paths in stage_anchor_paths(report_text).values():
+        for path in paths:
+            table[path] = evidence_value(path, files, root)
+    for issue in parse_issues(report_text):
+        for match in ANCHOR_RE.finditer(str(issue["evidence"])):
+            path = anchor_path(match.group(0))
+            if path:
+                table[path] = evidence_value(path, files, root)
+    warnings: List[str] = []
+    plan_files = plan_task_files(plan_text)
+    if plan_files is None:
+        warnings.append(
+            "plan-files-unavailable: evidence from anchors only "
+            "(plan-brainstorming not installed alongside, or the plan has no task headings)"
+        )
+    else:
+        for paths in plan_files.values():
+            for path in paths:
+                value = table.get(path) or evidence_value(path, files, root)
+                # A Files token that names no file (`B.lang`, a bare `SKILL.md`) is not evidence.
+                if value != "missing":
+                    table[path] = value
+    excluded = sorted(path for path, value in table.items() if value == "excluded")
+    if excluded:
+        warnings.append("evidence-excluded (outside the snapshot): " + ", ".join(excluded))
+    return dict(sorted(table.items())), warnings
+
+
+def render_evidence_section(table: Dict[str, str], ru: bool) -> str:
+    heading = SECTION_ALIASES["evidence"][0 if ru else 1]
+    rows = "".join(f"| {path} | {value} |\n" for path, value in table.items())
+    return f"{heading}\n\n| File | SHA-256 |\n|---|---|\n{rows}"
+
+
+def put_evidence_section(text: str, section: str) -> str:
+    """Replace the report's evidence section whole; else insert it before the Fix Log; else append it."""
+    lines = text.splitlines(keepends=True)
+
+    def heading_at(aliases: Sequence[str]) -> Optional[int]:
+        return next((index for index, line in enumerate(lines) if line.strip() in aliases), None)
+
+    start = heading_at(SECTION_ALIASES["evidence"])
+    if start is not None:
+        end = next((index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")), len(lines))
+        tail = "".join(lines[end:])
+        return "".join(lines[:start]) + section + ("\n" + tail if tail else "")
+    fix_log = heading_at(SECTION_ALIASES["fix_log"])
+    if fix_log is not None:
+        return "".join(lines[:fix_log]) + section + "\n" + "".join(lines[fix_log:])
+    return text.rstrip("\n") + "\n\n" + section
+
+
+def path_inside(root: str, path: str) -> bool:
+    try:
+        return os.path.commonpath([root, os.path.abspath(path)]) == root
+    except ValueError:
+        return False
+
+
 def validate_report(
     path: str, root: Optional[str] = None, plan: Optional[str] = None
 ) -> Tuple[bool, Dict[str, object]]:
@@ -1031,6 +1192,34 @@ def validate_report(
     header = parse_header(text)
     for field in REQUIRED_HEADER_FIELDS:
         validate_header_value(field, header.get(field), errors)
+    scope = header.get("audit_scope")
+    if scope is None:
+        warnings.append("[WARNING] audit_scope is missing: the report is read as a full pass")
+    else:
+        validate_header_value("audit_scope", scope, errors)
+    audit_tasks = header.get("audit_tasks")
+    if audit_tasks is None:
+        if scope == "incremental":
+            warnings.append("[WARNING] audit_scope: incremental without audit_tasks: run-stats counts this pass as full")
+    else:
+        validate_header_value("audit_tasks", audit_tasks, errors)
+        listed = parse_audit_tasks(audit_tasks) or []
+        if listed and plan:
+            known = set(extract_plan_task_ids(read_text(plan)))
+            unknown = [item for item in listed if normalize_plan_task_id(item) not in known]
+            if unknown:
+                errors.append("audit_tasks names tasks the plan does not have: " + ", ".join(unknown))
+    for marker in (REAUDIT_MARKER, REVERIFY_MARKER):
+        if marker in text:
+            errors.append(f"unfilled placeholder {marker}: {text.count(marker)} left")
+    evidence = get_section(text, "evidence")
+    if evidence is not None:
+        for line in evidence_lines(evidence):
+            if not EVIDENCE_ROW_RE.match(line):
+                errors.append(
+                    "evidence fingerprint row is malformed (expected | path | 64 hex, excluded or missing |; "
+                    f"run evidence-fingerprint): {line}"
+                )
 
     stages = parse_stage_statuses(text)
     if not stages:
@@ -1065,6 +1254,8 @@ def validate_report(
         consecutive = parse_int(header.get("consecutive_open_invocations"))
         if consecutive != 0:
             errors.append("final report must set consecutive_open_invocations to 0")
+        if scope == "incremental":
+            errors.append("final report requires a full pass (audit_scope: full)")
 
     phases, tasks, _ = parse_stage_items(text)
     # Every closed leaf needs evidence: tasks, and phases that have no tasks of their own
@@ -1575,6 +1766,20 @@ def normalize_title(title: object) -> str:
     return " ".join(str(title).lower().split())
 
 
+def full_audit_required(path: str, text: str) -> bool:
+    """An open incremental report with every stage closed and no open issue: only a full pass may close the plan."""
+    if os.path.basename(path).lower().endswith("-final.md"):
+        return False
+    if parse_header(text).get("audit_scope") != "incremental":
+        return False
+    stages = parse_stage_statuses(text)
+    return (
+        bool(stages)
+        and all(stage["status"] in CLOSED_TASK_MARKERS for stage in stages)
+        and all(issue["status"] == "fixed" for issue in parse_issues(text))
+    )
+
+
 def cmd_cycle_check(args: argparse.Namespace) -> int:
     for candidate in (args.prev_report, args.new_report):
         if not os.path.isfile(candidate):
@@ -1588,7 +1793,8 @@ def cmd_cycle_check(args: argparse.Namespace) -> int:
     needs_user_titles = {normalize_title(i["title"]) for i in prev_open if fix_log.get(int(i["id"])) == "needs-user"}
     applied_titles = {normalize_title(i["title"]) for i in prev_open if fix_log.get(int(i["id"])) == "applied"}
 
-    new_issues = parse_issues(read_text(args.new_report))
+    new_text = read_text(args.new_report)
+    new_issues = parse_issues(new_text)
     new_open = [issue for issue in new_issues if issue["status"] != "fixed"]
     fixed_now = [
         issue["id"]
@@ -1600,12 +1806,16 @@ def cmd_cycle_check(args: argparse.Namespace) -> int:
     claimed_not_fixed = [issue["id"] for issue in new_open if normalize_title(issue["title"]) in applied_titles]
     fixable = [issue["id"] for issue in new_open if issue["id"] not in needs_user]
 
+    # The pass after full-audit-required had no open issue to close, so it cannot stall.
+    after_full_audit_required = full_audit_required(args.prev_report, prev_text)
     if os.path.basename(args.new_report).lower().endswith("-final.md"):
         action = "complete"
+    elif full_audit_required(args.new_report, new_text):
+        action = "full-audit-required"
     elif not fixable:
         # Everything left needs a human decision; nothing more to fix automatically.
         action = "ask-user"
-    elif not fixed_now:
+    elif not fixed_now and not after_full_audit_required:
         action = "stop-stalled"
     elif args.cycle >= args.limit:
         action = "stop-limit"
@@ -1627,6 +1837,321 @@ def cmd_cycle_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def load_audit_snapshot(path: str, plan: str) -> Dict[str, object]:
+    """The start snapshot of this audit; ToolError (exit 2) when it is no snapshot or when the plan is not
+    under its root (a snapshot of another workspace)."""
+    try:
+        snapshot = load_snapshot(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ToolError(f"invalid fingerprint snapshot: {path} ({exc})") from exc
+    root = os.path.abspath(str(snapshot.get("root") or ""))
+    if not snapshot.get("root") or not path_inside(root, plan):
+        raise ToolError(f"snapshot-root-mismatch: the plan is not under the snapshot root {root}")
+    return snapshot
+
+
+def cmd_evidence_fingerprint(args: argparse.Namespace) -> int:
+    for candidate in (args.report, args.plan):
+        if not os.path.isfile(candidate):
+            print_json({"valid": False, "errors": [f"file not found: {candidate}"]})
+            return 2
+    snapshot = load_audit_snapshot(args.snapshot, args.plan)
+    with open(args.report, "rb") as handle:
+        raw_bytes = handle.read()
+    crlf = b"\r\n" in raw_bytes
+    text = raw_bytes.decode("utf-8").replace("\r\n", "\n")
+    table, warnings = evidence_table(text, read_text(args.plan), snapshot)
+    ru = report_language(text, parse_header(text)) == "ru"
+    updated = put_evidence_section(text, render_evidence_section(table, ru))
+    with open(args.report, "w", encoding="utf-8", newline="\r\n" if crlf else "\n") as handle:
+        handle.write(updated)
+    print_json(
+        {
+            "valid": True,
+            "report": args.report,
+            "file_count": len(table),
+            "excluded": [path for path, value in table.items() if value == "excluded"],
+            "missing": [path for path, value in table.items() if value == "missing"],
+            "warnings": warnings,
+            "errors": [],
+        }
+    )
+    return 0
+
+
+def parse_evidence_table(text: str) -> Optional[Dict[str, str]]:
+    """{path: value} of the report's evidence section; None for a report without one."""
+    section = get_section(text, "evidence")
+    if section is None:
+        return None
+    table: Dict[str, str] = {}
+    for line in evidence_lines(section):
+        match = EVIDENCE_ROW_RE.match(line)
+        if match:
+            table[match.group("path")] = match.group("value")
+    return table
+
+
+def parent_ids(task_id: str) -> List[str]:
+    """`12.1.3` → [`12.1`, `12`]."""
+    parts = task_id.split(".")
+    return [".".join(parts[:count]) for count in range(len(parts) - 1, 0, -1)]
+
+
+def linked_ids(value: str, known: Sequence[str]) -> List[str]:
+    """Task ids named in an issue's linked_items that the report or the plan has, in order, once each."""
+    found: List[str] = []
+    for token in re.split(r"[,;\s]+", value or ""):
+        task_id = normalize_plan_task_id(token.strip("`'\".()[]"))
+        if task_id in known and task_id not in found:
+            found.append(task_id)
+    return found
+
+
+def stub_title(item: Dict[str, object]) -> str:
+    """Title of a report stage item without its evidence: the stub line's fallback when the plan has no title."""
+    title = re.split(r"\s(?:evidence_anchor|evidence_probe|evidence|confidence|verification)\s*[:=]", str(item["title"]), maxsplit=1)[0]
+    return " ".join(ANCHOR_RE.sub("", title).split()).strip(" —-:")
+
+
+def rescan_scope(plan: str, last_report: str, snapshot: Dict[str, object], ratio: float) -> Dict[str, object]:
+    """Tasks of the last report to audit again, by its evidence fingerprint against the start snapshot."""
+    report_text = read_text(last_report)
+    plan_text = read_text(plan)
+    files = dict(snapshot["files"])
+    table = parse_evidence_table(report_text)
+    plan_sha_changed = parse_header(report_text).get("master_plan_sha256", "").lower() != sha256_file(plan)
+    phases, tasks, _ = parse_stage_items(report_text)
+    items = sorted(phases + tasks, key=lambda item: int(item["line_start"]))
+    report_ids: List[str] = []
+    for item in items:
+        if str(item["id"]) not in report_ids:
+            report_ids.append(str(item["id"]))
+    plan_ids = extract_plan_task_ids(plan_text)
+    all_ids = report_ids + [task_id for task_id in plan_ids if task_id not in report_ids]
+
+    rows = table or {}
+    changed = sorted(path for path, value in rows.items() if path in files and value not in ("excluded", "missing") and files[path] != value)
+    gone = sorted(path for path, value in rows.items() if path not in files and value not in ("excluded", "missing"))
+    unverified = sorted(path for path, value in rows.items() if value in ("excluded", "missing"))
+    suspect = set(changed) | set(gone) | set(unverified)
+
+    reaudit = set()
+    for item_id, paths in stage_anchor_paths(report_text).items():
+        if suspect.intersection(paths):
+            reaudit.add(item_id)
+    for task_id, paths in (plan_task_files(plan_text) or {}).items():
+        if suspect.intersection(paths):
+            reaudit.add(task_id)
+    for item in items:
+        raw = str(item["raw_text"])
+        if item["status"] != "✅":
+            reaudit.add(str(item["id"]))
+        elif EVIDENCE_PROBE_RE.search(raw) and not ANCHOR_RE.search(raw):
+            reaudit.add(str(item["id"]))  # a probe is cheap to repeat and is the only evidence
+    issues: List[Dict[str, object]] = []
+    for issue in parse_issues(report_text):
+        linked = linked_ids(str(issue["linked_items"]), all_ids)
+        issues.append({"id": issue["id"], "status": issue["status"], "linked_items": linked})
+        if issue["status"] != "fixed":
+            reaudit.update(linked)
+    reaudit.update(task_id for task_id in plan_ids if task_id not in report_ids)
+    for task_id in list(reaudit):
+        # A parent's marker is the worst of its children (REPORT-FORMAT, propagation).
+        reaudit.update(parent for parent in parent_ids(task_id) if parent in all_ids)
+    ordered = [task_id for task_id in all_ids if task_id in reaudit]
+
+    if plan_sha_changed:
+        scope, reason = "full", "plan-changed"
+    elif table is None:
+        scope, reason = "full", "no-evidence-fingerprint"
+    elif len(ordered) > ratio * len(all_ids):
+        scope, reason = "full", "ratio"
+    else:
+        scope, reason = "incremental", f"{len(ordered)} of {len(all_ids)} tasks touched"
+    contract = _contract_tasks(plan_text) or []
+    plan_titles = {normalize_plan_task_id(task["id"]): str(task["title"]) for task in contract}
+    ranges = {normalize_plan_task_id(task["id"]): [int(task["line_start"]), int(task["line_end"])] for task in contract}
+    report_titles = {str(item["id"]): stub_title(item) for item in items}
+    return {
+        "valid": True,
+        "scope": scope,
+        "reason": reason,
+        "plan_sha_changed": plan_sha_changed,
+        "changed_files": changed,
+        "missing_files": gone,
+        "unverified_files": unverified,
+        "reaudit": ordered,
+        "carry": [task_id for task_id in report_ids if task_id not in reaudit],
+        # audit_tasks of the draft: run-stats and validate-report --plan know only the plan's task ids
+        "audit_tasks": [task_id for task_id in ordered if task_id in plan_ids],
+        "titles": {task_id: plan_titles.get(task_id) or report_titles.get(task_id, "") for task_id in ordered},
+        # the plan lines of each re-audited task: the incremental pass reads these, never the whole plan
+        "line_ranges": {task_id: ranges[task_id] for task_id in ordered if task_id in ranges},
+        "issues": issues,
+        "task_count": len(all_ids),
+        "ratio": ratio,
+        "plan": os.path.abspath(plan),
+        "last_report": os.path.abspath(last_report),
+        "root": os.path.abspath(str(snapshot["root"])),
+        "errors": [],
+    }
+
+
+def cmd_rescan_scope(args: argparse.Namespace) -> int:
+    for candidate in (args.plan, args.last_report):
+        if not os.path.isfile(candidate):
+            print_json({"valid": False, "errors": [f"file not found: {candidate}"]})
+            return 2
+    if not 0 < args.ratio <= 1:
+        print_json({"valid": False, "errors": [f"--ratio must be in (0, 1]: {args.ratio}"]})
+        return 2
+    snapshot = load_audit_snapshot(args.snapshot, args.plan)
+    print_json(rescan_scope(args.plan, args.last_report, snapshot, args.ratio))
+    return 0
+
+
+def load_json_input(path: str) -> object:
+    """JSON the agent saved: UTF-8 (a BOM allowed) or UTF-16 with a BOM (PowerShell `>` redirection)."""
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    return json.loads(raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"))
+
+
+def carry_stage_lines(text: str, reaudit: Sequence[str], titles: Dict[str, str]) -> Tuple[str, int]:
+    """The stages section of the last report: carried items with their detail lines byte for byte, one stub
+    line per re-audited item at its old indent, stubs for items the report did not have at the end."""
+    lines = text.splitlines(keepends=True)
+    phases, tasks, _ = parse_stage_items(text)
+    starts = {int(item["line_start"]): str(item["id"]) for item in phases + tasks}
+    wanted = set(reaudit)
+
+    def stub(indent: str, task_id: str) -> str:
+        label = task_id if "." in task_id else task_id + "."
+        return indent + "- " + " ".join(part for part in (label, titles.get(task_id, ""), REAUDIT_MARKER) if part) + "\n"
+
+    out: List[str] = []
+    current: Optional[str] = None
+    seen = set()
+    for number, _line in section_lines(text, "stages"):
+        raw = lines[number - 1]
+        if number in starts:
+            current = starts[number]
+            seen.add(current)
+            out.append(stub(raw[: len(raw) - len(raw.lstrip(" "))], current) if current in wanted else raw)
+        elif current in wanted and raw.strip():
+            continue  # the re-audit writes the evidence of this item again
+        else:
+            out.append(raw)
+    body = "".join(out).strip("\n")
+    extra = "".join(stub("  " * task_id.count("."), task_id) for task_id in reaudit if task_id not in seen)
+    if extra:
+        body = (body + "\n" + extra).strip("\n")
+    return body, len(seen - wanted)
+
+
+def carry_issue_blocks(text: str) -> Tuple[str, List[int]]:
+    """Every issue block of the last report with its number; the head line of an open one marked re-verify."""
+    bounds = section_bounds(text, SECTION_ALIASES["issues"])
+    body = text[bounds[0] : bounds[1]].strip("\n") if bounds else ""
+    open_ids = sorted(int(issue["id"]) for issue in parse_issues(text) if issue["status"] != "fixed")
+    out: List[str] = []
+    for line in body.split("\n"):
+        head = ISSUE_HEAD_RE.match(line)
+        if head and int(head.group("num")) in open_ids and REVERIFY_MARKER not in line:
+            line = line.rstrip() + " " + REVERIFY_MARKER
+        out.append(line)
+    return "\n".join(out), open_ids
+
+
+def carry_forward_draft(text: str, scope: Dict[str, object], header: Dict[str, object]) -> Tuple[str, Dict[str, object]]:
+    """The incremental report's draft: frontmatter from bootstrap.report_header, carried stage lines and stubs,
+    the last report's issue blocks, stub bodies for Additional Context and Task."""
+
+    def value(item: object) -> str:
+        return "null" if item is None else str(item)
+
+    index = 0 if value(header["language"]) == "ru" else 1
+    reaudit = [str(task_id) for task_id in scope.get("reaudit") or []]
+    audit_tasks = [str(task_id) for task_id in scope.get("audit_tasks") or []]
+    titles = {str(key): str(title) for key, title in dict(scope.get("titles") or {}).items()}
+    stages, carried = carry_stage_lines(text, reaudit, titles)
+    issues, reverify = carry_issue_blocks(text)
+    frontmatter = [
+        "---",
+        f"master_plan_path: {value(header['master_plan_path'])}",
+        f"master_plan_sha256: {value(header['master_plan_sha256'])}",
+        f"master_plan_size: {value(header['master_plan_size'])}",
+        f"audited_at: {value(header['audited_at'])}",
+        f"audit_iteration: {value(header['audit_iteration'])}",
+        f"consecutive_open_invocations: {value(header['consecutive_open_invocations_if_open'])}",
+        f"previous_report_path: {value(header['previous_report_path'])}",
+        f"previous_report_sha256: {value(header['previous_report_sha256'])}",
+        f"language: {value(header['language'])}",
+        "audit_scope: incremental",
+        f"audit_tasks: [{', '.join(audit_tasks)}]",
+        "---",
+    ]
+    parts = [
+        "\n".join(frontmatter),
+        f"{SECTION_ALIASES['title'][index]} {value(header['audit_iteration'])}",
+        SECTION_ALIASES["stages"][index],
+        stages,
+        SECTION_ALIASES["issues"][index],
+        issues,
+        SECTION_ALIASES["context"][index],
+        REAUDIT_MARKER,
+        SECTION_ALIASES["task"][index],
+        REAUDIT_MARKER,
+    ]
+    draft = "\n\n".join(part for part in parts if part) + "\n"
+    return draft, {"carried": carried, "stubs": len(reaudit), "reverify_issues": reverify, "audit_tasks": audit_tasks}
+
+
+def cmd_carry_forward(args: argparse.Namespace) -> int:
+    if not os.path.isfile(args.last_report):
+        print_json({"valid": False, "errors": [f"file not found: {args.last_report}"]})
+        return 2
+    if os.path.exists(args.out):
+        print_json({"valid": False, "errors": [f"report-exists: reports are immutable: {args.out}"]})
+        return 2
+    try:
+        scope = load_json_input(args.scope)
+        header = load_json_input(args.header)
+    except (OSError, ValueError) as exc:
+        print_json({"valid": False, "errors": [f"bad-input-json: {exc}"]})
+        return 2
+    if not isinstance(scope, dict) or not isinstance(header, dict):
+        print_json({"valid": False, "errors": ["bad-input-json: --scope and --header must hold JSON objects"]})
+        return 2
+    if isinstance(header.get("report_header"), dict):
+        header = header["report_header"]  # the whole bootstrap result is accepted too
+    root = os.path.abspath(str(scope.get("root") or ""))
+    inside = [path for path in (args.scope, args.header) if scope.get("root") and path_inside(root, path)]
+    if inside:
+        # inside the workspace they would be assert-readonly violations and foreign changes for the executor
+        print_json({"valid": False, "errors": ["inputs-inside-workspace: keep them in the OS temp dir: " + ", ".join(inside)]})
+        return 2
+    if os.path.normcase(os.path.abspath(str(scope.get("last_report") or ""))) != os.path.normcase(os.path.abspath(args.last_report)):
+        print_json({"valid": False, "errors": [f"scope-mismatch: --scope was computed for {scope.get('last_report')}"]})
+        return 2
+    missing = [field for field in CARRY_HEADER_FIELDS if field not in header]
+    if missing:
+        print_json({"valid": False, "errors": ["header-missing-fields: " + ", ".join(missing)]})
+        return 2
+    if scope.get("scope") != "incremental":
+        print_json({"valid": False, "errors": [f"use-full-pass: rescan-scope chose a full pass ({scope.get('reason')})"]})
+        return 1
+    with open(args.last_report, "rb") as handle:
+        raw_bytes = handle.read()
+    crlf = b"\r\n" in raw_bytes
+    draft, summary = carry_forward_draft(raw_bytes.decode("utf-8").replace("\r\n", "\n"), scope, header)
+    with open(args.out, "x", encoding="utf-8", newline="\r\n" if crlf else "\n") as handle:
+        handle.write(draft)
+    print_json({"valid": True, "path": args.out, **summary, "errors": []})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="plan-resolver helper utility")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1635,6 +2160,7 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("workspace_root")
     bootstrap.add_argument("plan")
     bootstrap.add_argument("reports", nargs="*")
+    bootstrap.add_argument("--full", action="store_true", help="a full subsequent pass (the user's `full` argument)")
     bootstrap.set_defaults(func=cmd_bootstrap)
 
     preflight = subparsers.add_parser("preflight")
@@ -1707,6 +2233,26 @@ def build_parser() -> argparse.ArgumentParser:
     cycle.add_argument("cycle", type=int)
     cycle.add_argument("limit", nargs="?", type=int, default=2)
     cycle.set_defaults(func=cmd_cycle_check)
+
+    evidence = subparsers.add_parser("evidence-fingerprint")
+    evidence.add_argument("report")
+    evidence.add_argument("--snapshot", required=True, help="the start snapshot of this audit (fingerprint-workspace)")
+    evidence.add_argument("--plan", required=True, help="master plan; the files of its tasks' Files blocks are evidence too")
+    evidence.set_defaults(func=cmd_evidence_fingerprint)
+
+    rescan = subparsers.add_parser("rescan-scope")
+    rescan.add_argument("plan")
+    rescan.add_argument("last_report")
+    rescan.add_argument("--snapshot", required=True, help="the start snapshot of this audit")
+    rescan.add_argument("--ratio", type=float, default=FULL_SCOPE_RATIO, help="share of tasks above which the pass is full")
+    rescan.set_defaults(func=cmd_rescan_scope)
+
+    carry = subparsers.add_parser("carry-forward")
+    carry.add_argument("last_report")
+    carry.add_argument("--scope", required=True, help="rescan-scope output saved in the OS temp dir")
+    carry.add_argument("--header", required=True, help="bootstrap.report_header (or the whole bootstrap output) in the OS temp dir")
+    carry.add_argument("--out", required=True, help="the new report (bootstrap.next_open_path); must not exist")
+    carry.set_defaults(func=cmd_carry_forward)
 
     return parser
 

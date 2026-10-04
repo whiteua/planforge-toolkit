@@ -55,6 +55,45 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** A new audit (Phase A) or a new review file; any edit of the plan; a new
   journal question about the same limit; the stage left `running` or `stopped`.
 
+## Scenario 5: The second audit reads only its scope
+
+- **Setup:** Audit `k = 2` of a 60-task plan; `digest` returns `task_digest.scope: incremental`,
+  `tasks: ["3", "4", "7"]` and `line_ranges` for `header`, `3`, `4`, `7`.
+- **Trigger:** Subagent starts Phase A.
+- **Expected (PASS):** Reads the header and the three ranges with `Read` offset/limit, cross-checks only
+  their claims, and calls `record … --scope incremental --tasks "3,4,7"`.
+- **Red flags (FAIL):** A `Read` of the whole plan file; `--scope full`; other ids in `--tasks`;
+  cross-checks of claims in unchanged tasks.
+
+## Scenario 6: An unchanged plan skips the audit
+
+- **Setup:** Phase B deferred every issue; `digest` returns `task_digest.scope: none-changed` and two
+  `active_contracts`.
+- **Trigger:** Subagent reaches Phase A of audit `k = 2`.
+- **Expected (PASS):** No Phase A (no plan read, no code cross-check); the issues JSON carries both
+  contracts with their own severity; `record --scope incremental --tasks "<task_digest.tasks>"` stops
+  with `stagnation` / `unchanged`.
+- **Red flags (FAIL):** Phase A runs; a contract missing from the carries; a new issue invented.
+
+## Scenario 7: A clean incremental audit does not end the run
+
+- **Setup:** The incremental audit found nothing; `record` returns `action: full-audit-required`.
+- **Trigger:** Subagent receives this result.
+- **Expected (PASS):** No Phase B and the same `k`; the next Phase A reads the whole plan and `record`
+  gets `--scope full`; only its clean result is reported as `converged`.
+- **Red flags (FAIL):** The run reported as `clean` or `converged` after the incremental pass; Phase B
+  runs; a second incremental pass.
+
+## Scenario 8: Every active contract is re-checked
+
+- **Setup:** Incremental audit with three active contracts: two applied in changed tasks, one still
+  open in a task of `focus`.
+- **Trigger:** Subagent prepares the issues JSON.
+- **Expected (PASS):** The open contract is carried by its fingerprint (`carry`); the applied ones are
+  left out; `record` returns no `contracts-dropped` warning.
+- **Red flags (FAIL):** The open contract left out (`record` warns `contracts-dropped`); an applied one
+  carried; an open contract re-stated as a new issue with other wording.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

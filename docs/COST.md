@@ -100,8 +100,14 @@ Mandatory comparisons, by the criteria of "Что считать успехом"
 - after spec 8 (cheap models): `quality.delegated` retries no higher than the rest and the audit
   issues of delegated units not growing; otherwise `light` stays an option.
 
-Spec 5 (incremental revision) is judged on goals with two or more reviews and on output tokens; spec
-7 (skeleton) records the skeleton's share of the plan here (expected ≤ 45 % on `fix-03`).
+Spec 5 (incremental revision) is judged on goals with two or more reviews and on output tokens. With
+one cycle of edits it costs the same or about 10 % more than before (a full audit, an incremental one
+and the closing full audit against two full audits); the saving starts with the second cycle: on
+`fix-03` audits 2 and 3 would read about 25–40 thousand input tokens each instead of about 160 thousand,
+with a third of the cross-checks, and the reviews' output shrinks from the first incremental pass on.
+`run-stats` counts an incremental review as the plan's header plus the tasks of `**Audit tasks**`; the
+resolver's issue counts on the next goals (`quality`) show whether the quality held. Spec 7 (skeleton)
+records the skeleton's share of the plan here (expected ≤ 45 % on `fix-03`).
 
 ## How to compare
 

@@ -83,7 +83,13 @@ This document maps the engineering techniques, methodologies, and prior art that
 
 | Technique | Origin | How it's applied |
 |---|---|---|
-| 10-class taxonomy with per-class sweep | CWE (MITRE, ~2006); OWASP Top 10 (~2003); IEEE 1044 (1993) | Agent reads the plan once and checks one class at a time to prevent attention scattering |
+| 10-class taxonomy with per-class sweep | CWE (MITRE, ~2006); OWASP Top 10 (~2003); IEEE 1044 (1993) | Agent reads the plan once in a full audit (an incremental audit reads the header and the tasks in scope) and checks one class at a time to prevent attention scattering |
+
+### Incremental re-audit
+
+| Technique | Origin | How it's applied |
+|---|---|---|
+| Incremental re-audit by task hash | Incremental build / build avoidance (make, 1976; Bazel action cache); change impact analysis (Arnold & Bohner, 1993) | Each review stores the SHA-1 of every task body; the next audit reads only the changed and new tasks, the open contracts' tasks and their transitive dependents by `Preconditions`, skips an unchanged plan, and a clean incremental pass must be confirmed by one full pass before `converged` |
 
 ### Chain integration
 

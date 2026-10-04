@@ -30,9 +30,9 @@ Rules:
 
 ## Self-check
 
-After the last issue, read the changed parts of the plan (the whole plan if edits were spread out)
-and check each applied issue's `Acceptance`. Allow one repair attempt per failed check; otherwise
-count the issue as deferred.
+After the last issue, read only the tasks your edits changed (each by its `### Task N:` heading, the
+header when you edited it), never the whole plan, and check each applied issue's `Acceptance`. Allow
+one repair attempt per failed check; otherwise count the issue as deferred.
 
 In interactive mode, report in one line: applied ids, deferred ids with a short reason (autonomous
 mode prints nothing here). Keep no counters: the next audit

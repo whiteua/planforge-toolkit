@@ -273,6 +273,8 @@ The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent t
 
 Stop decisions use only the reviews of the current run.
 
+**Incremental re-audits.** From the second audit on, the review's table of task hashes tells which tasks Phase B changed: the next audit reads the plan's header plus the changed and new tasks, the tasks of the open contracts and the tasks that depend on them through `Preconditions`, and cross-checks only those against the code. An unchanged plan skips the audit; more than half of the tasks touched, or a contract that names no task, makes it full. A clean incremental audit is always followed by one full audit, and only that one ends the run as `converged`. Without `plan-brainstorming` alongside every audit is full.
+
 In a chain, the preset and the stop policy come from the `Chain` setting of the spec and are not asked; a run without a confirmation channel stops at the iteration limit. A read allowed for the whole run (`read=run`) lets the audit check that environment, read-only. A remark about the code rather than the plan goes to the chain journal and `BACKLOG.md` (`journal-finding`), and a stop that needs your decision is recorded there as a question.
 
 **Output:** `<plan-basename>-review-N.md` per iteration; `<plan-basename>-completion.md` on convergence.

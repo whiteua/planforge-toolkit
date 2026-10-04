@@ -90,5 +90,34 @@ class BatchSummary(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
 
 
+PART = "# Part a\n\n**Goal:** part.\n\n### Task 1: One\n\n- [ ] **Step 1: {one}**\n\n### Task 2: Two\n\n- [ ] **Step 1: two**\n"
+
+
+class IncrementalPart(unittest.TestCase):
+    def test_incremental_cycle_of_a_part_gives_the_same_batch_summary(self):
+        issue = {"severity": "major", "category": "logic", "title": "T", "location_in_plan": "Task 1, Step 1",
+                 "code_cross_check": "verified - checked", "problem": "P", "required_fix": "Fix A",
+                 "acceptance": "A"}
+        with tempfile.TemporaryDirectory() as d:
+            part = Path(d) / "plan-a.md"
+            part.write_text(PART.format(one="one"), encoding="utf-8")
+
+            def record(issues, *flags):
+                p = run("record", str(part), "--run-start", "1", "--max", "5", "--issues", "-", *flags,
+                        stdin=json.dumps({"summary": "S.", "issues": issues}))
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                return json.loads(p.stdout)
+
+            self.assertEqual(record([issue])["action"], "implement")
+            part.write_text(PART.format(one="fixed"), encoding="utf-8")
+            digest = json.loads(run("digest", d, "plan-a", "--since", "1").stdout)["task_digest"]
+            self.assertEqual((digest["scope"], digest["tasks"]), ("incremental", ["1"]))
+            self.assertEqual(record([], "--scope", "incremental", "--tasks", "1")["action"], "full-audit-required")
+            final = record([], "--scope", "full")["final"]
+            p = run("batch-summary", "--results", "-", stdin=json.dumps({"parts": {"a": final}}))
+            out = json.loads(p.stdout)
+            self.assertEqual((out["result"], out["remaining_issues"], out["counts"]["converged"]), ("converged", 0, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

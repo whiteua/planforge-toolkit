@@ -71,9 +71,11 @@ allowed for the whole run (`read=run`) lets the audit check that environment, re
 ```
 bootstrap (numbering, language, config, write check)
   → Phase A: audit plan + code → issues JSON
-  → record: gates + write review-N.md
+  → record: gates + write review-N.md (with the hash of every task)
   → Phase B: apply review-N to the plan
-  → repeat
+  → digest: which tasks changed → the next audit reads only them, their dependents and the
+    open contracts' tasks (incremental); an unchanged plan skips the audit
+  → repeat; a clean incremental audit is followed by one full audit before `converged`
 ```
 
 ## Stop Conditions
@@ -82,6 +84,7 @@ bootstrap (numbering, language, config, write check)
 |---|---|
 | No issues on the first audit | `clean`, no files created |
 | No issues on a later audit | `converged`, `<plan>-completion.md` written |
+| No issues on an incremental audit | not a stop: one full audit follows; only its clean result is `converged` |
 | Only nits remain (`pragmatic`) | `converged`, final review with nits |
 | Same issues as the previous audit | `stagnation` (unchanged) |
 | New issues but nothing resolved for 2 audits | `stagnation` (churn) |
@@ -101,6 +104,7 @@ Only reviews created in the current run count for these gates.
 
 - Python ≥ 3.8 in PATH, shell access for the helper script
 - The plan's directory is writable
+- `plan-brainstorming` installed alongside for incremental re-audits (without it every audit reads the whole plan)
 
 ## Common Errors
 

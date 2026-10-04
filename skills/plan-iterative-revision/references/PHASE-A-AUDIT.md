@@ -7,13 +7,33 @@ file; `record` writes the review.
 
 - `PLAN`, the config from `bootstrap` (`lenses`, `rigor`), the audit number `k`.
 - For `k > 1`: the digest `D` from `TOOL digest <dir> <basename> --since <run_start>`:
-  `active_contracts` (issues of the latest review, with full `required_fix` and `acceptance`) and
-  `resolved_contracts` (issues of earlier reviews in this run that are no longer open).
+  `active_contracts` (issues of the latest review, with full `required_fix` and `acceptance`),
+  `resolved_contracts` (issues of earlier reviews in this run that are no longer open) and
+  `task_digest` (the scope of this audit), plus `SCOPE` from the Loop in SKILL.md.
 
-Read `PLAN` once, in full. If the Phase B self-check just read the whole plan and nothing changed
-since, reuse that text instead. Lenses and taxonomy classes are checklists over the text you already
-have; do not re-read the plan for each of them. Do not read old review files in full. Read a single
-issue block only when the digest entry is not enough.
+## Step 0: Scope
+
+`SCOPE` is `full` on the first audit, after `full-audit-required`, in `audit-only` mode and when
+`D.task_digest.scope` is `full`; otherwise it is `incremental`.
+
+- `full`: read `PLAN` once, in full.
+- `incremental`: read the header (`D.task_digest.line_ranges.header`) and every task of
+  `D.task_digest.tasks` by its range (`Read` with `offset` = start and `limit` = end − start + 1), never
+  the whole file. These are the changed and new tasks, the tasks of the active contracts (`focus`) and
+  the tasks whose `Preconditions` lead to a changed, new or removed task (`dependents`). Tasks in
+  `unchanged` keep their status from the earlier audits of the run: the skill never changes code inside
+  a run (SKILL.md, invariant 3), and a change made by a human between audits is caught by the full audit
+  that must come before `converged`. Tasks in `removed` are gone: their referrers are in `dependents`
+  (a Precondition that names a deleted task is a defect to record there).
+- `none-changed` (`D.task_digest.scope`): no Phase A. The plan is byte for byte the one the latest
+  review audited, so no contract can have closed. The issues JSON is one carry per `D.active_contracts`
+  entry with its own severity, `code_cross_check` `not applicable — plan unchanged` and a `problem` that
+  says the plan has not changed since the review; `record` gets `--scope incremental --tasks
+  "<D.task_digest.tasks>"` and stops the run at `unchanged`.
+
+Lenses and taxonomy classes are checklists over the text you already have; do not re-read the plan for
+each of them. Do not read old review files in full. Read a single issue block only when the digest
+entry is not enough.
 
 ## Step 1: Contract verification (k > 1)
 
@@ -36,6 +56,12 @@ For every entry of `D.active_contracts`, check the current plan against its `req
 If a `resolved_contracts` entry is broken again, record it with `carry` as well; `record` treats
 that as a regression.
 
+An incremental audit checks every active contract too (its task is in scope through `focus`) and
+carries only the ones still open; a contract left out counts as applied, as in a full audit. When every
+task a left-out contract names is unchanged, the fix cannot have landed: `record` carries it back by
+itself, with its earlier severity and fields, and warns `contracts-dropped: [<fingerprints>]`. Treat
+that warning as a missed check and mention it in the summary.
+
 ## Step 2: Lenses
 
 Run `lenses` passes; each one has a focus:
@@ -55,6 +81,7 @@ Run `lenses` passes; each one has a focus:
   consequence.
 - Duplicates across lenses are fine: `record` merges issues with the same fingerprint and keeps
   the highest severity.
+- In an incremental audit the lenses cover the header and the tasks in scope only.
 
 ## Step 3: Code cross-check (mandatory)
 
@@ -102,7 +129,9 @@ that nothing with the same name already exists, since a collision is an issue.
 
 Reuse inside a run: the skill never changes code, so a claim you verified in an earlier audit
 stays verified while its text in the plan is unchanged. Always re-check claims that were
-`not found` or `ambiguous`, and raise the depth to at least `read` for them.
+`not found` or `ambiguous`, and raise the depth to at least `read` for them. In an incremental audit
+the cross-check covers only the claims of the header and of the tasks in scope; the claims of
+`unchanged` tasks keep their status.
 
 ## Findings about the code
 
@@ -144,7 +173,7 @@ directory (never inside the repository) or on stdin.
       "severity": "major",
       "category": "code-plan-mismatch",
       "title": "Short title",
-      "location_in_plan": "## 3. Data model / 3.2",
+      "location_in_plan": "Task 3, Step 2",
       "location_in_code": "src/models/user.ts:42",
       "code_cross_check": "not found — no column `role_id` in migrations",
       "problem": "What is wrong and why it matters.",
@@ -161,6 +190,9 @@ directory (never inside the repository) or on stdin.
   `code-plan-mismatch`. (`unfulfilled-contract` exists only in old reviews; use `carry` instead.)
 - `code_cross_check` must start with one of the four statuses.
 - `location_in_code` and `evidence` are optional; every other field is required.
+- `location_in_plan` names the task as `Task N` (`Task 3, Step 2`) whenever the issue sits in a task:
+  the next audit maps each contract to its task by this field, and a contract whose location names no
+  task (`## 3. Data model`, the plan header) makes the next audit full.
 - The fingerprint is `category` + the first 200 characters of `required_fix` (whitespace
   normalized). `record` computes it; you never do.
 - An empty `issues` list means the plan is clean.

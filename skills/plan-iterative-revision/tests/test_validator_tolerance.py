@@ -48,6 +48,29 @@ class ValidatorTolerance(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertTrue(json.loads(p.stdout)["valid"])
 
+    def with_task_digest(self, rows: str) -> str:
+        text = VALID.read_text(encoding="utf-8").replace(
+            "**Issues found**", "**Audit scope**: incremental\n**Audit tasks**: 3, 7.1\n**Issues found**", 1
+        )
+        return text.rstrip("\n") + "\n\n## Task digest\n\n| Task | Hash |\n|---|---|\n" + rows
+
+    def test_task_digest_is_valid_with_strict_fingerprint(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "digest-review.md"
+            target.write_text(self.with_task_digest("| 3 | 9f3c2a1b |\n| 7.1 | 0e77ad21 |\n"), encoding="utf-8")
+            p = subprocess.run([sys.executable, str(TOOL), "validate-review", "--strict-fingerprint", str(target)],
+                               text=True, capture_output=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(json.loads(p.stdout)["warnings"], [])
+
+    def test_malformed_task_digest_is_a_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "digest-review.md"
+            target.write_text(self.with_task_digest("| 3 | not-a-hash |\n"), encoding="utf-8")
+            p = validate(target)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue(any(w.startswith("task-digest-malformed") for w in json.loads(p.stdout)["warnings"]))
+
 
 if __name__ == "__main__":
     unittest.main()

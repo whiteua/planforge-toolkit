@@ -42,6 +42,8 @@ gates, review rendering, validation) is done by the script; you do the audit and
   `chain.revision` and `stop_policy` = `chain.stop` unless the user passed them;
   `config_from_settings` lists what it supplied. `settings: null` means `plan-brainstorming` is not
   installed next to this skill: the run works as without settings.
+- Task index: `plan-brainstorming` alongside also gives `parse_plan_tasks`, the source of the task
+  hashes that make re-audits incremental (Loop, "Incremental re-audit"). Without it every audit is full.
 
 ## Tool
 
@@ -107,16 +109,26 @@ elif I == interactive and the user gave neither preset nor stop_policy:
 if B.settings and not B.settings.ok and PLAN has `**External:**` lines:
     interactive → ask which environments the audit may read
     autonomous  → final output {"result": null, "error": "<B.settings.errors>"} and stop
-MAX = B.config.max; S = B.config.stop_policy; k = 1
+MAX = B.config.max; S = B.config.stop_policy; k = 1; FULL = false
 
 loop:
     TOOL guard-begin B.git_root <B.basename>-phase-a
-    if k > 1: D = TOOL digest B.dir B.basename --since B.run_start
-    Phase A (references/PHASE-A-AUDIT.md) → issues JSON, saved to a file outside the repository
-        (e.g. the OS temp dir), or piped on stdin with --issues -
+    SCOPE = full; TASKS = ""
+    if k > 1:
+        D = TOOL digest B.dir B.basename --since B.run_start;  T = D.task_digest
+        if not FULL and T.scope in (incremental, none-changed):
+            SCOPE = incremental; TASKS = T.tasks joined with ","
+    if SCOPE == incremental and T.scope == none-changed:
+        no Phase A (references/PHASE-A-AUDIT.md, Step 0): the issues JSON carries every D.active_contracts entry
+    else:
+        Phase A (references/PHASE-A-AUDIT.md; SCOPE incremental: the header and T.line_ranges only) → issues
+        JSON, saved to a file outside the repository (e.g. the OS temp dir), or piped on stdin with --issues -
     R = TOOL record PLAN --run-start B.run_start --max MAX --stop-policy S --mode MODE
-                    --interaction I --lang B.lang --issues <json-file>
+                    --interaction I --lang B.lang --issues <json-file> --scope SCOPE
+                    [--tasks "TASKS"]                  (only with SCOPE incremental; TASKS may be empty)
+    FULL = false
     if R.warnings: fix the issues JSON next time (unescaped code quotes); mention them in the summary
+                   (`contracts-dropped`: the audit skipped an open contract, PHASE-A-AUDIT.md, Step 1)
     if R.action == "ask_limit":  ask "MAX review passes done, N issues still open. Continue?"
                                  options +3 / +5 / stop.
                                  +n → MAX += n and re-run the same record command;
@@ -124,6 +136,7 @@ loop:
     TOOL guard-check B.git_root <B.basename>-phase-a <R.review_path or R.completion_path or B.next_review>
     journal: R.journal_event → journal-event; this audit's code findings → journal-finding (Chain journal below)
 
+    if R.action == "full-audit-required": FULL = true; repeat the loop with the same k (no Phase B)
     if R.action == "stop":       go to Final output
     if R.action == "implement":
         TOOL guard-begin B.git_root <B.basename>-phase-b
@@ -134,6 +147,20 @@ loop:
 
 `MAX` limits the number of reviews that go to Phase B in this run: with `MAX = 5`, audits 1-5 can
 be implemented and audit 6 hits the limit gate if issues remain.
+
+**Incremental re-audit.** From the second audit on, `D.task_digest` compares the plan's tasks with the
+`## Task digest` table of the latest review (8-hex SHA-1 of each task body) and sets the scope:
+`none-changed` (the plan is byte for byte the one the latest review audited: Phase B applied nothing, no
+contract can have closed, so no Phase A runs and the carried set stops the run at `unchanged`);
+`incremental` (Phase A reads the header and the tasks of `T.tasks` by `T.line_ranges`: the changed and
+new tasks, the tasks of the active contracts and every task that depends on a changed, new or removed
+one through `Preconditions`); `full` (`T.reason`: no or a broken table, more than half of the tasks
+touched, a contract whose location names no task, no task index). An incremental audit without issues
+never ends the run: `record` answers `full-audit-required`, writes nothing and keeps `k` and `MAX`; the
+next pass is full, and only its clean result gives `converged`. `audit-only` is always full. `T.reason:
+task-parser-unavailable` (plan-brainstorming not installed alongside) means every audit is full:
+interactive: say so once in the short report; autonomous: nothing is added, the final output stays
+`R.final`. In batch mode each part has its own table and scope.
 
 The limit question needs a confirmation channel. A run without one (no question tool, a subagent
 call, a chain run) is `autonomous`: `record --interaction autonomous` stops at the limit with
@@ -226,6 +253,7 @@ once. Journal commands never run inside a phase: the guard would report the jour
 
 | Gate | When | result | stop_reason | File written |
 |---|---|---|---|---|
+| full audit required | an incremental audit (`--scope incremental`) found no issues | null (`action: full-audit-required`) | null | none; the same audit number runs again in full |
 | clean | no issues on the first audit | `clean` | null | none |
 | converged | no issues on a later audit | `converged` | null | completion file |
 | user stop | `--user-stop` after the limit question | `limit` | null | review, `FINAL` |

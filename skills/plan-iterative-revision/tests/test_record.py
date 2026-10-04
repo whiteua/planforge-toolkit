@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "scripts" / "next_review_index.py"
@@ -341,6 +344,178 @@ class RecordJournalEvent(RecordBase):
         self.assertEqual(out["result"], "limit")
         self.assertEqual(out["journal_event"]["artifacts"], ["review=demo-review-4.md", "verdict=limit"])
         self.assertEqual(out["journal_event"]["status"], "stopped")
+
+
+def task_plan(n: int = 4, edits: dict = None) -> str:
+    """A plan of N tasks; EDITS: {task: other step text}."""
+    blocks = ["# Demo plan\n\nSome English plan text.\n"]
+    for number in range(1, n + 1):
+        step = (edits or {}).get(number, f"do {number}")
+        blocks.append(f"### Task {number}: Title {number}\n\n- [ ] **Step 1: {step}**\n")
+    return "\n".join(blocks)
+
+
+class IncrementalBase(RecordBase):
+    """A plan with four tasks; helpers for --scope incremental."""
+
+    def setUp(self):
+        super().setUp()
+        self.plan.write_text(task_plan(), encoding="utf-8")
+
+    def text(self, out) -> str:
+        return Path(out["review_path"]).read_text(encoding="utf-8")
+
+    def incremental(self, issues, tasks: str, **kwargs):
+        return self.ok(issues, "--scope", "incremental", "--tasks", tasks, **kwargs)
+
+
+class RecordScopeArgs(IncrementalBase):
+    def test_scope_arguments_are_checked(self):
+        cases = [
+            (("--scope", "partial"), "--scope"),
+            (("--scope", "incremental"), "--tasks"),
+            (("--scope", "incremental", "--tasks", "1", "--mode", "audit-only"), "audit-only"),
+        ]
+        for flags, message in cases:
+            proc = self.record([issue("Fix A")], *flags)
+            self.assertEqual(proc.returncode, 64, flags)
+            self.assertIn(message, json.loads(proc.stdout)["error"], flags)
+        self.assertEqual(self.reviews(), [])
+        out = self.ok([issue("Fix A")], "--scope", "full", "--tasks", "ignored")
+        self.assertEqual(out["action"], "implement")
+
+
+class RecordTaskDigest(IncrementalBase):
+    def test_full_by_default_with_task_digest(self):
+        text = self.text(self.ok([issue("Fix A")]))
+        self.assertIn("**Previous review**: none\n**Audit scope**: full\n**Audit tasks**: all\n", text)
+        parsed = nri._load_brainstorm_tool().parse_plan_tasks(self.plan.read_text(encoding="utf-8"))
+        expected = {task["id"]: task["sha1"] for task in parsed["tasks"]}
+        self.assertEqual(nri.parse_task_digest(text), {"tasks": expected, "malformed": []})
+
+    def test_incremental_with_issues_writes_incremental_review(self):
+        self.ok([issue("Fix A")])
+        out = self.incremental([issue("Fix B", location_in_plan="Task 2")], "2, 3")
+        self.assertEqual(out["action"], "implement")
+        text = self.text(out)
+        self.assertIn("**Audit scope**: incremental\n**Audit tasks**: 2, 3\n", text)
+        self.assertEqual(len(nri.parse_task_digest(text)["tasks"]), 4)
+
+    def test_plan_without_tasks_gets_no_table(self):
+        self.plan.write_text("# Demo plan\n\nSome English plan text.\n", encoding="utf-8")
+        text = self.text(self.ok([issue("Fix A")]))
+        self.assertIn("**Audit scope**: full\n", text)
+        self.assertIsNone(nri.parse_task_digest(text))
+
+
+class RecordFullAuditRequired(IncrementalBase):
+    def test_clean_incremental_requires_full_audit(self):
+        self.ok([issue("Fix A", location_in_plan="Task 2")])
+        self.plan.write_text(task_plan(edits={2: "fixed"}), encoding="utf-8")
+        out = self.incremental([], "2")
+        self.assertEqual((out["action"], out["result"], out["review_path"]), ("full-audit-required", None, None))
+        self.assertIsNone(out["journal_event"])
+        self.assertNotIn("final", out)
+        self.assertEqual(self.reviews(), ["demo-review-1.md"])
+        self.assertEqual(nri.next_review_number(str(self.dir), "demo")[0], 2)
+        out = self.ok([], "--scope", "full")
+        self.assertEqual(out["result"], "converged")
+        self.assertTrue((self.dir / "demo-completion.md").exists())
+
+    def test_first_audit_and_unknown_tasks_exit_64(self):
+        proc = self.record([issue("Fix A")], "--scope", "incremental", "--tasks", "1")
+        self.assertEqual(proc.returncode, 64)
+        self.assertIn("first audit", json.loads(proc.stdout)["error"])
+        self.ok([issue("Fix A")])
+        proc = self.record([issue("Fix B")], "--scope", "incremental", "--tasks", "2,99")
+        self.assertEqual(proc.returncode, 64)
+        self.assertIn("99", json.loads(proc.stdout)["error"])
+        self.assertEqual(self.reviews(), ["demo-review-1.md"])
+
+    def test_without_plan_brainstorming(self):
+        issues_file = self.dir / "issues.json"
+        issues_file.write_text(json.dumps({"summary": "S.", "issues": [issue("Fix A", location_in_plan="Task 2")]}),
+                               encoding="utf-8")
+        args = ["nri", "record", str(self.plan), "--run-start", "1", "--max", "5", "--issues", str(issues_file)]
+        out = io.StringIO()
+        with mock.patch.object(nri, "_load_brainstorm_tool", return_value=None), contextlib.redirect_stdout(out):
+            self.assertEqual(nri.main(args), 0)
+            first = json.loads(out.getvalue())
+            out.seek(0)
+            out.truncate()
+            issues_file.write_text(json.dumps({"summary": "S.", "issues": []}), encoding="utf-8")
+            self.assertEqual(nri.main(args + ["--scope", "incremental", "--tasks", "2"]), 0)
+        text = self.text(first)
+        self.assertIn("**Audit scope**: full\n**Audit tasks**: all\n", text)
+        self.assertNotIn("## Task digest", text)
+        self.assertEqual(json.loads(out.getvalue())["action"], "full-audit-required")
+
+
+class DecideFullAuditRequired(unittest.TestCase):
+    def test_only_an_empty_incremental_audit(self):
+        decide = lambda history, scope: nri.decide(history, [], 9, "pragmatic", "full-cycle", "autonomous", False, scope)
+        d = decide([{"a"}], "incremental")
+        self.assertEqual((d["action"], d["result"], d["write_review"]), ("full-audit-required", None, False))
+        self.assertEqual(decide([{"a"}], "full")["result"], "converged")
+
+
+class RecordDroppedContracts(IncrementalBase):
+    def test_dropped_contract_of_unchanged_task_is_carried(self):
+        self.ok([issue("Fix A", "minor", location_in_plan="Task 2, Step 1"), issue("Fix B", location_in_plan="Task 3")])
+        fp_a = nri.make_fingerprint("logic", "Fix A")
+        self.plan.write_text(task_plan(edits={3: "fixed"}), encoding="utf-8")
+        out = self.incremental([issue("Fix C", location_in_plan="Task 3")], "3")
+        self.assertEqual({it["fingerprint"] for it in out["issues"]}, {fp_a, nri.make_fingerprint("logic", "Fix C")})
+        self.assertIn(f"contracts-dropped: [{fp_a}]", out["warnings"])
+        self.assertEqual(out["flows"]["resolved"], 1)  # Fix B: its task changed, so the skipped contract is closed
+        carried = next(it for it in out["issues"] if it["fingerprint"] == fp_a)
+        self.assertEqual(carried["severity"], "minor")
+        text = self.text(out)
+        self.assertIn("- **Carried from**: demo-review-1.md#", text)
+        self.assertIn("Problem for Fix A", text)
+
+    def test_carry_of_an_old_review_contract(self):
+        item = nri.carry_of({"fingerprint": "aaaa1111", "severity": "minor", "required_fix": "Fix X",
+                             "problem": "", "code_cross_check": "", "location_in_code": ""})
+        self.assertEqual((item["carry"], item["severity"]), ("aaaa1111", "minor"))
+        self.assertEqual((item["problem"], item["code_cross_check"]), ("Fix X", nri.CARRIED_BY_RECORD))
+
+    def test_closed_contracts_without_new_issues_need_a_full_audit(self):
+        self.ok([issue("Fix A", location_in_plan="Task 2"), issue("Fix B")])  # Fix B: "## Section 1", no task
+        self.plan.write_text(task_plan(edits={2: "fixed"}), encoding="utf-8")
+        out = self.incremental([], "2")
+        self.assertEqual((out["action"], out["warnings"]), ("full-audit-required", []))
+
+
+class RecordGatesIncremental(IncrementalBase):
+    def test_unchanged_and_drain_under_incremental(self):
+        self.ok([issue("Fix A", location_in_plan="Task 2")])
+        fp = nri.make_fingerprint("logic", "Fix A")
+        out = self.incremental([{"carry": fp, "severity": "major", "code_cross_check": "not applicable",
+                                 "problem": "Still missing"}], "2")
+        self.assertEqual((out["result"], out["stop_reason"]), ("stagnation", "unchanged"))
+        self.ok([issue("Fix A", location_in_plan="Task 2")], run_start=3)  # a new run: its first audit is full
+        self.plan.write_text(task_plan(edits={2: "fixed"}), encoding="utf-8")
+        out = self.incremental([issue("Fix N", "nit", location_in_plan="Task 1")], "1,2", run_start=3)
+        self.assertEqual((out["result"], out["stop_reason"]), ("converged", "drain"))
+
+
+class DecideGatesIncremental(unittest.TestCase):
+    """Every gate but the new first rule fires under --scope incremental as under full."""
+
+    def test_other_gates_do_not_depend_on_scope(self):
+        issues = lambda *fps, severity="major": [{"fingerprint": fp, "severity": severity} for fp in fps]
+        cases = [
+            ([{"a"}], issues("b", severity="nit"), ("converged", "drain")),
+            ([{"a"}], issues("a"), ("stagnation", "unchanged")),
+            ([{"a"}, {"a", "b"}], issues("a", "b", "c"), ("stagnation", "churn")),
+            ([{"a", "b"}, {"a", "c"}], issues("a", "d"), ("escalated", "stuck")),
+            ([{"a"}, {"b"}], issues("a", "c"), ("escalated", "regression")),
+        ]
+        for history, found, expected in cases:
+            for scope in ("full", "incremental"):
+                d = nri.decide(history, found, 9, "pragmatic", "full-cycle", "autonomous", False, scope)
+                self.assertEqual((d["result"], d["stop_reason"]), expected, (scope, expected))
 
 
 if __name__ == "__main__":

@@ -14,11 +14,14 @@ Run orchestration (used by SKILL.md):
 
   record <plan> --run-start N0 --max M --issues <file|-> [--stop-policy S]
          [--mode full-cycle|audit-only] [--interaction interactive|autonomous] [--user-stop] [--lang ru|en]
+         [--scope full|incremental] [--tasks <ids>]
       Takes the Phase A issues JSON, resolves 'carry' fingerprints, computes fingerprints, merges
       duplicates, applies ALL loop gates (single authority), renders + writes + strictly validates
       REVIEW(N) or the completion file, and prints {action, result, stop_reason, ..., final?,
       journal_event}. journal_event = {stage: revision, status: done|stopped, artifacts: [k=v],
       input?} when the run stops (done: clean/converged), null while the loop continues.
+      --scope incremental (a re-audit of the tasks in --tasks, comma-separated ids) without issues gives
+      action full-audit-required: nothing is written and the same audit runs again in full.
 
   guard-begin <git-root> <label> / guard-check <git-root> <label> <allowed-path>...
       Diff guard with snapshots stored in the OS temp dir (never inside the repository).
@@ -40,7 +43,9 @@ Low-level subcommands:
 
   digest <dir> <basename> [--since N]
       Print a compact machine digest of REVIEW history as JSON:
-      {iteration, active_contracts[], resolved_contracts[]}. No flows (S_i unknown at audit start).
+      {iteration, active_contracts[], resolved_contracts[], task_digest}. No flows (S_i unknown at audit
+      start). task_digest: the scope of the next audit by the tasks' hashes (scope none-changed |
+      incremental | full, the tasks to read and their line ranges); absent without reviews.
 
   flow-analyze <dir> <basename> --current <fps.json|-> [--since N]
       Set-algebra over fingerprint history vs current audit S_i. Print JSON:
@@ -129,6 +134,13 @@ MAX_LENSES = 4
 CHURN_WINDOW = 2
 K_STUCK = 3
 SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
+# Incremental re-audit (spec 5 of plan-refactoring-01): task hashes in the review, scope of the next audit.
+AUDIT_SCOPES = ("full", "incremental")
+FULL_SCOPE_RATIO = 0.5
+TASK_DIGEST_HEADING = "## Task digest"
+TASK_DIGEST_ROW_RE = re.compile(r"^\|\s*(?P<id>[^|\s]+)\s*\|\s*(?P<hash>[0-9a-f]{8})\s*\|$", re.IGNORECASE)
+TASK_REF_RE = re.compile(r"\b(?:Task|Задача)\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
+CARRIED_BY_RECORD = "not applicable — carried by record"
 
 
 def print_json(data: object) -> None:
@@ -308,6 +320,9 @@ def parse_review_issues(text: str) -> List[Dict[str, str]]:
                 "required_fix": required_fix.strip(),
                 "acceptance": (extract_issue_field(block, "Acceptance") or "").strip(),
                 "location_in_plan": (extract_issue_field(block, "Location in plan") or "").strip(),
+                "location_in_code": (extract_issue_field(block, "Location in code") or "").strip(),
+                "code_cross_check": (extract_issue_field(block, "Code cross-check") or "").strip(),
+                "problem": (extract_issue_field(block, "Problem") or "").strip(),
                 "fix": first_line,
                 "status": status,
             }
@@ -516,6 +531,10 @@ def validate_review(path: str, strict_fingerprint: bool) -> Tuple[bool, Dict[str
                     f"actual {actual_counts[severity]}"
                 )
 
+    digest = parse_task_digest(text)
+    if digest is not None and digest["malformed"]:
+        warnings.append(f"task-digest-malformed: {len(digest['malformed'])} row(s) are not `| <task id> | <8 hex> |`")
+
     valid = not errors
     return valid, {
         "valid": valid,
@@ -705,6 +724,156 @@ def cmd_resolve_config(args: List[str]) -> int:
     return 2 if "error" in result else 0
 
 
+def contract_tasks(location: str) -> List[str]:
+    """Task ids named in a contract's `Location in plan` (`Task N`, `Task N.M`, `Задача N`, `### Task N:`,
+    at the start or inside the line, several per line), in order, once each."""
+    found: List[str] = []
+    for task_id in TASK_REF_RE.findall(location or ""):
+        if task_id not in found:
+            found.append(task_id)
+    return found
+
+
+def parse_task_digest(review_text: str) -> Optional[Dict[str, object]]:
+    """The `## Task digest` table of a review: {"tasks": {id: 8-hex hash} in table order, "malformed": [rows]}.
+    None when the review has no such section (written before it existed or without plan-brainstorming).
+    The last unindented heading counts: issue fields are indented and cannot fake it."""
+    lines = review_text.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.rstrip() == TASK_DIGEST_HEADING]
+    if not starts:
+        return None
+    tasks: Dict[str, str] = {}
+    malformed: List[str] = []
+    for line in lines[starts[-1] + 1:]:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            break
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if cells == ["Task", "Hash"] or all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            continue
+        match = TASK_DIGEST_ROW_RE.match(stripped)
+        if not match or match.group("id") in tasks:
+            malformed.append(stripped)
+            continue
+        tasks[match.group("id")] = match.group("hash").lower()
+    if not tasks and not malformed:
+        malformed.append("(no rows)")
+    return {"tasks": tasks, "malformed": malformed}
+
+
+def dependents_closure(changed: Iterable[str], tasks: List[Dict[str, object]]) -> List[str]:
+    """Tasks whose `refs` (Preconditions) name a changed task, then the tasks that name those, up to a
+    fixed point. The seeds may include ids that are no longer in TASKS (removed tasks): their referrers
+    are returned too. Plan order, without the seeds themselves; a cycle in `refs` ends at the fixed point."""
+    seeds = set(changed)
+    reached = set(seeds)
+    grown = True
+    while grown:
+        grown = False
+        for task in tasks:
+            task_id = str(task["id"])
+            if task_id not in reached and any(str(ref) in reached for ref in task.get("refs") or []):
+                reached.add(task_id)
+                grown = True
+    return [str(task["id"]) for task in tasks if str(task["id"]) in reached - seeds]
+
+
+def plan_task_index(plan_text: str) -> Tuple[Optional[List[Dict[str, object]]], Optional[str]]:
+    """(tasks, None) by brainstorm_tool.parse_plan_tasks (spec 2 of plan-refactoring-01), or (None, reason):
+    `task-parser-unavailable` without plan-brainstorming alongside, `no-tasks` for a plan or part without
+    `### Task N:` headings, `duplicate-task-ids` when an id repeats (hashes by id would be ambiguous)."""
+    parser = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parser is None:
+        return None, "task-parser-unavailable"
+    parsed = parser(plan_text)
+    if not parsed["tasks"]:
+        return None, "no-tasks"
+    if parsed["duplicates"]:
+        return None, "duplicate-task-ids"
+    return parsed["tasks"], None
+
+
+def task_scope_base(plan_sha_changed: bool, reason: Optional[str]) -> Dict[str, object]:
+    """The `task_digest` block when nothing can be compared: scope `full`, `available: false`."""
+    return {
+        "available": False, "plan_sha_changed": plan_sha_changed, "changed": [], "new": [], "removed": [],
+        "unchanged": [], "focus": [], "dependents": [], "tasks": [], "line_ranges": {},
+        "changed_ratio": None, "scope": "full", "reason": reason, "warnings": [],
+    }
+
+
+def task_scope(plan_text: str, plan_sha: str, latest_review: str,
+               active_contracts: List[Dict[str, str]]) -> Dict[str, object]:
+    """Scope of the next audit: the plan's tasks against the `## Task digest` table of the latest review.
+    First match wins: no task index → `full`; plan SHA-256 equal to the review's → `none-changed`; no table
+    or a malformed one → `full`; changed_ratio > FULL_SCOPE_RATIO or an active contract whose
+    `Location in plan` names no known task → `full`; otherwise `incremental`. `tasks` = changed ∪ new ∪
+    focus ∪ dependents in plan order (the `--tasks` of `record`); `line_ranges` = those tasks + `header`."""
+    sha_changed = plan_sha.lower() != (header_value(latest_review, "Plan SHA-256") or "").lower()
+    tasks, reason = plan_task_index(plan_text)
+    if tasks is None:
+        return task_scope_base(sha_changed, reason)
+    order = [str(task["id"]) for task in tasks]
+    current = {str(task["id"]): str(task["sha1"]) for task in tasks}
+    table = parse_task_digest(latest_review)
+    previous: Dict[str, str] = dict(table["tasks"]) if table and not table["malformed"] else {}  # type: ignore[arg-type]
+    known = set(current) | set(previous)
+    named: List[str] = []
+    irreducible = False
+    for contract in active_contracts:
+        ids = contract_tasks(contract.get("location_in_plan", ""))
+        irreducible = irreducible or not ids or any(task_id not in known for task_id in ids)
+        named += ids
+    focus = [task_id for task_id in order if task_id in named]
+    changed: List[str] = []
+    new: List[str] = []
+    removed: List[str] = []
+    dependents: List[str] = []
+    unchanged = list(order)
+    ratio: Optional[float] = 0.0
+    warnings: List[str] = []
+    if not sha_changed:
+        scope, reason = "none-changed", None
+    elif table is None or table["malformed"]:
+        scope, reason, ratio, unchanged = "full", "no-task-digest" if table is None else "task-digest-malformed", None, []
+        warnings += [] if table is None else ["task-digest-malformed"]
+    else:
+        changed = [task_id for task_id in order if task_id in previous and previous[task_id] != current[task_id]]
+        new = [task_id for task_id in order if task_id not in previous]
+        removed = [task_id for task_id in previous if task_id not in current]
+        dependents = dependents_closure(changed + new + removed, tasks)  # removed: their referrers now dangle
+        unchanged = [task_id for task_id in order if previous.get(task_id) == current[task_id]]
+        ratio = len(set(changed) | set(new) | set(removed) | set(dependents)) / max(len(previous), 1)
+        scope, reason = (("full", "changed-ratio") if ratio > FULL_SCOPE_RATIO
+                         else ("full", "contract-without-task") if irreducible else ("incremental", None))
+    in_scope = set(changed) | set(new) | set(focus) | set(dependents)
+    first = min(int(task["line_start"]) for task in tasks)  # type: ignore[arg-type]
+    line_ranges: Dict[str, List[int]] = {"header": [1, first - 1]} if first > 1 else {}
+    line_ranges.update({str(task["id"]): [int(task["line_start"]), int(task["line_end"])]  # type: ignore[arg-type]
+                        for task in tasks if str(task["id"]) in in_scope})
+    return {
+        "available": True, "plan_sha_changed": sha_changed, "changed": changed, "new": new, "removed": removed,
+        "unchanged": unchanged, "focus": focus, "dependents": dependents,
+        "tasks": [task_id for task_id in order if task_id in in_scope], "line_ranges": line_ranges,
+        "changed_ratio": None if ratio is None else round(ratio, 4), "scope": scope, "reason": reason,
+        "warnings": warnings,
+    }
+
+
+def review_task_scope(directory: str, latest_review: str, active_contracts: List[Dict[str, str]]) -> Dict[str, object]:
+    """task_scope for the plan the latest review audited: its `**Audited plan**`, a file in DIRECTORY
+    (`render_review` writes a basename; the header is cut to one, so it cannot point out of DIRECTORY)."""
+    name = os.path.basename(header_value(latest_review, "Audited plan") or "")
+    path = os.path.join(directory, name)
+    if not name or not os.path.isfile(path):
+        return task_scope_base(True, "plan-not-found")
+    with open(path, "rb") as f:
+        plan_sha = hashlib.sha256(f.read()).hexdigest()
+    return task_scope(read_text(path), plan_sha, latest_review, active_contracts)
+
+
 def cmd_digest(directory: str, basename: str, since: int = 0) -> int:
     files = collect_review_files(directory, basename, since)
     if not files:
@@ -712,7 +881,8 @@ def cmd_digest(directory: str, basename: str, since: int = 0) -> int:
         return 0
 
     latest_n, latest_path = files[-1]
-    latest_issues = parse_review_issues(read_text(latest_path))
+    latest_text = read_text(latest_path)
+    latest_issues = parse_review_issues(latest_text)
     active: List[Dict[str, str]] = []
     seen: set = set()
     for issue in latest_issues:
@@ -759,6 +929,7 @@ def cmd_digest(directory: str, basename: str, since: int = 0) -> int:
             "latest_review": os.path.basename(latest_path),
             "active_contracts": active,
             "resolved_contracts": resolved,
+            "task_digest": review_task_scope(directory, latest_text, latest_issues),
         }
     )
     return 0
@@ -1292,12 +1463,17 @@ def decide(
     mode: str,
     interaction: str,
     user_stop: bool,
+    scope: str = "full",
 ) -> Dict[str, object]:
-    """Single authority for loop gates. First match wins."""
+    """Single authority for loop gates. First match wins. An incremental audit without issues proves
+    nothing about the tasks it did not read: `full-audit-required`, nothing written, the same k again."""
     current = {issue["fingerprint"] for issue in issues}
     k = len(history) + 1
     flows = compute_flows(history, current)
     decision: Dict[str, object] = {"iteration": k, "flows": flows, "escalated": [], "status": None}
+    if scope == "incremental" and not current:
+        decision.update({"action": "full-audit-required", "result": None, "stop_reason": None, "write_review": False})
+        return decision
 
     def stop(result: str, reason: Optional[str], status: Optional[str], write: bool = True) -> Dict[str, object]:
         decision.update(
@@ -1347,7 +1523,11 @@ def render_review(
     payload: Dict[str, object],
     flows: Dict[str, int],
     status: Optional[str],
+    audit_tasks: Optional[List[str]] = None,
+    task_hashes: Optional[List[Tuple[str, str]]] = None,
 ) -> str:
+    """AUDIT_TASKS: the task ids of an incremental audit (None = a full audit, `all`); TASK_HASHES:
+    (id, 8-hex sha1) of every plan task for the `## Task digest` table (None = no table)."""
     counts = {severity: sum(1 for it in issues if it["severity"] == severity) for severity in SEVERITIES}
     with open(plan, "rb") as f:
         data = f.read()
@@ -1365,6 +1545,8 @@ def render_review(
     lines += [
         f"**Audited at**: {utc_now()}",
         f"**Previous review**: {os.path.basename(prev_review) if prev_review else 'none'}",
+        f"**Audit scope**: {'full' if audit_tasks is None else 'incremental'}",
+        f"**Audit tasks**: {'all' if audit_tasks is None else ', '.join(audit_tasks) or 'none'}",
         f"**Issues found**: {len(issues)} (blocker: {counts['blocker']}, major: {counts['major']}, "
         f"minor: {counts['minor']}, nit: {counts['nit']})",
         f"**Flow**: +{flows['new']} / -{flows['resolved']} / {flows['persisted']} persisted / "
@@ -1416,6 +1598,9 @@ def render_review(
     lines += ["## Deferred from previous review", ""]
     lines += [f"- [{it['id']}] carried from {it['carried_from']}" for it in carried] or ["none"]
     lines += ["", "## Notes for implementation", "", str(payload.get("notes") or "").strip() or "none", ""]
+    if task_hashes:
+        lines += [TASK_DIGEST_HEADING, "", "| Task | Hash |", "|---|---|"]
+        lines += [f"| {task_id} | {sha} |" for task_id, sha in task_hashes] + [""]
     return "\n".join(lines)
 
 
@@ -1493,6 +1678,40 @@ def revision_journal_event(
     return event
 
 
+def dropped_contracts(
+    directory: str, basename: str, run_start: int, plan_index: List[Dict[str, object]], issues: List[Dict[str, str]]
+) -> List[Dict[str, str]]:
+    """Contracts of the latest review in the run that an incremental audit left out although every task
+    they name is unchanged (its sha1 equals the review's `## Task digest` row): the fix cannot have
+    landed. Contracts of changed tasks and contracts without a task id are not returned."""
+    latest = read_text(collect_review_files(directory, basename, run_start)[-1][1])
+    table = parse_task_digest(latest)
+    if table is None or table["malformed"]:
+        return []
+    hashes: Dict[str, str] = dict(table["tasks"])  # type: ignore[arg-type]
+    unchanged = {str(task["id"]) for task in plan_index if hashes.get(str(task["id"])) == task["sha1"]}
+    present = {issue["fingerprint"] for issue in issues}
+    dropped: Dict[str, Dict[str, str]] = {}
+    for contract in parse_review_issues(latest):
+        fingerprint, ids = contract["fingerprint"], contract_tasks(contract["location_in_plan"])
+        if fingerprint and fingerprint not in present and ids and all(task_id in unchanged for task_id in ids):
+            dropped.setdefault(fingerprint, contract)
+    return list(dropped.values())
+
+
+def carry_of(contract: Dict[str, str]) -> Dict[str, str]:
+    """The carry item `record` adds for a dropped contract: its earlier severity, problem, cross-check
+    and location in code; an old review without them gives the required fix and CARRIED_BY_RECORD."""
+    cross_check = contract.get("code_cross_check", "")
+    return {
+        "carry": contract["fingerprint"],
+        "severity": contract["severity"],
+        "problem": contract.get("problem") or contract["required_fix"],
+        "code_cross_check": cross_check if code_cross_check_status(cross_check) else CARRIED_BY_RECORD,
+        "location_in_code": contract.get("location_in_code", ""),
+    }
+
+
 RECORD_OPTIONS = {
     "--run-start": "run_start",
     "--max": "max",
@@ -1501,6 +1720,8 @@ RECORD_OPTIONS = {
     "--interaction": "interaction",
     "--issues": "issues",
     "--lang": "lang",
+    "--scope": "scope",
+    "--tasks": "tasks",
 }
 
 
@@ -1510,6 +1731,7 @@ def parse_record_args(args: List[str]) -> Dict[str, object]:
         "interaction": "autonomous",
         "user_stop": False,
         "stop_policy": "pragmatic",
+        "scope": "full",
     }
     positional: List[str] = []
     i = 0
@@ -1549,6 +1771,17 @@ def parse_record_args(args: List[str]) -> Dict[str, object]:
         raise RecordError("--lang must be ru or en")
     if opts["stop_policy"] not in STOP_POLICIES:
         raise RecordError(f"--stop-policy must be one of: {', '.join(STOP_POLICIES)}")
+    if opts["scope"] not in AUDIT_SCOPES:
+        raise RecordError("--scope must be full or incremental")
+    if opts["scope"] == "incremental":
+        if "tasks" not in opts:
+            raise RecordError("--tasks <ids> is required with --scope incremental")
+        if opts["mode"] == "audit-only":
+            raise RecordError("--mode audit-only is always a full audit; drop --scope incremental")
+        ids = [item.strip() for item in str(opts["tasks"]).split(",") if item.strip()]
+        opts["tasks"] = list(dict.fromkeys(ids))
+    else:
+        opts["tasks"] = None  # a full audit names no tasks: --tasks is ignored
     return opts
 
 
@@ -1578,6 +1811,23 @@ def cmd_record(args: List[str]) -> int:
 
     run_start = int(opts["run_start"])  # type: ignore[arg-type]
     history = ordered_fingerprint_sets(directory, basename, run_start)
+    plan_index, _reason = plan_task_index(read_text(plan))
+    # The ids of an incremental audit, None for a full one; without the task index the review records a full audit.
+    audit_tasks = opts["tasks"] if plan_index is not None else None
+    if opts["tasks"] is not None:
+        if not history:
+            print_json({"error": "--scope incremental: the first audit of a run must be full"})
+            return 64
+        known = {str(task["id"]) for task in plan_index or []}
+        unknown = [task_id for task_id in opts["tasks"] if plan_index is not None and task_id not in known]  # type: ignore[union-attr]
+        if unknown:
+            print_json({"error": f"--tasks names tasks the plan does not have: {', '.join(unknown)}"})
+            return 64
+        dropped = dropped_contracts(directory, basename, run_start, plan_index, issues) if plan_index else []
+        if dropped:
+            raw = list(payload.get("issues", [])) + [carry_of(contract) for contract in dropped]
+            issues = normalize_input_issues(directory, basename, raw)
+            input_warnings.append("contracts-dropped: [" + ", ".join(c["fingerprint"] for c in dropped) + "]")
     decision = decide(
         history,
         issues,
@@ -1586,6 +1836,7 @@ def cmd_record(args: List[str]) -> int:
         str(opts["mode"]),
         str(opts["interaction"]),
         bool(opts["user_stop"]),
+        str(opts["scope"]),
     )
     lang = str(opts.get("lang") or detect_lang(read_text(plan)))
     run_reviews = [os.path.basename(path) for _n, path in collect_review_files(directory, basename, run_start)]
@@ -1606,7 +1857,9 @@ def cmd_record(args: List[str]) -> int:
         n, prev = next_review_number(directory, basename)
         path = os.path.join(directory, f"{basename}-review-{n}.md")
         text = render_review(
-            n, basename, plan, lang, prev, issues, payload, decision["flows"], decision["status"]  # type: ignore[arg-type]
+            n, basename, plan, lang, prev, issues, payload, decision["flows"], decision["status"],  # type: ignore[arg-type]
+            audit_tasks=audit_tasks,  # type: ignore[arg-type]
+            task_hashes=[(str(task["id"]), str(task["sha1"])) for task in plan_index] if plan_index else None,
         )
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)

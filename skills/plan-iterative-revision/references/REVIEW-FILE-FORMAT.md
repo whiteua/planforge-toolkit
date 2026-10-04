@@ -22,6 +22,8 @@ Review files are immutable history once written.
 **Plan git blob**: <hash>           (only inside a git repository)
 **Audited at**: <ISO-8601 UTC, e.g. 2026-05-09T12:34:56Z>
 **Previous review**: <basename>-review-<N-1>.md | none
+**Audit scope**: full | incremental
+**Audit tasks**: all | <task ids of an incremental audit, comma-separated> | none
 **Issues found**: <total> (blocker: x, major: y, minor: z, nit: w)
 **Flow**: +new / -resolved / P persisted / X reintro | Profile: (B,M,m,n)
 **Status**: FINAL — ... | ESCALATED — ...   (only on a final review)
@@ -66,6 +68,13 @@ Review files are immutable history once written.
 ## Notes for implementation
 
 <text> | none
+
+## Task digest                      (with plan-brainstorming alongside and a plan with task headings)
+
+| Task | Hash |
+|---|---|
+| 1 | 9f3c2a1b |
+| 1.1 | 0e77ad21 |
 ```
 
 ## Rules
@@ -77,6 +86,13 @@ Review files are immutable history once written.
   required fix>`, first 8 hex characters.
 - Severity: `blocker`, `major`, `minor`, `nit`. Category: `logic`, `code`, `math`, `ops`, `db`,
   `contract`, `tests`, `security`, `perf`, `code-plan-mismatch`, `unfulfilled-contract` (legacy).
+- `Audit scope`/`Audit tasks`: `full`/`all` for a full audit (always without plan-brainstorming
+  alongside), `incremental` with the `--tasks` ids of `record` (`none` for an empty list). plan-chain-runner's
+  `run-stats` reads both to count what the audit read.
+- `## Task digest`: every `### Task N:` of the audited plan, its id as written and the first 8 hex of the
+  SHA-1 of its body (`brainstorm_tool.parse_plan_tasks`). The next `digest` compares it with the plan to
+  scope the next audit. There is no table without plan-brainstorming, for a plan without tasks or with
+  repeated task ids.
 
 ## Status markers
 
@@ -95,4 +111,7 @@ Phase B never runs on a review that has a `Status` line.
 
 Required headers and sections; severity, category and `Code cross-check` vocabulary; unique ids;
 issue count and per-severity counts against `Issues found`; `Required fix`, `Acceptance` and an
-8-hex `Fingerprint` in every issue; with `--strict-fingerprint`, each fingerprint recomputed.
+8-hex `Fingerprint` in every issue; with `--strict-fingerprint`, each fingerprint recomputed. The
+`Audit scope`/`Audit tasks` headers and the `## Task digest` table are optional; a table row that is
+not `| <id> | <8 hex> |`, a repeated id or an empty table gives the warning `task-digest-malformed`,
+never an error, so `plan-splitter verify-status` is not affected.

@@ -28,6 +28,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Single findings stream | Deduplicated issue intake (Sentry fingerprinting); single source of truth | Findings of the executor, the resolver and the revision are recorded once per `file` + `summary`, appended to `BACKLOG.md` at once and exported as `<goal>-followups.json`, the input format of `findings-parse` |
 | Questions as durable state | Human-in-the-loop callback tasks (AWS Step Functions); ticket lifecycle | A run without a confirmation channel records `Qn` (`open → answered → applied`) and stops; the owning skill applies the answer on resume |
 | Amend mode by the spec's owner | Change control (IEEE 828 configuration management); single ownership | An approved spec is changed in place by `plan-brainstorming`, re-checked and re-approved; the journal sees the change through the `writing` stage's input hash and asks a drift question instead of keeping a stale plan |
+| Size budget before the plan exists | Function-point style estimation (Albrecht, 1979); work-in-progress limits (Kanban) | `spec-check` returns `volume`: Components items × tier factor (1/2/3) + Testing Strategy items, against the shared budget of 40 tasks (`SIZE_BUDGET`); above it the Chain Settings message proposes several specs of one goal |
 
 ---
 
@@ -44,6 +45,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | "Read before modify" invariant | IDE refactoring tools (IntelliJ, Eclipse, ~2001) | Agent must read the target section before editing |
 | Exact line references | Unix patch/diff format (Larry Wall, 1975–1985) | Edits specify precise line ranges |
 | Self-review checklist | Author self-inspection (Wiegers, 1999) | Structured verification before handoff |
+| Size budget | Work-in-progress limits (Kanban); batch-size reduction (Reinertsen, 2009) | `plan-check` returns `size_class` and warns `plan-oversized` above 40 tasks or 150000 bytes (`brainstorm_tool.SIZE_BUDGET`, `--max-tasks`/`--max-bytes`); the hand-off advises decomposition instead of a task-count split rule, and a chain records the warning on the `writing` event without stopping |
 
 ---
 

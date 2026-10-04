@@ -81,6 +81,12 @@ TIER_RE = re.compile(r"^>\s*(?:\*\*)?Tier:?(?:\*\*)?:?\s*(?P<tier>[A-Za-z]+)\s*$
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 PLACEHOLDER_RE = re.compile(r"\b(TBD|TODO|FIXME)\b")
 NONE_TEXT = "(none)"
+# Size budget of one plan, shared by spec-check (volume), plan_tool.py plan-check (plan-oversized,
+# with equal fallback values) and the splitter gate; a contract test in plan-writing compares them.
+SIZE_BUDGET = {"tasks": 40, "bytes": 150000}
+# Plan tasks per Components item by tier: estimate_tasks = components × factor + testing items.
+TIER_TASK_FACTOR = {"Quick": 1, "Standard": 2, "Deep": 3}
+VOLUME_UNKNOWN = "volume-unknown: Components has no list items, table rows or subheadings"
 # Same Cyrillic range and threshold as executor_tool.py, splitter_tool.py and resolver_tool.py.
 CYRILLIC_RE = re.compile("[Ѐ-ӿ]")
 LANG_THRESHOLD = 0.05
@@ -544,6 +550,28 @@ def resolve_settings(path: str) -> Dict[str, Any]:
     return result
 
 
+def _spec_volume(text: str, bodies: Dict[str, str], tier: Optional[str]) -> Dict[str, Any]:
+    """Volume estimate of a spec: the items of Components, Testing Strategy and Out of Scope
+    (_spec_item_heads), the size in bytes and estimate_tasks = components × TIER_TASK_FACTOR[tier]
+    + testing_items; a missing or unknown tier counts as Standard. An estimate, not a measurement:
+    nothing is written into the spec."""
+    def count(heading: str) -> int:
+        return len(_spec_item_heads(bodies.get(heading, "").splitlines()))
+
+    components = count("## Components")
+    testing_items = count("## Testing Strategy")
+    estimate = components * TIER_TASK_FACTOR.get(tier or "", TIER_TASK_FACTOR["Standard"]) + testing_items
+    return {
+        "components": components,
+        "testing_items": testing_items,
+        "out_of_scope_items": count("## Out of Scope"),
+        "spec_bytes": len(text.encode("utf-8")),
+        "estimate_tasks": estimate,
+        "budget_tasks": SIZE_BUDGET["tasks"],
+        "over_budget": estimate > SIZE_BUDGET["tasks"],
+    }
+
+
 def check_spec(text: str) -> Dict[str, Any]:
     """Check spec text against the spec contract. Code fences are ignored."""
     errors: List[str] = []
@@ -622,6 +650,10 @@ def check_spec(text: str) -> Dict[str, Any]:
             number = next(n for n, line in lines if re.match(r"^>\s*(?:\*\*)?Backlog\b", line))
             errors.append(f"line {number}: backlog-not-a-file-name: {metadata['backlog']}")
     warnings.extend(metadata["warnings"])
+    volume = _spec_volume(text, bodies, tier)
+    components_body = bodies.get("## Components", "")
+    if components_body and not components_body.startswith(NONE_TEXT) and volume["components"] == 0:
+        warnings.append(VOLUME_UNKNOWN)
     return {
         "ok": not errors,
         "tier": tier,
@@ -629,6 +661,7 @@ def check_spec(text: str) -> Dict[str, Any]:
         "chain": metadata["chain"],
         "environments": metadata["environments"],
         "backlog": metadata["backlog"],
+        "volume": volume,
         "errors": errors,
         "warnings": warnings,
     }

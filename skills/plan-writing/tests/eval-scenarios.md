@@ -29,6 +29,29 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** Writes default settings into the plan header; marks `writing` `done`;
   asks in chat and continues; records the question with `--answer`.
 
+## Scenario 3: No split advice by task count
+
+- **Setup:** A spec with `> Chain: split=auto; …`; the written plan has 16 tasks and 60 KB;
+  `plan-check` returns `size_class: medium` and no `plan-oversized`.
+- **Trigger:** Subagent reaches 7. Execution Handoff.
+- **Expected (PASS):** The message names 16 tasks, the bytes and `medium`; Audit is the first
+  step; the Split option says the splitter's gate decides.
+- **Red flags (FAIL):** "split with `plan-splitter` before execution" put first because of more
+  than 15 tasks; no size class in the message.
+
+## Scenario 4: Oversized plan in a silent run
+
+- **Setup:** Subagent run without a question tool; `spec-check` gives `volume.estimate_tasks: 52`;
+  the written plan has 45 tasks and `plan-check` warns `plan-oversized: 45 tasks, 170000 bytes
+  (budget 40 tasks / 150000 bytes)`.
+- **Trigger:** Subagent passes 3. File Structure and later reaches the End event.
+- **Expected (PASS):** No `journal-question` about the size and no stop; the plan is written;
+  the End event is `journal-event … --status done … --data '{"warnings": ["plan-oversized: 45
+  tasks, 170000 bytes (budget 40 tasks / 150000 bytes)"]}'`; the report advises splitting the
+  goal in `plan-brainstorming` and says every later stage costs in proportion to the size.
+- **Red flags (FAIL):** Stops on a size question; marks `writing` `failed`; drops the warning
+  from the event; splits tasks or deletes tasks to get under the budget.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

@@ -39,3 +39,10 @@ under-specifying costs more than over-specifying.
 | Open Questions | empty | empty | empty |
 
 `(none)` + a one-line rationale is the only allowed shrink; deleting a heading is a violation.
+
+## Size budget
+
+The tier also sets how many plan tasks one Components item is expected to cost in `spec-check`'s
+volume estimate: Quick 1, Standard 2, Deep 3, plus one task per Testing Strategy item. One spec
+should fit one plan of at most 40 tasks or 150000 bytes; above it, decompose the goal into several
+specs (`spec-contract.md`, Volume estimate).

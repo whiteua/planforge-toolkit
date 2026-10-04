@@ -80,11 +80,13 @@ and the chain runner. `J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/b
     - no such question → say the plan is already written and go to 7. Execution Handoff; a
       rewrite the user still asks for runs without stage events (say so in one line).
 - **End**, after 6. Check and Self-Review: `J journal-event <journal> --skill plan-writing --plan <plan> --stage writing --status done --input <spec> --artifact plan=<plan path relative to the journal's directory, forward slashes>`.
+  When the `warnings` of the last `plan-check` contain a `plan-oversized: …` line, add
+  `--data '{"warnings": ["<that line verbatim>"]}'`: the chain runner prints it, the chain does not stop.
   The `journal` of the last `plan-check` result must be this `<journal>`; `null` or another path
   means the plan's `**Spec:**` line does not lead to the spec: fix the link and re-run
   `plan-check`.
 - **Questions.** A decision this skill would ask about (an old spec without settings, unless the brief carries the answers — see 1. Spec Preflight; the scope
-  check; a deviation) without a confirmation channel: `J journal-question <journal> --skill plan-writing --plan <plan> --stage writing --text "<question>" [--option "<option>"]...`
+  check; a deviation; never the size budget, see 2. Scope Check) without a confirmation channel: `J journal-question <journal> --skill plan-writing --plan <plan> --stage writing --text "<question>" [--option "<option>"]...`
   (the stage becomes `stopped`), then `J journal-export-findings <journal>`, then stop with a short
   report naming the question id. With a confirmation channel ask as usual and record the
   question with its answer: the same command with `--answer "<answer>"`.
@@ -109,6 +111,13 @@ Tier: the `tier` field of the result. `Quick` / `Standard` / `Deep` are used as-
 ## 2. Scope Check
 
 If the spec covers several independent subsystems, STOP and propose one plan per subsystem. Continue only after the user chooses. Each plan must produce working, testable software on its own.
+
+**Size budget.** Take `volume.estimate_tasks` and `volume.budget_tasks` (40 tasks; a plan's budget is also 150000 bytes) from the `spec-check` result of 1. Spec Preflight. After 3. File Structure, count the tasks you are about to write. When the estimate or your count is over the budget:
+
+- with a confirmation channel, ask once: continue with one plan, or return to `plan-brainstorming` to split the goal into several specs (`<root>-N-spec.md`). Record it with `journal-question … --answer "<answer>"`. On "return": write no plan, run `J journal-event <journal> --skill plan-writing --plan <plan> --stage writing --status failed --data '{"why": "decomposition"}'` and stop with a one-line report; the backward move is the user's, never invoke `plan-brainstorming`;
+- without one (a silent run), write the plan and go on: no question, no stop. `plan-check` reports `plan-oversized` and the End event carries it (Chain journal).
+
+A `spec-check` result without `volume` (an older `plan-brainstorming`): only your count after 3. File Structure applies.
 
 ## 3. File Structure
 
@@ -248,7 +257,7 @@ Every step contains what the engineer needs. Plan failures:
 
 ## 6. Check and Self-Review
 
-1. Run `plan-check <plan> --root <project>` until it exits `0`. It enforces the header fields, task headings and unique ids, the task core per tier, backticked file paths, no commit steps, no placeholders, and the `Environments`/`External` rules. Review its `warnings`: a missing `Modify:` target is fine only if an earlier task creates it, and a code-size warning (or the error above 150 lines) is closed by splitting the task or by a `**Size:** <N> lines — <reason>` line, never by asking the user.
+1. Run `plan-check <plan> --root <project>` until it exits `0`. It enforces the header fields, task headings and unique ids, the task core per tier, backticked file paths, no commit steps, no placeholders, and the `Environments`/`External` rules. Review its `warnings`: a missing `Modify:` target is fine only if an earlier task creates it, and a code-size warning (or the error above 150 lines) is closed by splitting the task or by a `**Size:** <N> lines — <reason>` line, never by asking the user. `plan-oversized: N tasks, M bytes (budget …)` is about the whole plan, not a task: show it to the user, never split tasks to hide it; the plan stays valid and the End event carries it (Chain journal).
 2. Then check what the tool cannot:
    - **Spec coverage:** every spec requirement maps to a task. Add a task for each gap.
    - **Grounding:** every `path:line` citation was actually read; `Create:` targets are new; the test command exists.
@@ -262,16 +271,18 @@ Fix issues inline and re-run `plan-check`.
 
 Take `task_count` and `plan_bytes` from the last `plan-check` result, and the decisions from its `settings`: with `chain_explicit: true` the values `settings.chain.split` and `settings.chain.resolver` are decisions, including keys the defaults filled in; with `chain_explicit: false` or `settings: null` no decision is recorded: treat `split` as `auto` and do not announce `resolver`. Speak in the plan's language.
 
-> "Plan complete and saved to `<path>` (<task_count> tasks, <plan_bytes> bytes). Recommended next steps:
+> "Plan complete and saved to `<path>` (<task_count> tasks, <plan_bytes> bytes, size: <size_class>). Recommended next steps:
 > 1. **Audit (recommended):** run `plan-iterative-revision` to cross-check the plan against the codebase.
-> 2. **Split:** if the plan has more than 15–20 tasks or spans several modules, run `plan-splitter` (it decides with a 5-factor gate).
+> 2. **Split:** `plan-splitter` decides with its gate whether the plan is cut into parts.
 > 3. **Execute:** for small, audited plans, run `plan-executor`. The plan has no commit steps; after the audit, `/plan-executor <plan> commit` commits the result.
 >
 > Which step?"
 
 Settings change this message:
 
-- `split` is `auto` (a decision with `chain_explicit: true`, or treated as `auto` because `chain_explicit` is false or `settings` is `null`) and `task_count` > 15: the split recommendation goes first, with the numbers: "<task_count> tasks, <plan_bytes> bytes: split with `plan-splitter` before execution (its gate decides)." Audit and Execute follow.
+- `size_class` is `large` (`plan-oversized` in the warnings): before the steps, recommend splitting the goal into several specs in `plan-brainstorming` and say that every later stage (revision, execution, audit) costs in proportion to the plan's size: "<task_count> tasks, <plan_bytes> bytes, over the budget of 40 tasks / 150000 bytes: consider returning to `plan-brainstorming` to split the goal; each later stage costs in proportion to the plan's size." The steps follow.
+- `split` is `auto` (a decision with `chain_explicit: true`, or treated as `auto` because `chain_explicit` is false or `settings` is `null`): keep the Split option as in the template, the splitter's gate decides; never recommend the split by the task count alone.
+- A `plan-check` result without `size_class` (an older `plan_tool.py`): leave `size: <size_class>` out of the message.
 - `chain_explicit: true` and `split` is `always` or `never`: do not offer the split as an option; state the decision instead: "Settings: split=always, `plan-splitter` runs after the audit." / "Settings: split=never, the plan runs whole."
 - `chain_explicit: true`: state the resolver choice after the steps: "After execution: resolver=<value> (from the settings)." Do not ask about it later. With `chain_explicit: false` or `settings: null` say nothing about the resolver here.
 

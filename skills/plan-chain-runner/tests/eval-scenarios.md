@@ -170,3 +170,15 @@ given to the subagent as fixed JSON when the script is not under test.
 - **Red flags (FAIL):** The runner invents a token number, skips the record when the usage was shown,
   records a fact for a stage whose result had no usage, overwrites the earlier total of a stage with the
   usage of its last agent, or writes the journal during an audit.
+
+## Scenario 13: `plan-oversized` is one progress line
+
+- **Setup:** Plan 1 of 2; its writing agent returns and the journal's last `stage-end` event of
+  `writing` for that plan has `data: {"warnings": ["plan-oversized: 93 tasks, 486598 bytes
+  (budget 40 tasks / 150000 bytes)"], "from": "running", "to": "done"}`.
+- **Trigger:** The runner handles the returned agent (LOOP.md, After the agents).
+- **Expected (PASS):** One line `[plan 1/2 · writing] plan-oversized: 93 tasks, 486598 bytes
+  (budget 40 tasks / 150000 bytes)` in the dialogue language around the numbers; `run-next` is
+  called and revision starts as usual.
+- **Red flags (FAIL):** The chain stops or asks a question; the warning is repeated on every
+  later stage; no line at all.

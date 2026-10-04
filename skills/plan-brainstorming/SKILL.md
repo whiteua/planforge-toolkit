@@ -71,7 +71,7 @@ Exit codes: `0` ok, `1` check failed, `2` bad input or I/O error.
 | Command | Use |
 |---|---|
 | `detect-lang <file\|->` | Dialogue language of a goal file or findings JSON (step 1). |
-| `spec-check <spec.md>` | Contract check of the written spec (step 8). |
+| `spec-check <spec.md>` | Contract check of the written spec (step 8); also returns `volume`, the size estimate (Self-Review, Scope). |
 | `findings-parse <file.json\|-> [--root DIR]` | Findings mode, step 1. |
 | `findings-coverage <file.json\|-> <spec.md>` | Findings mode, step 8. |
 | `backlog-parse <BACKLOG.md> [--section S] [--state open\|done\|cancelled\|all]` | Backlog mode, step 1; amend mode with `--state done`. Each item has `state`: `open` `[ ]`, `done` `[x]`, `cancelled` `[-]`; default `open`. |
@@ -103,7 +103,7 @@ The terminal state is invoking `plan-writing` (in amend mode: the closing report
 
 ## Understanding the Idea
 
-- Assess scope first. If the request covers several independent subsystems (e.g. "a platform with chat, file storage, billing, and analytics"), say so immediately and help decompose it: the pieces, how they relate, the build order. Then brainstorm the first sub-project. Each sub-project gets its own spec → plan → implementation cycle.
+- Assess scope first. If the request covers several independent subsystems (e.g. "a platform with chat, file storage, billing, and analytics"), say so immediately and help decompose it: the pieces, how they relate, the build order. Then brainstorm the first sub-project. Each sub-project gets its own spec → plan → implementation cycle. Size counts too: one spec should become one plan of at most 40 tasks (`SIZE_BUDGET` in `brainstorm_tool.py`); a design that will not fit is decomposed the same way (Chain Settings, **Volume**).
 - **Investigate before asking.** If the code, docs, or commits answer a question, find the answer yourself.
 - **Verify claims about existing code.** When the user describes how code behaves, check it. If the code disagrees, surface the contradiction before designing on it. What you verified goes into the spec as `path:line` citations in Architecture and Components, so `plan-writing` does not rediscover it.
 - **External systems need permission.** Investigation means reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action. Pre-approved reads (`read=run` in the spec's `> Environment:` line, production included) cover the plan's steps and the read-only checks of plan-iterative-revision and plan-resolver; changes on production are never pre-approved. This skill investigates before the spec exists, so it still asks. Without permission the claim stays unverified: design on the cautious reading and record how it will be verified (`references/spec-contract.md`, "Unverified claims").
@@ -133,6 +133,7 @@ Before writing the spec, send ONE message that proposes the decisions the rest o
 - **Chain:** propose the defaults unless the dialogue gave a reason to differ: `split=auto`, `revision=` the tier (Quick → `quick`, Standard → `standard`, Deep → `deep`), `stop=pragmatic`, `resolver=audit`. One short line per key saying what it decides.
 - **Environment:** one entry per external system the plan's steps will touch, with its kind (`test` or `prod`); if there is none, say so in one line. Ask for the rights as two separate choices and name the **changes first**: what the plan will write, migrate or delete there and `write=run|task|deny`; only then the reads and `read=run|task|deny`. `run` = for the whole run, `task` = ask before each task, `deny` = forbidden. On `prod` offer only `write=task` or `write=deny`; record `read=run` on prod only when the user's answer says exactly that.
 - **Quote:** record the short question and the user's answer in the user's words (`"Tests and migrations on app_test? — Yes, app_test only"`). Never copy interface markers such as `(Recommended)` or `(рекомендую)` from the options: `spec-check` rejects them.
+- **Volume:** one line with the estimate, said in the dialogue language: "Volume estimate: ~N tasks — M components × k, tier T; budget 40". `M` is the number of items of the approved Components (list items, table rows, subheadings), `k` is 1 on Quick, 2 on Standard, 3 on Deep, and each Testing Strategy item adds one task: the formula of `spec-check`'s `volume` (`references/spec-contract.md`, "Volume estimate"). You may correct N with a one-sentence reason (e.g. one component is a one-line config change). When N is over 40, propose in the same message to split the goal into several specs with the existing mechanism — the pieces, the build order, `<root>-N-spec.md`, the spec map in `BACKLOG.md` — and wait for the user's decision: one spec or several.
 
 ## Writing the Spec
 
@@ -161,7 +162,7 @@ Before writing the spec, send ONE message that proposes the decisions the rest o
 
 1. **Fidelity** — compare `# Goal` and `## Out of Scope` with the one-sentence restatement from step 1. Anything the user asked for that is now out of scope, or anything added that they did not ask for, is drift: name it and ask before proceeding.
 2. **Consistency** — no sections contradict each other; the architecture matches the components.
-3. **Scope** — one implementation plan's worth, or does it need decomposition?
+3. **Scope** — one implementation plan's worth, or does it need decomposition? Read `volume` from the `spec-check` result: when `over_budget` is `true` and the user did not already choose one spec at Chain Settings (the written spec came out larger than the estimate), show the estimate and propose the decomposition before the User Review Gate.
 4. **Ambiguity** — a requirement with two readings gets one, made explicit.
 
 Fix issues inline. On the Deep tier, if the host supports subagents, also dispatch a reviewer with `spec-document-reviewer-prompt.md`. Tell the user what it found. A finding that changes the approved design is shown to the user before the spec is edited (the step-7 rule); other findings are fixed inline. A finding that can only be settled by an external system follows the permission rule above.

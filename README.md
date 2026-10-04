@@ -550,6 +550,14 @@ The agent hands its findings to the tool as JSON; the tool renders the review fi
 
 ---
 
+### Size budgets
+
+One plan's budget is 40 tasks or 150000 bytes, defined once as `SIZE_BUDGET` in `brainstorm_tool.py`. Before a plan exists, `spec-check` estimates a spec's volume (`estimate_tasks = Components items × tier factor 1/2/3 + Testing Strategy items`), and `plan-brainstorming` shows the estimate in the Chain Settings message and proposes several specs of one goal above the budget. After the plan is written, `plan-check` returns `size_class` (`small`/`medium`/`large`) and the warning `plan-oversized`; `plan-writing`'s hand-off advises decomposition instead of a task-count split rule, and in a chain the warning rides on the `writing` event and the runner prints it as one progress line without stopping. Every later stage costs in proportion to the plan's size, so the budget is checked where it is still cheap to change the scope. A contract test keeps the fallback in `plan_tool.py` and the splitter gate's thresholds equal to `SIZE_BUDGET`.
+
+**Used in:** `plan-brainstorming`, `plan-writing`, `plan-chain-runner`
+
+---
+
 ### Spec-owned chain settings
 
 Every decision the chain needs is taken once, in the spec dialogue, and written above `# Goal`: `> Chain: split=…; revision=…; stop=…; resolver=…`, one `> Environment:` line per external system and `> Backlog: <section>`. `spec-check` validates them and the plan does not copy them. Later skills find them through one reading rule (`brainstorm_tool.py settings`: the plan header if it has settings, else the spec named by `**Spec:**`; parts and roadmaps go through their Source link), so the revision takes its preset and stop policy, the splitter its `split` decision and the executor its resolver choice without asking. When a decision is missing and nobody can be asked, the skill stops with a report instead of guessing. For a spec written before settings existed, `plan-writing` asks as before and records the answers in the plan header.

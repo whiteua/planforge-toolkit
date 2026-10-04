@@ -12,7 +12,7 @@ Stdlib only. Python 3.8+.
 
 Commands:
   plan-path  <spec.md>
-  plan-check <plan.md> [--root DIR]
+  plan-check <plan.md> [--root DIR] [--max-tasks N] [--max-bytes N]
 
 Exit codes: 0 ok, 1 contract violation, 2 usage or I/O error.
 """
@@ -72,6 +72,10 @@ SIZE_RE = re.compile(r"^\*\*Size:\*\*\s*(\d+)\s+lines\s*[—-]\s*\S")
 # and resolver_tool.py.
 CYRILLIC_RE = re.compile("[Ѐ-ӿ]")
 LANG_THRESHOLD = 0.05
+# Size budget of one plan: brainstorm_tool.SIZE_BUDGET when plan-brainstorming is installed
+# alongside, else these equal values (a contract test compares them); --max-tasks/--max-bytes win.
+SIZE_BUDGET_DEFAULT = {"tasks": 40, "bytes": 150000}
+SMALL_PLAN_TASKS = 15
 
 
 class InputError(Exception):
@@ -89,6 +93,28 @@ def _load_brainstorm_tool():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def size_budget(max_tasks: Optional[int] = None, max_bytes: Optional[int] = None) -> Dict[str, Any]:
+    """The plan size budget and its source: `flags` when a flag is given, else `brainstorm_tool`
+    (SIZE_BUDGET of plan-brainstorming), else `default`."""
+    shared = getattr(_load_brainstorm_tool(), "SIZE_BUDGET", None)
+    base, source = (shared, "brainstorm_tool") if isinstance(shared, dict) else (SIZE_BUDGET_DEFAULT, "default")
+    budget = {"tasks": int(base["tasks"]), "bytes": int(base["bytes"]), "source": source}
+    if max_tasks is not None:
+        budget["tasks"], budget["source"] = max_tasks, "flags"
+    if max_bytes is not None:
+        budget["bytes"], budget["source"] = max_bytes, "flags"
+    return budget
+
+
+def size_class(task_count: int, plan_bytes: int, budget: Dict[str, Any]) -> Optional[str]:
+    """`large` over the budget (tasks or bytes), `small` up to 15 tasks, else `medium`; None without tasks."""
+    if task_count == 0:
+        return None
+    if task_count > budget["tasks"] or plan_bytes > budget["bytes"]:
+        return "large"
+    return "small" if task_count <= SMALL_PLAN_TASKS else "medium"
 
 
 def _plan_settings(plan_path: Optional[str]) -> Tuple[Optional[Dict[str, Any]], List[str], List[str]]:
@@ -179,7 +205,8 @@ def detect_lang_text(text: str) -> str:
     return "ru" if cyrillic / len(letters) > LANG_THRESHOLD else "en"
 
 
-def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] = None) -> Dict[str, Any]:
+def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] = None,
+               budget: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
     lines = _split_lines(text)
@@ -440,6 +467,16 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
             "plan has '**External:**' lines but settings are unavailable: the spec at '**Spec:**' "
             "cannot be read and the plan header has no settings"
         )
+    # Plan size: a warning about the whole plan, never an error; the decomposition is the user's call.
+    task_count = len(tasks)
+    plan_bytes = len(text.encode("utf-8"))
+    budget = budget or size_budget()
+    size = size_class(task_count, plan_bytes, budget)
+    if size == "large":
+        warnings.append(
+            f"plan-oversized: {task_count} tasks, {plan_bytes} bytes "
+            f"(budget {budget['tasks']} tasks / {budget['bytes']} bytes)"
+        )
     return {
         "ok": not errors,
         "spec": spec,
@@ -448,8 +485,10 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
         "environments": environments,
         "tasks": [{k: task.get(k, []) for k in ("id", "title", "checkpoint", "external")} for task in tasks],
         "settings": settings,
-        "task_count": len(tasks),
-        "plan_bytes": len(text.encode("utf-8")),
+        "task_count": task_count,
+        "plan_bytes": plan_bytes,
+        "size_class": size,
+        "budget": budget,
         "errors": errors,
         "warnings": warnings,
         "oversized": oversized,
@@ -460,10 +499,24 @@ def cmd_plan_path(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     return 0, dict(plan_path(args.spec), ok=True)
 
 
+def _positive_int(value: Optional[str], name: str) -> Optional[int]:
+    """A flag value that must be an integer above zero; anything else is an input error (exit 2)."""
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except ValueError:
+        raise InputError(f"{name} must be a positive integer: {value}") from None
+    if number <= 0:
+        raise InputError(f"{name} must be a positive integer: {value}")
+    return number
+
+
 def cmd_plan_check(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     if args.root is not None and not os.path.isdir(args.root):
         raise InputError(f"root is not a directory: {args.root}")
-    result = check_plan(_read(args.plan), args.root, args.plan)
+    budget = size_budget(_positive_int(args.max_tasks, "--max-tasks"), _positive_int(args.max_bytes, "--max-bytes"))
+    result = check_plan(_read(args.plan), args.root, args.plan, budget)
     result["journal"] = _journal_for(args.plan)
     return (0 if result["ok"] else 1), result
 
@@ -479,6 +532,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_check = sub.add_parser("plan-check", help="check a plan against the plan format contract")
     p_check.add_argument("plan")
     p_check.add_argument("--root", help="workspace root for Modify path checks")
+    p_check.add_argument("--max-tasks", help="plan size budget in tasks (default: brainstorm_tool.SIZE_BUDGET, 40)")
+    p_check.add_argument("--max-bytes", help="plan size budget in bytes (default: brainstorm_tool.SIZE_BUDGET, 150000)")
     p_check.set_defaults(func=cmd_plan_check)
     return parser
 

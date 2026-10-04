@@ -14,6 +14,8 @@ import unittest
 
 SCRIPTS = os.path.join(os.path.dirname(__file__), "..", "scripts")
 TOOL = os.path.abspath(os.path.join(SCRIPTS, "brainstorm_tool.py"))
+SETTINGS_FIXTURE = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "..", "plan-writing", "tests", "fixtures", "settings01-spec.md"))
 
 
 def _load_module():
@@ -277,6 +279,88 @@ class SpecCheckTest(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertFalse(out["ok"])
             self.assertEqual(_run("spec-check", os.path.join(tmp, "missing.md"))[0], 2)
+
+
+COMPONENTS_LINE = "- `sql-structure.ts`: detects OFFSET without FETCH.\n"
+TESTING_LINE = "Regression test per failure scenario.\n"
+
+
+def _volume_spec(components, testing=TESTING_LINE, tier="Quick"):
+    """VALID_SPEC with the Components item and the Testing Strategy text replaced; tier None drops the line."""
+    text = VALID_SPEC.replace(COMPONENTS_LINE, components).replace(TESTING_LINE, testing)
+    if tier is None:
+        return text.replace("> Tier: Quick\n\n", "")
+    return text.replace("> Tier: Quick", f"> Tier: {tier}")
+
+
+class SpecVolumeTest(unittest.TestCase):
+    def test_valid_spec_volume(self):
+        volume = ft.check_spec(VALID_SPEC)["volume"]
+        self.assertEqual(volume, {
+            "components": 1, "testing_items": 0, "out_of_scope_items": 1,
+            "spec_bytes": len(VALID_SPEC.encode("utf-8")),
+            "estimate_tasks": 1, "budget_tasks": 40, "over_budget": False,
+        })
+
+    def test_shared_budget_constants(self):
+        self.assertEqual(ft.SIZE_BUDGET, {"tasks": 40, "bytes": 150000})
+        self.assertEqual(ft.TIER_TASK_FACTOR, {"Quick": 1, "Standard": 2, "Deep": 3})
+
+    def test_table_list_and_subheadings_count(self):
+        table = "| Component | Role |\n|---|---|\n| `a.py` | parse |\n| `b.py` | check |\n| `c.py` | print |\n"
+        listed = "- `a.py`: parse\n- `b.py`: check\n  - nested detail\n"
+        headed = "### a.py\nParses.\n\n#### b.py\nChecks.\n"
+        for block, expected in ((table, 3), (listed, 2), (headed, 2)):
+            with self.subTest(block=block):
+                result = ft.check_spec(_volume_spec(block))
+                self.assertEqual(result["errors"], [])
+                self.assertEqual(result["volume"]["components"], expected)
+
+    def test_estimate_by_tier(self):
+        components = "- a\n- b\n- c\n"
+        testing = "- unit\n- cli\n"
+        for tier, expected in (("Quick", 5), ("Standard", 8), ("Deep", 11), (None, 8), ("Huge", 8)):
+            with self.subTest(tier=tier):
+                volume = ft.check_spec(_volume_spec(components, testing, tier))["volume"]
+                self.assertEqual((volume["components"], volume["testing_items"]), (3, 2))
+                self.assertEqual(volume["estimate_tasks"], expected)
+                self.assertFalse(volume["over_budget"])
+
+    def test_over_budget(self):
+        components = "".join(f"- c{i}\n" for i in range(25))
+        volume = ft.check_spec(_volume_spec(components, "- unit\n- cli\n", "Deep"))["volume"]
+        self.assertEqual(volume["estimate_tasks"], 77)
+        self.assertEqual(volume["budget_tasks"], 40)
+        self.assertTrue(volume["over_budget"])
+
+    def test_prose_components_warn_volume_unknown(self):
+        result = ft.check_spec(_volume_spec("Two modules parse and check the query.\n", "- unit\n"))
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertEqual(result["volume"]["components"], 0)
+        self.assertEqual(result["volume"]["estimate_tasks"], 1)
+        self.assertIn(ft.VOLUME_UNKNOWN, result["warnings"])
+        self.assertNotIn(ft.VOLUME_UNKNOWN, ft.check_spec(VALID_SPEC)["warnings"])
+        none = ft.check_spec(_volume_spec("(none) — configuration only.\n"))
+        self.assertNotIn(ft.VOLUME_UNKNOWN, none["warnings"])
+
+    def test_volume_when_check_fails(self):
+        result = ft.check_spec(VALID_SPEC.replace("## Data Flow\n(none) - single synchronous check.\n\n", ""))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["volume"]["components"], 1)
+
+    def test_settings_fixture(self):
+        with open(SETTINGS_FIXTURE, encoding="utf-8") as fh:
+            text = fh.read()
+        volume = ft.check_spec(text)["volume"]
+        self.assertEqual((volume["components"], volume["testing_items"], volume["out_of_scope_items"]), (2, 0, 1))
+        self.assertEqual(volume["estimate_tasks"], 4)
+        self.assertEqual(volume["spec_bytes"], len(text.encode("utf-8")))
+
+    def test_cli_returns_volume(self):
+        code, out = _run("spec-check", SETTINGS_FIXTURE)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["volume"]["estimate_tasks"], 4)
+        self.assertFalse(out["volume"]["over_budget"])
 
 
 RU_SPEC = (

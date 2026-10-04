@@ -41,6 +41,18 @@ recognised). It is metadata, not a heading. `plan-brainstorming` writes the conf
 `plan-writing` reads it and defaults to Standard when it is missing or unknown
 (`../../plan-writing/references/task-tiers.md`).
 
+## Volume estimate
+
+`spec-check` returns `volume`: `components`, `testing_items` and `out_of_scope_items` (the items
+of those sections: top-level list items, table rows other than the header, `###`/`####`
+subheadings), `spec_bytes`, `estimate_tasks = components × k + testing_items` (k: Quick 1,
+Standard 2, Deep 3; a missing or unknown tier counts as Standard), `budget_tasks` (40) and
+`over_budget`. The budget of one plan is 40 tasks or 150000 bytes (`SIZE_BUDGET` in
+`brainstorm_tool.py`): `plan-check` warns `plan-oversized` above it and the splitter gate uses the
+same numbers. The estimate is not written into the spec and never changes the `spec-check`
+verdict; a Components section of prose without items gives the warning `volume-unknown`. A goal
+over the budget is split into several specs (`<root>-N-spec.md`, see Artifacts and naming).
+
 ## Chain, Environment and Backlog lines
 
 Next to the Tier line, above `# Goal`, the spec records the decisions the rest of the chain
@@ -170,7 +182,7 @@ goal that already has specs takes the next free number; existing specs are never
 present and in order; no empty section; `Out of Scope` non-empty; `Open Questions` empty or
 `(none)` (+ one-line rationale); the `> Chain:`, `> Environment:` and `> Backlog:` lines (known
 keys and values, the environment format with both rights, no `write=run` on prod, no interface
-markers in quotes). Exit `1` → `plan-writing` stops and sends the user back to
+markers in quotes). It also returns `volume` (Volume estimate). Exit `1` → `plan-writing` stops and sends the user back to
 `plan-brainstorming`; it never invokes it itself.
 
 ## Glossary

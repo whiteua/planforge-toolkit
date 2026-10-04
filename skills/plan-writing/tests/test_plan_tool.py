@@ -21,6 +21,7 @@ RESOLVER = os.path.abspath(os.path.join(HERE, "..", "..", "plan-resolver", "scri
 BRAINSTORM = os.path.abspath(os.path.join(HERE, "..", "..", "plan-brainstorming", "scripts", "brainstorm_tool.py"))
 SETTINGS_SPEC = os.path.join(HERE, "fixtures", "settings01-spec.md")
 SETTINGS_PLAN = os.path.join(HERE, "fixtures", "settings01-impl.md")
+SPLITTER = os.path.abspath(os.path.join(HERE, "..", "..", "plan-splitter", "scripts", "splitter_tool.py"))
 
 
 def _load_module():
@@ -261,6 +262,104 @@ class PlanCheckTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
 
 
+class SizeBudgetTest(unittest.TestCase):
+    def test_size_budget_sources(self):
+        self.assertEqual(pt.size_budget(), {"tasks": 40, "bytes": 150000, "source": "brainstorm_tool"})
+        self.assertEqual(pt.size_budget(max_tasks=50), {"tasks": 50, "bytes": 150000, "source": "flags"})
+        self.assertEqual(pt.size_budget(max_bytes=200000), {"tasks": 40, "bytes": 200000, "source": "flags"})
+        with mock.patch.object(pt, "_load_brainstorm_tool", return_value=None):
+            self.assertEqual(pt.size_budget(), {"tasks": 40, "bytes": 150000, "source": "default"})
+
+    def test_size_class(self):
+        budget = {"tasks": 40, "bytes": 150000, "source": "default"}
+        cases = ((0, 10, None), (3, 10, "small"), (15, 10, "small"), (16, 10, "medium"),
+                 (40, 150000, "medium"), (41, 10, "large"), (10, 150001, "large"))
+        for count, size, expected in cases:
+            with self.subTest(count=count, size=size):
+                self.assertEqual(pt.size_class(count, size, budget), expected)
+
+
+TASK_TEMPLATE = (
+    "### Task {n}: Step {n}\n\n**Files:**\n- Modify: `cli.py`\n\n**Preconditions:**\n- none\n\n"
+    "**Postconditions:**\n- step {n} done\n\n- [ ] **Step 1: Run**\n\nRun: `python cli.py f`\nExpected: PASS\n\n"
+)
+
+
+def _plan_with_tasks(count, pad_bytes=0):
+    """VALID's header plus `count` minimal Standard tasks and about `pad_bytes` of prose at the end."""
+    pad = ("x" * 99 + "\n") * (pad_bytes // 100)
+    return VALID.split("### Task 1:")[0] + "".join(TASK_TEMPLATE.format(n=n) for n in range(1, count + 1)) + pad
+
+
+def _oversized(result):
+    return [w for w in result["warnings"] if w.startswith("plan-oversized:")]
+
+
+class PlanSizeTest(unittest.TestCase):
+    def test_size_classes(self):
+        for count, expected in ((3, "small"), (15, "small"), (16, "medium"), (20, "medium"),
+                                (40, "medium"), (41, "large")):
+            with self.subTest(count=count):
+                result = pt.check_plan(_plan_with_tasks(count))
+                self.assertTrue(result["ok"], result["errors"])
+                self.assertEqual(result["task_count"], count)
+                self.assertEqual(result["size_class"], expected)
+                self.assertEqual(bool(_oversized(result)), expected == "large")
+
+    def test_oversized_warning_text_and_budget(self):
+        text = _plan_with_tasks(41)
+        result = pt.check_plan(text)
+        self.assertEqual(result["budget"], {"tasks": 40, "bytes": 150000, "source": "brainstorm_tool"})
+        self.assertEqual(_oversized(result), [
+            f"plan-oversized: 41 tasks, {len(text.encode('utf-8'))} bytes (budget 40 tasks / 150000 bytes)"])
+
+    def test_large_by_bytes(self):
+        result = pt.check_plan(_plan_with_tasks(10, pad_bytes=160000))
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertGreater(result["plan_bytes"], 150000)
+        self.assertEqual(result["size_class"], "large")
+        self.assertEqual(len(_oversized(result)), 1)
+
+    def test_budget_argument_overrides(self):
+        budget = pt.size_budget(max_tasks=50)
+        self.assertEqual(budget, {"tasks": 50, "bytes": 150000, "source": "flags"})
+        result = pt.check_plan(_plan_with_tasks(41), None, None, budget)
+        self.assertEqual(result["size_class"], "medium")
+        self.assertEqual(_oversized(result), [])
+
+    def test_default_budget_without_brainstorm_tool(self):
+        with mock.patch.object(pt, "_load_brainstorm_tool", return_value=None):
+            self.assertEqual(pt.size_budget(), {"tasks": 40, "bytes": 150000, "source": "default"})
+            result = pt.check_plan(_plan_with_tasks(41))
+        self.assertEqual(result["budget"]["source"], "default")
+        self.assertEqual(result["size_class"], "large")
+
+    def test_no_tasks_no_size_class(self):
+        result = pt.check_plan("# Plan\n")
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["size_class"])
+        self.assertEqual(_oversized(result), [])
+
+    def test_cli_flags_and_exit_codes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "big-impl.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(_plan_with_tasks(41))
+            code, out = _run(TOOL, "plan-check", path)
+            self.assertEqual(code, 0, out["errors"])
+            self.assertEqual(out["size_class"], "large")
+            self.assertEqual(len(_oversized(out)), 1)
+            code, out = _run(TOOL, "plan-check", path, "--max-tasks", "50", "--max-bytes", "200000")
+            self.assertEqual(code, 0, out["errors"])
+            self.assertEqual(out["budget"], {"tasks": 50, "bytes": 200000, "source": "flags"})
+            self.assertEqual((out["size_class"], _oversized(out)), ("medium", []))
+            for flag, value in (("--max-tasks", "0"), ("--max-tasks", "-3"), ("--max-bytes", "abc")):
+                code, out = _run(TOOL, "plan-check", path, flag, value)
+                self.assertEqual(code, 2, (flag, value))
+                self.assertFalse(out["ok"])
+                self.assertIn(flag, out["errors"][0])
+
+
 RU_PLAN = (
     VALID.replace(
         "**Goal:** `cli.py --verbose` prints the input path before the line count.",
@@ -446,6 +545,24 @@ class SettingsTest(unittest.TestCase):
         settings_errors = [e for e in result["errors"] if e.startswith("settings: line ")]
         self.assertTrue(any("unknown value 'bogus' for chain key 'split'" in e for e in settings_errors), result["errors"])
         self.assertTrue(any("duplicate Backlog line" in e for e in settings_errors), result["errors"])
+
+
+class SizeBudgetContractTest(unittest.TestCase):
+    """One plan size budget: brainstorm_tool.SIZE_BUDGET, the plan_tool fallback and the splitter gate."""
+
+    def test_plan_tool_fallback_equals_shared_budget(self):
+        self.assertEqual(pt._load_brainstorm_tool().SIZE_BUDGET, pt.SIZE_BUDGET_DEFAULT)
+        self.assertEqual(pt.size_budget()["source"], "brainstorm_tool")
+
+    def test_splitter_gate_uses_the_same_thresholds(self):
+        with open(SPLITTER, encoding="utf-8") as fh:
+            if "def gate_verdict(" not in fh.read():
+                self.skipTest("splitter gate_verdict not implemented yet (spec plan-refactoring-01-3)")
+        code, out = _run(SPLITTER, "gate", FIXTURE)
+        self.assertEqual(code, 0, out)
+        thresholds = out["thresholds"]
+        self.assertEqual((thresholds["split_tasks"], thresholds["split_bytes"]),
+                         (pt.SIZE_BUDGET_DEFAULT["tasks"], pt.SIZE_BUDGET_DEFAULT["bytes"]))
 
 
 @unittest.skipUnless(os.path.isfile(BRAINSTORM), "plan-brainstorming not installed alongside")

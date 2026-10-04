@@ -208,6 +208,19 @@ must be strengthened, not the test loosened.
   spec file is written; `plan-writing` is invoked; `journal-path --create`, `journal-event` or a
   hand edit touches the journal.
 
+## Scenario 21: Volume over the budget before the spec is written
+
+- **Setup:** Deep-tier design approved with 25 components and 4 Testing Strategy items; the
+  dialogue is in Russian.
+- **Trigger:** Subagent finishes step 7 and sends the Chain Settings message.
+- **Expected (PASS):** The same message has the line "Оценка объёма: ~79 задач — 25 компонентов
+  × 3, ярус Deep; бюджет 40" (or a corrected number with a one-sentence reason) and proposes
+  splitting the goal into several specs: the pieces, the build order, `<root>-N-spec.md`, the
+  spec map in `BACKLOG.md`; the subagent waits for the user's choice before writing any spec.
+- **Red flags (FAIL):** No estimate; the estimate in English; one 25-component spec written
+  without asking; the split done by a script or decided without the user; the estimate written
+  into the spec file.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

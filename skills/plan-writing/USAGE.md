@@ -31,11 +31,11 @@ Usually invoked **automatically** by `plan-brainstorming` after spec approval �
 
 1. **Spec Preflight** — `plan-brainstorming/scripts/brainstorm_tool.py spec-check`: all 8 sections in order, none empty, `Open Questions` is `(none)`; it also returns the chain settings (`> Chain:`, `> Environment:`, `> Backlog:`), which stay in the spec. An old spec without them: the skill asks and writes the answers into the plan header
 2. **Tier Read** — inherits the tier from the spec's `> Tier:` line (Standard if missing)
-3. **Scope Check** — a spec with several independent subsystems stops for your choice of how to split it
+3. **Scope Check** — a spec with several independent subsystems stops for your choice of how to split it; a spec whose volume estimate (`spec-check` `volume`) or planned task count is over 40 tasks asks once whether to continue with one plan or return to `plan-brainstorming` (a run without you continues)
 4. **File Structure** — maps out which files will be created/modified
 5. **Task Generation** — tasks with TDD steps, exact code, file paths; no commit steps
-6. **Check and Self-Review** — `scripts/plan_tool.py plan-check` for the format contract, then spec coverage, consistency and task size (Deep: plus a reviewer subagent); the chain journal `<goal>-chain.json` next to the spec records the `writing` stage (running at the start, done with the plan), and a question asked in a run without you stops the skill and stays open in the journal
-7. **Execution Handoff** — offers the next step (audit via `plan-iterative-revision`, split via `plan-splitter`, or execute via `plan-executor`) with the task count and plan size; with `split=auto` and more than 15 tasks the split comes first; with an explicit `Chain` in the settings, `split=always|never` and `resolver=` are stated, not asked; waits for your explicit choice
+6. **Check and Self-Review** — `scripts/plan_tool.py plan-check` for the format contract (it also returns `size_class` and warns `plan-oversized` over the budget; `--max-tasks`, `--max-bytes` override it), then spec coverage, consistency and task size (Deep: plus a reviewer subagent); the chain journal `<goal>-chain.json` next to the spec records the `writing` stage (running at the start, done with the plan), and a question asked in a run without you stops the skill and stays open in the journal
+7. **Execution Handoff** — offers the next step (audit via `plan-iterative-revision`, split via `plan-splitter`, or execute via `plan-executor`) with the task count, plan size and `size_class` (`small` ≤ 15 tasks, `large` over 40 tasks or 150000 bytes, else `medium`); with `split=auto` the splitter's gate decides on the split; a `large` plan gets the advice to split the goal in `plan-brainstorming`; with an explicit `Chain` in the settings, `split=always|never` and `resolver=` are stated, not asked; waits for your explicit choice
 
 ## Spec Preflight Requirements
 

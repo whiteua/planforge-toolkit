@@ -112,3 +112,15 @@ Spec 5 (incremental revision) is judged on goals with two or more reviews and on
 3. Read `delta.totals.effective_tokens_est.per_task` and `.per_kb`, then `quality`: accept the change
    only when the audit status and the issue counts are no worse. A `basis-mixed` warning means the two
    sides were measured differently: compare the estimates of both (`tokens.*_est`) instead.
+
+## Size budgets
+
+One plan's budget is 40 tasks or 150000 bytes (`SIZE_BUDGET` in `skills/plan-brainstorming/scripts/brainstorm_tool.py`). `spec-check` estimates a spec's volume before any plan exists: `estimate_tasks = components × k + testing_items`, k = 1 (Quick), 2 (Standard), 3 (Deep); `over_budget` above 40 tasks makes `plan-brainstorming` propose several specs of one goal. `plan-check` returns `size_class` (`small` ≤ 15 tasks, `large` over the budget, else `medium`) and warns `plan-oversized`; the splitter gate uses the same 40 tasks / 150000 bytes. Every stage costs in proportion to the plan's size and the revision more than linearly, so the budget is held before the plan is written.
+
+### Calibration
+
+The estimate is a formula, not a measurement. After each spec of a goal is planned, add a row: the tier and estimate from `spec-check`, the plan's `task_count` from `plan-check`, and the deviation `(task_count − estimate) / estimate`. Change the tier factors only when several goals deviate the same way; `run-stats` of the same plans shows what the deviation cost.
+
+| Spec | Tier | estimate_tasks | task_count | Deviation |
+|---|---|---|---|---|
+| plan-refactoring-01-1 | Standard | 29 | 17 | −41% |

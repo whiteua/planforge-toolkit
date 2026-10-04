@@ -70,7 +70,8 @@ One line each, in the dialogue language; numbers from `C run-status <journal>` a
 
 - a stage starts or ends: `[plan 1/2 · revision] done: review-3, converged. Next: split. ≈ 1 h 20 min left`;
 - during execution, every 10 tasks or every 10 minutes, whichever comes first: `execution: 34/108 tasks, ≈ 55 min`;
-- an agent silent for more than 10 minutes: `revision of plan 1 has been running for 14 min, waiting`.
+- an agent silent for more than 10 minutes: `revision of plan 1 has been running for 14 min, waiting`;
+- `writing` ended `done`: in the journal file's `events`, take the last event of the plan with `stage: writing` and `kind: stage-end`; for each string of its `data.warnings` that starts with `plan-oversized:`, one line `[plan 1/2 · writing] plan-oversized: 93 tasks, 486598 bytes (budget 40 tasks / 150000 bytes)`. No `data`, no `warnings`, or other strings → no line. The chain does not stop on it.
 
 `eta_minutes: null` → leave the time out. Do not report more than this.
 

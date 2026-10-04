@@ -64,7 +64,7 @@ The input is an approved spec that must change. The agent discusses only the cha
 4. Asks clarifying questions **one at a time** (prefer multiple-choice)
 5. Proposes approaches with trade-offs and a recommendation (2–3 on Standard/Deep, one on Quick)
 6. Presents design section by section, asks for approval after each
-7. Runs ambiguity sweep — closes all open questions; if an answer changes the design, re-presents that section. Then proposes the chain settings in one message (`Chain`, external environments with read and write rights, changes named first) — you confirm or edit them; they are written above `# Goal`
+7. Runs ambiguity sweep — closes all open questions; if an answer changes the design, re-presents that section. Then proposes the chain settings in one message (`Chain`, external environments with read and write rights, changes named first) — you confirm or edit them; they are written above `# Goal`. The same message shows the volume estimate (~N tasks, budget 40) and, above the budget, proposes splitting the goal into several specs
 8. Writes the spec file, checks it with `brainstorm_tool.py spec-check`, runs self-review incl. a fidelity check against your original request (Deep: plus a reviewer subagent)
 9. Asks you to review the written spec
 10. On approval → appends the spec's Out of Scope items (and the spec map, when the goal was split into several specs) to `BACKLOG.md` at the repository root (in backlog mode it also checks off the items the spec took in), then invokes `plan-writing`

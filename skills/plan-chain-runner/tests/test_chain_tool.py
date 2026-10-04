@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1117,6 +1118,18 @@ class RunEtaTest(_T2Case):
 
 
 class RunStatusTest(_T2Case):
+    def test_cost_field_from_run_stats(self):
+        a = _t2_plan("a-spec.md", done=("writing",))
+        a["stages"]["writing"]["artifacts"] = {"plan": "a-impl.md"}
+        path = self.journal(["a-spec.md"], plans=[a])
+        with open(os.path.join(self.tmp, "a-impl.md"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("# P\n\n### Task 1: One\n" + "x\n" * 29)
+        cost = ct.run_status(path)["cost"]
+        self.assertEqual(cost["basis"], "estimate")
+        self.assertEqual(cost["bytes_total"], ct.run_stats(path, None)["totals"]["bytes_written"])
+        self.assertEqual(cost["effective_tokens_est"], ct.run_stats(path, None)["totals"]["effective_tokens_est"])
+        self.assertGreater(cost["effective_tokens_est"], 0)
+
     def mark(self, path, heartbeat_at):
         mark = ct._session_file(path)
         os.makedirs(os.path.dirname(mark), exist_ok=True)
@@ -1550,6 +1563,460 @@ class RunnerDocsTest(unittest.TestCase):
             self.assertIn("does not pin the version", text, name)
             self.assertIn("pinned", text, name)
         self.assertIn("subagent_type: planforge-<role>", (self.REFS / "PROFILES.md").read_text(encoding="utf-8"))
+
+
+class _StatsCase(HomeCase):
+    """A plan folder with synthetic artifacts of known sizes."""
+
+    PLAN = ("# P\n\n**Spec:** x-spec.md\n\n**Tier:** Standard\n\n### Task 1: One\n\n**Files:**\n- Create: `a.py`\n\n"
+            "- [ ] **Step 1: Code**\n\n```python\nprint(1)\nprint(2)\n```\n\n### Task 2: Two\n\n```text\n### Task 9: not a task\n```\n")
+
+    def folder(self, *extra):
+        folder = os.path.join(self.tmp, "docs")
+        shutil.rmtree(folder, ignore_errors=True)  # every call gives a folder with only its own files
+        os.makedirs(folder, exist_ok=True)
+        files = {"x-impl.md": self.PLAN, "x-spec.md": "# Goal\n\nSpec.\n", **dict(extra)}
+        for name, text in files.items():
+            with open(os.path.join(folder, name), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(text)
+        return folder
+
+
+class TextMetricsTest(_StatsCase):
+    def test_metrics_count_code_lines_inside_fences(self):
+        folder = self.folder()
+        metrics = ct._text_metrics(os.path.join(folder, "x-impl.md"))
+        self.assertEqual(metrics["bytes"], len(self.PLAN.encode("utf-8")))
+        self.assertEqual(metrics["lines"], self.PLAN.count("\n"))
+        # fences and their content: 4 + 3 lines of 23 total
+        self.assertAlmostEqual(metrics["code_share"], 7 / 23, places=3)
+
+    def test_not_utf8_gives_bytes_only(self):
+        folder = self.folder()
+        path = os.path.join(folder, "x-impl-report-1.md")
+        with open(path, "wb") as fh:
+            fh.write(b"\xff\xfe\x00bad")
+        self.assertEqual(ct._text_metrics(path), {"bytes": 6, "lines": None, "code_share": None})
+        self.assertEqual(ct._text_metrics_text(path), "")
+
+    def test_task_count_ignores_fenced_headings(self):
+        self.assertEqual(ct._count_plan_tasks(self.PLAN), 2)
+        self.assertEqual(ct._count_plan_tasks("### Задача 1: Один\n\n### Задача 1.1: Два\n"), 2)
+
+    def test_nested_fences_follow_commonmark(self):
+        # a four-backtick block holds a three-backtick block and a task-like heading: all 6 lines are code
+        text = "# P\n\n````markdown\n```bash\nrun\n```\n### Task 9: inside\n````\n\n### Task 1: One\n"
+        path = os.path.join(self.folder(), "n.md")
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        self.assertEqual(ct._count_plan_tasks(text), 1)
+        self.assertAlmostEqual(ct._text_metrics(path)["code_share"], 6 / 10, places=3)
+
+
+class SiblingLoaderTest(HomeCase):
+    def setUp(self):
+        super().setUp()
+        ct._SIBLINGS.clear()
+        self.addCleanup(ct._SIBLINGS.clear)
+
+    def test_executor_regex_is_used_and_equals_the_fallback(self):
+        warnings = []
+        regex = ct._chain_file_re(warnings)
+        self.assertEqual(warnings, [])
+        self.assertIs(regex, ct._executor()._CHAIN_FILE_RE)
+        self.assertEqual(regex.pattern, ct._CHAIN_FILE_FALLBACK_RE.pattern)
+        self.assertIs(ct._executor(), ct._executor())  # cached
+
+    def test_fallback_without_executor(self):
+        ct._SIBLINGS["plan-executor"] = None  # what _sibling stores when the skill is not installed
+        warnings = []
+        self.assertIs(ct._chain_file_re(warnings), ct._CHAIN_FILE_FALLBACK_RE)
+        ct._chain_file_re(warnings)
+        self.assertEqual(warnings, ["executor-not-installed"])
+        for name in ("x-impl-a.md", "x-impl-roadmap.md", "x-impl-review-2.md", "x-impl-completion.md",
+                     "x-impl-report-3-final.md", "x-diffs.md", "g-followups.json", "g-chain.json"):
+            self.assertTrue(ct._CHAIN_FILE_FALLBACK_RE.fullmatch(name), name)
+        self.assertIsNone(ct._CHAIN_FILE_FALLBACK_RE.fullmatch("notes.md"))
+
+    def test_missing_sibling_is_none(self):
+        self.assertIsNone(ct._sibling("no-such-skill", "tool.py"))
+
+
+class ArtifactFilesTest(_StatsCase):
+    def test_artifact_files_by_stage(self):
+        folder = self.folder(("x-impl-a.md", "part a"), ("x-impl-b.md", "part b"), ("x-impl-roadmap.md", "r"),
+                             ("x-impl-review-1.md", "r1"), ("x-impl-review-2.md", "r2"), ("x-impl-completion.md", "c"),
+                             ("x-impl-report-1.md", "o"), ("x-impl-report-2-final.md", "f"), ("x-diffs.md", "d"),
+                             ("g-followups.json", "[]"), ("g-chain.json", "{}"), ("y-impl.md", "other plan"),
+                             ("y-impl-review-1.md", "other review"), ("notes.md", "not a chain file"))
+        warnings = []
+        files = ct._artifact_files(os.path.join(folder, "x-impl.md"), warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(files["spec"], "x-spec.md")
+        self.assertEqual(files["stages"]["writing"], ["x-impl.md"])
+        self.assertEqual(files["stages"]["revision"], ["x-impl-review-1.md", "x-impl-review-2.md", "x-impl-completion.md"])
+        self.assertEqual(files["stages"]["split"], ["x-impl-roadmap.md", "x-impl-a.md", "x-impl-b.md"])
+        self.assertEqual(files["stages"]["execution"], ["x-diffs.md"])
+        self.assertEqual(files["stages"]["audit"], ["x-impl-report-1.md", "x-impl-report-2-final.md"])
+        self.assertEqual(files["stages"]["commit"], [])
+        self.assertEqual(files["parts"], ["x-impl-a.md", "x-impl-b.md"])
+        self.assertEqual(files["reports"], ["x-impl-report-1.md", "x-impl-report-2-final.md"])
+
+    def test_missing_plan_and_folder(self):
+        files = ct._artifact_files(os.path.join(self.tmp, "none", "z-impl.md"), [])
+        self.assertEqual((files["spec"], files["stages"]["writing"], files["parts"]), (None, [], []))
+
+
+class ArtifactStatsTest(_StatsCase):
+    def test_stats_and_derived_statuses(self):
+        folder = self.folder(("x-impl-roadmap.md", "r\n"), ("x-impl-a.md", "part a\n"),
+                             ("x-impl-review-1.md", "review\n"), ("x-impl-report-1-final.md", "final\n"))
+        stats = ct._artifact_stats(os.path.join(folder, "x-impl.md"), [])
+        self.assertEqual((stats["tasks"], stats["plan_bytes"]), (2, len(self.PLAN.encode("utf-8"))))
+        self.assertEqual((stats["spec"], stats["spec_bytes"]), ("x-spec.md", len("# Goal\n\nSpec.\n")))
+        self.assertFalse(stats["plan_missing"])
+        stages = stats["stages"]
+        self.assertEqual({s: stages[s]["status"] for s in ct._STATS_STAGE_FILES},
+                         {"writing": "done", "revision": "done", "split": "done", "execution": "pending",
+                          "audit": "done", "commit": "pending"})
+        self.assertEqual(stages["split"]["bytes_written"], len("r\n") + len("part a\n"))
+        self.assertEqual([f["name"] for f in stages["revision"]["files"]], ["x-impl-review-1.md"])
+        self.assertEqual(stages["revision"]["files"][0]["bytes"], len("review\n"))
+
+    def test_plan_without_artifacts(self):
+        folder = self.folder()
+        stats = ct._artifact_stats(os.path.join(folder, "x-impl.md"), [])
+        self.assertEqual(stats["stages"]["split"]["status"], "skipped")
+        self.assertEqual(stats["stages"]["revision"], {"status": "pending", "files": [], "bytes_written": 0})
+
+    def test_missing_plan(self):
+        stats = ct._artifact_stats(os.path.join(self.tmp, "none", "z-impl.md"), [])
+        self.assertTrue(stats["plan_missing"])
+        self.assertEqual((stats["tasks"], stats["plan_bytes"], stats["spec"]), (0, 0, None))
+        self.assertEqual(stats["stages"]["writing"]["files"], [])
+
+
+class JournalStatsTest(_T2Case):
+    def test_minutes_models_units_and_actual_cost(self):
+        a = _t2_plan("a-spec.md", done=("writing", "revision"), execution="failed")
+        a["stages"]["revision"]["artifacts"] = {"cost_tokens": "12000", "cost_source": "claude-code"}
+        a["stages"]["split"]["artifacts"] = {"split_method": "script"}
+        a["stages"]["audit"] = {"status": "done", "artifacts": {"status": "open", "issues": "3"}}
+        events = [_t2_event("01:00:00", "a-impl", "revision", "stage-start"),
+                  _t2_event("01:10:00", "a-impl", "revision", "stage-end", to="done"),
+                  _t2_event("02:00:00", "a-impl", "revision", "stage-start"),
+                  _t2_event("02:05:00", "a-impl", "revision", "stage-end", to="done"),
+                  _t2_event("03:00:00", "a-impl", "execution", "unit-begin", unit="U1"),
+                  _t2_event("03:01:00", "a-impl", "execution", "unit-finish", unit="U1"),
+                  _t2_event("03:01:00", "a-impl", "execution", "unit-begin", unit="U2"),
+                  _t2_event("03:02:00", "a-impl", "execution", "unit-finish", unit="U2"),
+                  _t2_event("03:02:00", "a-impl", "execution", "unit-begin", unit="U2"),
+                  _t2_event("04:00:00", "b-impl", "revision", "stage-start"),
+                  _t2_event("04:30:00", "b-impl", "revision", "stage-end", to="done")]
+        path = self.journal(["a-spec.md"], plans=[a], events=events)
+        data, runner = ct._runner_journal(path)
+        runner["models"] = {"revision": {"model": "claude-sonnet-5-5", "effort": "high"}}
+        state = ct._plan_states(path, data, runner)[0]
+        stats = ct._journal_stats(data, runner, state)
+        revision = stats["stages"]["revision"]
+        self.assertEqual((revision["status"], revision["minutes"]), ("done", 15.0))
+        self.assertEqual((revision["model"], revision["effort"]), ("claude-sonnet-5-5", "high"))
+        self.assertEqual((revision["actual_tokens"], revision["actual_source"]), (12000, "claude-code"))
+        split = stats["stages"]["split"]
+        self.assertEqual((split["status"], split["minutes"], split["model"], split["actual_tokens"]),
+                         ("pending", None, None, None))
+        self.assertEqual(split["artifacts"], {"split_method": "script"})
+        self.assertEqual(stats["units"], {"begun": 3, "distinct": 2, "retries": 1})
+        self.assertEqual(stats["audit"], {"status": "open", "issues": 3})
+        self.assertEqual(stats["failed_stages"], ["execution"])
+
+    def test_empty_journal(self):
+        path = self.journal(["a-spec.md"])
+        data, runner = ct._runner_journal(path)
+        stats = ct._journal_stats(data, runner, ct._plan_states(path, data, runner)[0])
+        self.assertEqual(stats["units"], {"begun": 0, "distinct": 0, "retries": 0})
+        self.assertEqual(stats["audit"], {"status": None, "issues": None})
+        self.assertIsNone(stats["stages"]["writing"]["minutes"])
+        self.assertEqual(stats["stages"]["writing"]["artifacts"], {})
+
+
+class AuditScopeTest(unittest.TestCase):
+    PLAN = "# P\n\n### Task 1: One\nbody1\n\n### Task 2: Two\nbody2\n"
+
+    @staticmethod
+    def parser(text):
+        return {"tasks": [{"id": "1", "line_start": 3, "line_end": 5}, {"id": "2", "line_start": 6, "line_end": 7}],
+                "malformed": [], "duplicates": []}
+
+    def test_review_headers_and_report_frontmatter(self):
+        review = "# R\n\n**Previous review**: none\n**Audit scope**: incremental\n**Audit tasks**: 3, 7.1\n"
+        self.assertEqual(ct._audit_scope(review, frontmatter=False), ("incremental", ["3", "7.1"]))
+        self.assertEqual(ct._audit_scope("# R\n\n**Audit scope**: full\n**Audit tasks**: all\n", False), ("full", None))
+        self.assertEqual(ct._audit_scope("# R\n\nno headers\n", False), ("full", None))
+        report = "---\nmaster_plan_path: p.md\naudit_scope: incremental\naudit_tasks: [7, 8, 12.1]\n---\n# Report\n\naudit_scope: full\n"
+        self.assertEqual(ct._audit_scope(report, frontmatter=True), ("incremental", ["7", "8", "12.1"]))
+        self.assertEqual(ct._audit_scope("---\naudit_scope: full\naudit_tasks: all\n---\n", True), ("full", None))
+        self.assertEqual(ct._audit_scope("---\nlanguage: ru\n---\n", True), ("full", None))
+
+    def test_scoped_bytes(self):
+        plan, size = self.PLAN, len(self.PLAN.encode("utf-8"))
+        with mock.patch.object(ct, "_task_parser", return_value=self.parser):
+            warnings = []
+            self.assertEqual(ct._scoped_bytes(plan, size, ["2"], "r.md", warnings),
+                             (len("# P\n\n") + len("### Task 2: Two\nbody2\n"), "incremental"))
+            self.assertEqual(warnings, [])
+            self.assertEqual(ct._scoped_bytes(plan, size, ["9"], "r.md", warnings), (size, "full"))
+            self.assertEqual(ct._scoped_bytes(plan, size, [], "r2.md", warnings), (size, "full"))
+            self.assertEqual(warnings, ["scope-unresolved: r.md", "scope-unresolved: r2.md"])
+        with mock.patch.object(ct, "_task_parser", return_value=None):
+            warnings = []
+            self.assertEqual(ct._scoped_bytes(plan, size, ["2"], "r.md", warnings), (size, "full"))
+            self.assertEqual(warnings, [])
+
+
+class ReadsModelTest(_StatsCase):
+    def reads(self, stage, *extra, split_method=None, skeleton=False):
+        folder = self.folder(*extra)
+        warnings = []
+        stats = ct._artifact_stats(os.path.join(folder, "x-impl.md"), warnings)
+        if split_method:
+            stats["stages"]["split"]["artifacts"] = {"split_method": split_method}
+        with mock.patch.object(ct, "_skeleton_available", return_value=skeleton):
+            result = ct._reads_model(stage, stats, folder, self.PLAN, warnings)
+        return result, stats, warnings
+
+    def test_today_rules(self):
+        plan = len(self.PLAN.encode("utf-8"))
+        self.assertEqual(self.reads("writing")[0], (len("# Goal\n\nSpec.\n"), "spec"))
+        self.assertEqual(self.reads("revision", ("x-impl-review-1.md", "r\n"), ("x-impl-review-2.md", "r\n"),
+                                    ("x-impl-completion.md", "c\n"))[0], (plan * 2, "full"))
+        self.assertEqual(self.reads("split", ("x-impl-roadmap.md", "m" * 9 + "\n"), ("x-impl-a.md", "p" * 99 + "\n"))[0],
+                         (plan + 100, "full"))
+        self.assertEqual(self.reads("split")[0], (0, "skipped"))
+        self.assertEqual(self.reads("execution", ("x-diffs.md", "d\n"))[0], (plan, "plan"))
+        self.assertEqual(self.reads("execution", ("x-diffs.md", "d\n"), ("x-impl-roadmap.md", "m\n"), ("x-impl-a.md", "p" * 9 + "\n"))[0],
+                         (10, "parts"))
+        self.assertEqual(self.reads("audit", ("x-impl-report-1.md", "o" * 299 + "\n"), ("x-impl-report-2-final.md", "f\n"))[0],
+                         (plan * 2 + 300, "full"))
+        self.assertEqual(self.reads("commit")[0], (0, "none"))
+
+    def test_rules_of_the_later_specs(self):
+        plan = len(self.PLAN.encode("utf-8"))
+        (size, mode), stats, _ = self.reads("split", ("x-impl-roadmap.md", "m\n"), ("x-impl-a.md", "p\n"), split_method="script")
+        self.assertEqual((size, mode), (stats["tasks"] * ct._STATS_TASK_LIST_BYTES, "script"))
+        (size, mode), stats, _ = self.reads("audit", ("x-impl-report-1.md", "o\n"), skeleton=True)
+        self.assertEqual((size, mode), (round(plan * (1 - stats["code_share"])), "skeleton"))
+        review = "# R\n\n**Audit scope**: incremental\n**Audit tasks**: 2\n"
+        parser = lambda text: {"tasks": [{"id": "1", "line_start": 7, "line_end": 18}, {"id": "2", "line_start": 19, "line_end": 23}],
+                               "malformed": [], "duplicates": []}
+        with mock.patch.object(ct, "_task_parser", return_value=parser):
+            (size, mode), _, warnings = self.reads("revision", ("x-impl-review-1.md", "# R\n"), ("x-impl-review-2.md", review))
+        header = len("# P\n\n**Spec:** x-spec.md\n\n**Tier:** Standard\n\n")
+        task2 = len("### Task 2: Two\n\n```text\n### Task 9: not a task\n```\n")
+        self.assertEqual((size, mode, warnings), (plan + header + task2, "mixed", []))
+        os.makedirs(os.path.join(self.tmp, ".git"), exist_ok=True)
+        with open(os.path.join(self.tmp, "evidence.py"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("x" * 40 + "\n")
+        report = ("---\naudit_scope: incremental\naudit_tasks: [2]\n---\n# Report\n\n## Evidence fingerprint\n\n"
+                  "| File | SHA-256 |\n|---|---|\n| `evidence.py` | " + "0" * 64 + " |\n| `gone.py` | missing |\n\n## Issues\n")
+        with mock.patch.object(ct, "_task_parser", return_value=parser):
+            (size, mode), _, warnings = self.reads("audit", ("x-impl-report-1.md", "o" * 9 + "\n"), ("x-impl-report-2.md", report))
+        self.assertEqual((size, mode, warnings), (plan + (header + task2 + 41) + 10, "mixed", []))
+        with mock.patch.object(ct, "_task_parser", return_value=parser):
+            (size, mode), _, warnings = self.reads("audit", ("x-impl-report-1.md", "---\naudit_scope: incremental\naudit_tasks: [9]\n---\n"))
+        self.assertEqual((size, mode, warnings), (plan, "full", ["scope-unresolved: x-impl-report-1.md"]))
+
+
+class CostEstimateTest(_StatsCase):
+    def stats(self, *extra):
+        folder = self.folder(*extra)
+        return ct._artifact_stats(os.path.join(folder, "x-impl.md"), []), folder
+
+    def test_formula_and_totals(self):
+        stats, folder = self.stats(("x-impl-review-1.md", "r" * 30 + "\n"), ("x-impl-review-2.md", "r" * 60 + "\n"),
+                                   ("x-impl-roadmap.md", "m" * 9 + "\n"), ("x-impl-a.md", "p" * 99 + "\n"),
+                                   ("x-impl-report-1.md", "o" * 299 + "\n"), ("x-impl-report-2-final.md", "f" * 2 + "\n"),
+                                   ("x-diffs.md", "d" * 5 + "\n"))
+        with mock.patch.object(ct, "_skeleton_available", return_value=False):  # the audit reads the plan, with or without spec 7
+            est = ct._cost_estimate(stats, folder, [])
+        plan, spec = stats["plan_bytes"], stats["spec_bytes"]
+        self.assertEqual(est["stages"]["writing"]["bytes_read_est"], spec)
+        self.assertEqual((est["stages"]["revision"]["bytes_read_est"], est["stages"]["revision"]["reads_mode"]), (plan * 2, "full"))
+        self.assertEqual(est["stages"]["split"]["bytes_read_est"], plan + 100)
+        self.assertEqual(est["stages"]["execution"]["bytes_read_est"], 100)
+        self.assertEqual(est["stages"]["audit"]["bytes_read_est"], plan * 2 + 300)
+        self.assertEqual((est["stages"]["commit"]["bytes_read_est"], est["stages"]["commit"]["basis"]), (0, "estimate"))
+        tokens = est["stages"]["revision"]["tokens"]
+        self.assertEqual(tokens, {"input_est": round(plan * 2 / 3), "output_est": round(92 / 3),
+                                  "effective_est": round(plan * 2 / 3) + 4 * round(92 / 3), "actual": None})
+        self.assertEqual(est["totals"]["bytes_written"], plan + 31 + 61 + 10 + 100 + 300 + 3 + 6)  # writing wrote the plan
+        self.assertEqual(est["totals"]["effective_tokens_est"], sum(s["tokens"]["effective_est"] for s in est["stages"].values()))
+        self.assertEqual((est["totals"]["basis"], est["totals"]["actual_tokens"], est["totals"]["minutes"]), ("estimate", None, None))
+        self.assertEqual((ct.COST_FORMULA["bytes_per_token"], ct.COST_FORMULA["output_weight"]), (3, 4))
+
+    def test_actual_wins_and_sets_the_basis(self):
+        stats, folder = self.stats(("x-diffs.md", "d\n"))
+        stats["stages"]["execution"].update(actual_tokens=777, minutes=2.5)
+        est = ct._cost_estimate(stats, folder, [])
+        self.assertEqual((est["stages"]["execution"]["basis"], est["stages"]["execution"]["tokens"]["actual"]), ("host", 777))
+        self.assertEqual(est["stages"]["writing"]["basis"], "estimate")
+        self.assertEqual((est["totals"]["basis"], est["totals"]["actual_tokens"], est["totals"]["minutes"]), ("host", 777, 2.5))
+
+
+class QualityTest(CostEstimateTest):
+    def test_quality_from_files(self):
+        stats, folder = self.stats(("x-impl-review-1.md", "# R\n\n**Issues found**: 4 (blocker: 0, major: 1, minor: 3, nit: 0)\n"),
+                                   ("x-impl-report-1.md", "## Issues\n\n1) Error 1: open | high | A\n2) Error 2: open | low | B\n"))
+        quality = ct._quality(stats, folder)
+        self.assertEqual(quality, {"audit_status": "open", "audit_issues": 2, "reviews": 1, "review_remaining": 4,
+                                   "unit_retries": None, "failed_stages": []})
+        stats, folder = self.stats(("x-impl-review-1.md", "**Issues found**: 2 (…)\n"), ("x-impl-completion.md", "done\n"),
+                                   ("x-impl-report-1-final.md", "## Issues\n\nNo issues found.\n"))
+        quality = ct._quality(stats, folder)
+        self.assertEqual((quality["audit_status"], quality["audit_issues"], quality["review_remaining"]), ("final", 0, 0))
+
+    def test_quality_without_artifacts(self):
+        stats, folder = self.stats()
+        self.assertEqual(ct._quality(stats, folder)["audit_status"], None)
+        self.assertEqual(ct._quality(stats, folder)["reviews"], 0)
+
+
+class BaselineDeltaTest(unittest.TestCase):
+    def summary(self, read, written, eff, minutes, tasks, plan_bytes, goal=None, basis="estimate"):
+        stage = {"bytes_read_est": read, "bytes_written": written, "effective_tokens_est": eff, "minutes": minutes}
+        out = {"formula": ct.COST_FORMULA, "mode": "journal" if goal else "plan",
+               "totals": dict(stage, tasks=tasks, plan_bytes=plan_bytes, stages={"revision": dict(stage, basis=basis)})}
+        if goal:
+            out["goal"] = goal
+        return out
+
+    def test_deltas_absolute_per_task_and_per_kb(self):
+        current = self.summary(2000, 300, 1000, 10.0, 10, 2048)
+        baseline = self.summary(4000, 400, 2000, 30.0, 20, 4096)
+        warnings = []
+        delta = ct._baseline_delta(current, baseline, warnings)
+        self.assertEqual(delta["totals"]["effective_tokens_est"], {"abs": -1000, "per_task": 0.0, "per_kb": 0.0})
+        self.assertEqual(delta["totals"]["minutes"], {"abs": -20.0, "per_task": -0.5, "per_kb": -2.5})
+        self.assertEqual(delta["stages"]["revision"]["bytes_read_est"]["abs"], -2000)
+        self.assertEqual(warnings, [])
+
+    def test_minutes_null_basis_mixed_and_mismatch(self):
+        current = self.summary(1, 1, 1, None, 1, 1024, basis="host")
+        baseline = self.summary(1, 1, 1, 5.0, 1, 1024)
+        warnings = []
+        delta = ct._baseline_delta(current, baseline, warnings)
+        self.assertIsNone(delta["totals"]["minutes"])
+        self.assertEqual(delta["stages"]["revision"]["bytes_written"]["abs"], 0)
+        self.assertEqual(warnings, ["basis-mixed: revision"])
+        with self.assertRaisesRegex(ct.InputError, "^baseline-mismatch: "):
+            ct._baseline_delta(current, {"plans": []}, [])
+        with self.assertRaisesRegex(ct.InputError, "^baseline-mismatch: "):
+            ct._baseline_delta(self.summary(1, 1, 1, 1.0, 1, 1, goal="a"), self.summary(1, 1, 1, 1.0, 1, 1, goal="b"), [])
+
+
+class RunStatsTest(_T2Case):
+    def plan_folder(self, name="a-impl.md", **files):
+        text = "# P\n\n**Spec:** a-spec.md\n\n### Task 1: One\n\n### Task 2: Two\n\n```\nx\n```\n"
+        for fname, body in {name: text, **files}.items():
+            with open(os.path.join(self.tmp, fname), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+        return text
+
+    def test_journal_mode_merges_both_layers(self):
+        text = self.plan_folder(**{"a-impl-review-1.md": "r\n" * 50, "a-diffs.md": "d\n"})
+        a = _t2_plan("a-spec.md", done=("writing", "revision", "split", "execution"))
+        a["stages"]["writing"]["artifacts"] = {"plan": "a-impl.md"}
+        a["stages"]["execution"]["artifacts"] = {"cost_tokens": "500", "cost_source": "claude-code"}
+        events = [_t2_event("01:00:00", "a-impl", "revision", "stage-start"),
+                  _t2_event("01:30:00", "a-impl", "revision", "stage-end", to="done")]
+        path = self.journal(["a-spec.md"], plans=[a], events=events)
+        out = ct.run_stats(path, None)
+        self.assertEqual((out["ok"], out["mode"], out["goal"]), (True, "journal", "g"))
+        plan = out["plans"][0]
+        self.assertEqual((plan["plan"], plan["tasks"], plan["plan_bytes"]), ("a-impl.md", 2, len(text.encode("utf-8"))))
+        self.assertEqual((plan["stages"]["revision"]["status"], plan["stages"]["revision"]["minutes"]), ("done", 30.0))
+        self.assertEqual(plan["stages"]["split"]["status"], "done")  # the journal wins over "skipped" from the files
+        self.assertEqual((plan["stages"]["revision"]["bytes_written"], plan["stages"]["revision"]["reads_mode"]), (100, "full"))
+        self.assertEqual(plan["stages"]["revision"]["tokens"]["output_est"], round(100 / 3))
+        self.assertEqual((plan["stages"]["execution"]["basis"], plan["stages"]["revision"]["basis"]), ("host", "estimate"))
+        self.assertEqual((out["totals"]["stages"]["execution"]["basis"], out["totals"]["basis"]), ("host", "host"))
+        self.assertEqual(plan["quality"]["reviews"], 1)
+        self.assertEqual(out["totals"]["tasks"], 2)
+        self.assertEqual(out["formula"]["bytes_per_token"], 3)
+        self.assertIsNone(plan["delta"])
+
+    def test_plan_mode_and_baseline(self):
+        self.plan_folder(**{"a-impl-report-1-final.md": "## Issues\n\nNo issues found.\n"})
+        with open(os.path.join(self.tmp, "a-impl-review-1.md"), "wb") as fh:
+            fh.write(b"\xff\xfebad")
+        plan = os.path.join(self.tmp, "a-impl.md")
+        out = ct.run_stats(None, plan)
+        self.assertEqual((out["mode"], "goal" in out), ("plan", False))
+        self.assertEqual(out["warnings"], ["not-utf8: a-impl-review-1.md"])
+        self.assertEqual(out["plans"][0]["stages"]["audit"]["status"], "done")
+        self.assertEqual(out["plans"][0]["quality"]["audit_status"], "final")
+        self.assertIsNone(out["plans"][0]["stages"]["audit"]["minutes"])
+        base = os.path.join(self.tmp, "base.json")
+        with open(base, "w", encoding="utf-8") as fh:
+            json.dump(out, fh)
+        again = ct.run_stats(None, plan, base)
+        self.assertEqual(again["delta"]["totals"]["effective_tokens_est"]["abs"], 0)
+        self.assertIsNone(again["delta"]["totals"]["minutes"])
+        self.assertNotIn("basis-mixed: audit", again["warnings"])
+
+    def test_without_plan_brainstorming(self):
+        self.plan_folder()
+        path = self.journal(["a-spec.md"])
+        missing = ct.InputError("plan-brainstorming not installed alongside: x")
+        with mock.patch.object(ct, "_brainstorm", side_effect=missing):
+            with self.assertRaisesRegex(ct.InputError, "^plan-brainstorming not installed"):
+                ct.run_stats(path, None)
+            out = ct.run_stats(None, os.path.join(self.tmp, "a-impl.md"))
+        self.assertEqual((out["ok"], out["mode"], out["warnings"]), (True, "plan", []))
+
+    def test_arguments_and_missing_plan(self):
+        path = self.journal(["a-spec.md"])
+        with self.assertRaisesRegex(ct.InputError, "^bad-arguments: "):
+            ct.run_stats(None, None)
+        with self.assertRaisesRegex(ct.InputError, "^bad-arguments: "):
+            ct.run_stats(path, os.path.join(self.tmp, "a-impl.md"))
+        with self.assertRaisesRegex(ct.InputError, "^plan-not-found: "):
+            ct.run_stats(None, os.path.join(self.tmp, "none-impl.md"))
+        out = ct.run_stats(path, None)  # the plan of the journal is not on disk yet
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["warnings"][0].startswith("plan-missing: "))
+        self.assertTrue(out["plans"][0]["plan_missing"])
+
+
+class RunStatsCliTest(RunStatsTest):
+    def test_errors(self):
+        code, out = self.run_main("run-stats")
+        self.assertEqual((code, out["errors"][0][:13]), (2, "bad-arguments"))
+        path = self.journal(["a-spec.md"])
+        code, out = self.run_main("run-stats", path, "--plan", os.path.join(self.tmp, "a-impl.md"))
+        self.assertEqual((code, out["errors"][0][:13]), (2, "bad-arguments"))
+        code, out = self.run_main("run-stats", "--plan", os.path.join(self.tmp, "none-impl.md"))
+        self.assertEqual((code, out["errors"][0][:14]), (2, "plan-not-found"))
+        bad = os.path.join(self.tmp, "bad.json")
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write("[]")
+        code, out = self.run_main("run-stats", path, "--baseline", bad)
+        self.assertEqual((code, out["errors"][0][:17]), (2, "baseline-mismatch"))
+        code, out = self.run_main("run-stats", path, "--json-out", os.path.join(self.tmp, "no", "dir", "x.json"))
+        self.assertEqual((code, out["errors"][0][:12]), (2, "write-failed"))
+        self.assertEqual((out["ok"], out["mode"], len(out["plans"])), (False, "journal", 1))  # the result is printed too
+
+    def test_json_out_and_cli(self):
+        self.plan_folder()
+        plan, target = os.path.join(self.tmp, "a-impl.md"), os.path.join(self.tmp, "out.json")
+        code, out = self.run_main("run-stats", "--plan", plan, "--json-out", target)
+        self.assertEqual((code, out["mode"]), (0, "plan"))
+        with open(target, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["totals"]["tasks"], 2)
+        code, out = self.run_cli("run-stats", "--plan", plan)
+        self.assertEqual((code, out["ok"], out["mode"]), (0, True, "plan"))
+        code, out = self.run_cli("run-stats")
+        self.assertEqual((code, out["ok"]), (2, False))
 
 
 if __name__ == "__main__":

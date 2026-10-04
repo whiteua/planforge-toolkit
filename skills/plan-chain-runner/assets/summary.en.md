@@ -3,6 +3,7 @@
 Result: {{result}}
 Journal: `{{journal_path}}`
 Profile: {{profile}}; time: {{duration}}
+Volume: {{cost_line}}
 
 ## Plans
 

@@ -638,6 +638,14 @@ A run in progress is marked by a session file outside the working tree, `~/.plan
 
 ---
 
+### Artifact-based cost accounting
+
+`chain_tool.py run-stats` measures a run from what it left behind: per stage the files written, their size and code share, the minutes and the model from the journal, and a token estimate (bytes / 3, output weighted 4× because it is priced several times above input) whose reads model follows the artifacts, so an incremental review, an incremental audit or a script split is counted as what it read. Where the host showed an agent's token usage, the runner recorded it and the fact replaces the estimate (`basis: host`). Quality rides along (audit status and issues, reviews, unit retries), and `--baseline` compares two results per task and per KB of plan, so a token saving that worsens the audit is visible as such. The model, the toolkit's own baseline and the checkpoints of its refactoring are in [docs/COST.md](docs/COST.md).
+
+**Used in:** `plan-chain-runner`
+
+---
+
 ### Subagent-based behavioural skill testing
 
 `writing-skills` tests new skills not by reading their source but by spawning a subagent with the skill loaded and observing its behaviour on a set of canonical scenarios. This mirrors how the skill will be used in production and catches description-matching failures, missing reference files, and incorrect workflow sequencing that static analysis cannot find.

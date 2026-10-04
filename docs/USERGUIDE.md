@@ -351,6 +351,8 @@ Roles: `writing`, `revision`, `split`, `execution`, `audit`, `commit`. An alias 
 
 **Output:** the chain's usual artifacts plus the `runner` section of `<goal>-chain.json` (profile, specs, graph, models, start commit, sessions). Apart from the optional start commit and the chain journal (`runner` section, skipped events, questions, answers), the runner writes nothing in the repository.
 
+**Cost:** `chain_tool.py run-stats <journal>` (or `--plan <plan.md>` without a journal) reports per plan and stage the files written, their size and code share, the minutes, the model, the host's token count when the runner recorded it or an estimate of input, output and effective tokens derived from what the stage read and wrote, plus quality (audit status and issues, reviews, unit retries); `--baseline <json>` compares with an earlier result per task and per KB of plan. The summary's "Volume" line is this number. Model, baseline and checkpoints: [docs/COST.md](COST.md).
+
 **Prerequisites:** all six pipeline skills installed side by side (the runner loads `plan-brainstorming`'s `brainstorm_tool.py` by path and launches the others by name); Python ≥ 3.8 in PATH.
 
 ---

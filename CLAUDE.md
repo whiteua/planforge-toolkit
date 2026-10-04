@@ -66,7 +66,7 @@ One Python tool per skill; details (every command, field and error code) are in 
 | `plan-splitter/scripts/splitter_tool.py` | Parts `<base>-a.md`, `<base>-b.md`, … and `<base>-roadmap.md`: preflight, part/roadmap validation, verify baseline/record/status. |
 | `plan-executor/scripts/executor_tool.py` | The ledger and run loop (`ledger-init`, `unit-begin`, `unit-finish`, `consent`, `accept-changes`, `checkpoint-restore`), snapshots as hidden refs `refs/plan-executor/<run>/<unit>`, `run-diff` (`<base>-diffs.md`), `commit-run`, `parse-roadmap`. |
 | `plan-resolver/scripts/resolver_tool.py` | `bootstrap`, `preflight`, `fingerprint-workspace` + `assert-readonly`, report parsing/validation (`validate-report --root --plan`), `task-census`, the fix loop (`discover`, `open-issues`, `protect`, `mark-fix`, `cycle-check`). |
-| `plan-chain-runner/scripts/chain_tool.py` | The runner's deterministic scheduler and the journal's `runner` section: `settings-load/save`, `model-pick`, `run-init`, `run-session`, `run-next`, `run-eta`, `run-status`. Host profiles `claude-code`, `github-copilot`, `fallback`; settings in `~/.planforge/runner.json` (`PLANFORGE_HOME`). |
+| `plan-chain-runner/scripts/chain_tool.py` | The runner's deterministic scheduler and the journal's `runner` section: `settings-load/save`, `model-pick`, `run-init`, `run-session`, `run-next`, `run-eta`, `run-status`, `run-stats` (cost and quality per stage; `docs/COST.md`). Host profiles `claude-code`, `github-copilot`, `fallback`; settings in `~/.planforge/runner.json` (`PLANFORGE_HOME`). |
 
 ## Cross-skill contracts
 

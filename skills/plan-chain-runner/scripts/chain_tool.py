@@ -14,9 +14,10 @@ Commands:
   run-next       <journal> [--parallel N] [--in-flight PLAN_ID:STAGE]...
   run-eta        <journal>
   run-status     <journal>
+  run-stats      (<journal> | --plan PLAN) [--baseline JSON] [--json-out FILE]
 
 Exit codes: 0 ok, 1 contract (graph-cycle, session-active, session-stale-running, session-taken-over,
-runner-missing, no-model) or scheduler-bug (run-next, run-eta, run-status), 2 usage or I/O error
+runner-missing, no-model) or scheduler-bug (run-next, run-eta, run-status, run-stats), 2 usage or I/O error
 (journal-corrupt included).
 """
 from __future__ import annotations
@@ -37,6 +38,162 @@ from typing import Any, Dict, List, Optional, Tuple
 
 ROLES = ("writing", "revision", "split", "execution", "audit", "commit")
 PROFILES = ("claude-code", "github-copilot", "fallback")
+
+
+# run-stats: text metrics of the chain's files (Task 1), their discovery next to a plan (Tasks 1.1, 1.2).
+_STATS_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_STATS_TASK_RE = re.compile(r"^#{2,4}\s+(?:Task|Задача)\s+\S+?\s*:")
+
+
+def _fenced_lines(lines: List[str]) -> List[Tuple[str, bool]]:
+    """(line, in_code) per line: in_code is True for the lines of a fenced block, its opening and closing
+    lines included. Fences follow CommonMark: the closing line repeats the opening character, is at least
+    as long and has no text after it, so a four-backtick block may hold three-backtick blocks."""
+    out: List[Tuple[str, bool]] = []
+    fence: Optional[Tuple[str, int]] = None
+    for line in lines:
+        match = _STATS_FENCE_RE.match(line)
+        if fence is None:
+            if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
+                fence = (match.group(1)[0], len(match.group(1)))
+            out.append((line, fence is not None))
+        else:
+            out.append((line, True))
+            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= fence[1] and not match.group(2).strip():
+                fence = None
+    return out
+
+
+def _text_metrics(path: str) -> Dict[str, Any]:
+    """bytes, lines and the share of lines inside code fences (fence lines included); a file that is
+    not UTF-8 keeps its bytes and gets None for the rest."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"bytes": len(raw), "lines": None, "code_share": None}
+    lines = text.splitlines()
+    code = sum(1 for _, in_code in _fenced_lines(lines) if in_code)
+    return {"bytes": len(raw), "lines": len(lines), "code_share": round(code / len(lines), 4) if lines else 0.0}
+
+
+def _text_metrics_text(path: str) -> str:
+    """File text for the header scans; an unreadable or undecodable file reads as empty."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _count_plan_tasks(text: str) -> int:
+    """`### Task N:` / `### Задача N:` headings outside code fences (the local counter until the shared
+    task parser of plan-brainstorming exists)."""
+    return sum(1 for line, in_code in _fenced_lines(text.splitlines()) if not in_code and _STATS_TASK_RE.match(line))
+
+
+_SIBLINGS: Dict[str, Any] = {}
+
+
+def _sibling(skill: str, script: str) -> Any:
+    """A sibling skill's script loaded by path once per process, like _brainstorm(); None when that skill
+    is not installed alongside (the caller decides what the absence means)."""
+    if skill not in _SIBLINGS:
+        path = Path(__file__).resolve().parents[2] / skill / "scripts" / script
+        module = None
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location(script[:-len(".py")], str(path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        _SIBLINGS[skill] = module
+    return _SIBLINGS[skill]
+
+
+def _executor() -> Any:
+    """plan-executor's executor_tool.py, or None without it."""
+    return _sibling("plan-executor", "executor_tool.py")
+
+
+# Copy of executor_tool._CHAIN_FILE_RE for a runner installed without plan-executor. The original wins
+# when it is there; the two stay equal by contract (test SiblingLoaderTest, and spec 9 of plan-refactoring-01
+# changes both when it adds the goal roadmap).
+_CHAIN_FILE_FALLBACK_RE = re.compile(
+    r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
+    r"|impl-roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
+
+
+def _chain_file_re(warnings: List[str]) -> Any:
+    """The names of the pipeline's files as plan-executor knows them; the fallback constant with one
+    `executor-not-installed` warning when executor_tool.py is not alongside."""
+    module = _executor()
+    if module is None:
+        if "executor-not-installed" not in warnings:
+            warnings.append("executor-not-installed")
+        return _CHAIN_FILE_FALLBACK_RE
+    return module._CHAIN_FILE_RE
+
+
+_STATS_SPEC_RE = re.compile(r"^\*\*Spec:\*\*\s*(\S.*?)\s*$", re.MULTILINE)
+_STATS_STAGE_FILES = ("writing", "revision", "split", "execution", "audit", "commit")
+
+
+def _artifact_files(plan_path: str, warnings: List[str]) -> Dict[str, Any]:
+    """The chain's files next to `plan_path` (names by plan-executor's pattern, _chain_file_re), by the
+    stage that writes them, relative to the plan's folder and in production order (reviews and reports
+    by number): parts `<base>-<id>.md`, `<base>-roadmap.md`, `<base>-review-N.md`, `<base>-completion.md`,
+    `<base>-report-N[-final].md`, `<X>-diffs.md` (X = base without -impl)."""
+    folder, name = os.path.split(os.path.abspath(plan_path))
+    base = name[:-3] if name.lower().endswith(".md") else name
+    x_base = base[:-len("-impl")] if base.endswith("-impl") else base
+    chain_re = _chain_file_re(warnings)
+    names = sorted(n for n in (os.listdir(folder) if os.path.isdir(folder) else [])
+                   if chain_re.fullmatch(n) and (n.startswith(base + "-") or n == f"{x_base}-diffs.md"))
+
+    def numbered(pattern: str) -> List[str]:
+        found = [(int(m.group(1)), n) for n in names for m in [re.fullmatch(pattern, n)] if m]
+        return [n for _, n in sorted(found)]
+
+    parts = [n for n in names if re.fullmatch(re.escape(base) + r"-[a-z]{1,2}\.md", n)]
+    roadmap = [n for n in names if n == f"{base}-roadmap.md"]
+    completion = [n for n in names if n == f"{base}-completion.md"]
+    reports = numbered(re.escape(base) + r"-report-(\d+)(?:-final)?\.md")
+    stages = {"writing": [name] if os.path.isfile(plan_path) else [],
+              "revision": numbered(re.escape(base) + r"-review-(\d+)\.md") + completion,
+              "split": roadmap + parts,
+              "execution": [n for n in names if n == f"{x_base}-diffs.md"],
+              "audit": reports, "commit": []}
+    spec = None
+    if os.path.isfile(plan_path):
+        match = _STATS_SPEC_RE.search(_text_metrics_text(plan_path))
+        spec = match.group(1).strip("`") if match else None
+    return {"folder": folder, "base": base, "spec": spec, "stages": stages, "parts": parts, "reports": reports}
+
+
+def _artifact_stats(plan_path: str, warnings: List[str]) -> Dict[str, Any]:
+    """The artifact layer of run-stats: the plan's size, code share and task count, the spec's size,
+    and per stage the files it wrote with their metrics; statuses derived from the files alone
+    (the journal layer overrides them when there is a journal)."""
+    files = _artifact_files(plan_path, warnings)
+    folder = files["folder"]
+    exists = os.path.isfile(plan_path)
+    plan_text = _text_metrics_text(plan_path) if exists else ""
+    plan_metrics = _text_metrics(plan_path) if exists else {"bytes": 0, "lines": None, "code_share": None}
+    spec_path = os.path.join(folder, files["spec"]) if files["spec"] else None
+    spec_bytes = os.path.getsize(spec_path) if spec_path and os.path.isfile(spec_path) else 0
+    stages: Dict[str, Any] = {}
+    for stage in _STATS_STAGE_FILES:
+        entries = [dict(name=n, **_text_metrics(os.path.join(folder, n))) for n in files["stages"][stage]]
+        if stage == "split":
+            status = "done" if entries else "skipped"
+        elif stage == "commit":
+            status = "pending"
+        else:
+            status = "done" if entries else "pending"
+        stages[stage] = {"status": status, "files": entries, "bytes_written": sum(e["bytes"] for e in entries)}
+    return {"plan": os.path.basename(plan_path), "plan_missing": not exists, "tasks": _count_plan_tasks(plan_text),
+            "plan_bytes": plan_metrics["bytes"], "code_share": plan_metrics["code_share"], "spec": files["spec"],
+            "spec_bytes": spec_bytes, "parts": files["parts"], "reports": files["reports"], "stages": stages}
 
 
 class InputError(Exception):
@@ -1017,6 +1174,275 @@ def _spans(data: Dict[str, Any], start: str, end: str, key: Any) -> List[Tuple[A
     return spans
 
 
+def _journal_stats(data: Dict[str, Any], runner: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    """The journal layer of run-stats for one plan state: per stage its status, the summed minutes of its
+    stage-start/stage-end spans, the role's model and effort (runner.models), its artifacts and the actual
+    cost the runner recorded (artifacts cost_tokens/cost_source); the plan's unit events, audit result and
+    failed stages."""
+    plan_id = state["entry"]["id"]
+    own = {"events": [event for event in data["events"] if event.get("plan") == plan_id]}
+    minutes: Dict[str, float] = {}
+    for stage, seconds in _spans(own, "stage-start", "stage-end", lambda event: event.get("stage")):
+        minutes[stage] = minutes.get(stage, 0.0) + seconds / 60
+    models = runner.get("models") or {}
+    stages: Dict[str, Any] = {}
+    for stage in _brainstorm().STAGES:
+        record, role = _record(state, stage), models.get(STAGE_ROLES[stage]) or {}
+        artifacts = record.get("artifacts") or {}
+        stages[stage] = {"status": record.get("status", "pending"),
+                         "minutes": round(minutes[stage], 1) if stage in minutes else None,
+                         "model": role.get("model"), "effort": role.get("effort"), "artifacts": dict(artifacts),
+                         "actual_tokens": _int_or_none(artifacts.get("cost_tokens")),
+                         "actual_source": artifacts.get("cost_source")}
+    begun = [(event.get("data") or {}).get("unit") for event in own["events"] if event.get("kind") == "unit-begin"]
+    audit = (_record(state, "audit").get("artifacts") or {})
+    return {"stages": stages,
+            "units": {"begun": len(begun), "distinct": len(set(begun)), "retries": len(begun) - len(set(begun))},
+            "audit": {"status": audit.get("status"), "issues": _int_or_none(audit.get("issues"))},
+            "failed_stages": [stage for stage, item in stages.items() if item["status"] in ("failed", "stopped")]}
+
+
+# Scope of an incremental pass: review headers (plan-iterative-revision, spec 5 of plan-refactoring-01)
+# and report frontmatter (plan-resolver, spec 6). A file without them was a full pass.
+_STATS_SCOPE_RE = re.compile(r"^\*\*Audit scope\*\*:\s*(\w+)", re.MULTILINE)
+_STATS_TASKS_RE = re.compile(r"^\*\*Audit tasks\*\*:\s*(.+?)\s*$", re.MULTILINE)
+_STATS_FM_SCOPE_RE = re.compile(r"^audit_scope:\s*(\w+)\s*$", re.MULTILINE)
+_STATS_FM_TASKS_RE = re.compile(r"^audit_tasks:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _frontmatter(text: str) -> str:
+    """The YAML frontmatter between the leading `---` lines, or an empty string."""
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    return text[3:end] if end >= 0 else ""
+
+
+def _audit_scope(text: str, frontmatter: bool) -> Tuple[str, Optional[List[str]]]:
+    """(scope, task ids) of a review (markdown headers) or a report (frontmatter): ("full", None) when
+    the file has no scope or names `all`, else ("incremental", ids as written)."""
+    source = _frontmatter(text) if frontmatter else text
+    scope_re, tasks_re = (_STATS_FM_SCOPE_RE, _STATS_FM_TASKS_RE) if frontmatter else (_STATS_SCOPE_RE, _STATS_TASKS_RE)
+    scope, tasks = scope_re.search(source), tasks_re.search(source)
+    if not scope or scope.group(1).lower() != "incremental":
+        return "full", None
+    raw = tasks.group(1).strip().strip("[]") if tasks else ""
+    if raw.lower() == "all":
+        return "full", None
+    return "incremental", [item.strip().strip("'\"") for item in raw.split(",") if item.strip()]
+
+
+def _task_parser() -> Any:
+    """brainstorm_tool.parse_plan_tasks when plan-brainstorming provides it (spec 2 of plan-refactoring-01),
+    else None: the plan is then read whole."""
+    try:
+        return getattr(_brainstorm(), "parse_plan_tasks", None)
+    except InputError:
+        return None
+
+
+def _task_ranges(plan_text: str) -> Optional[Dict[str, Any]]:
+    """{"header": bytes before the first task, "tasks": {id: bytes}} by parse_plan_tasks, which returns
+    {"tasks": [...], "malformed": [...], "duplicates": [...]} (spec 2); a task carries `id`, `line_start`,
+    `line_end`, 1-based inclusive. None without the parser, without tasks, or when anything in the parser's
+    answer is not as expected: the plan is then read whole and run-stats never fails on it."""
+    parser = _task_parser()
+    if parser is None:
+        return None
+    try:
+        tasks = list(parser(plan_text)["tasks"])
+        if not tasks:
+            return None
+        sizes = [len(line.encode("utf-8")) for line in plan_text.splitlines(keepends=True)]
+        first = min(int(task["line_start"]) for task in tasks)
+        return {"header": sum(sizes[:first - 1]),
+                "tasks": {str(task["id"]): sum(sizes[int(task["line_start"]) - 1:int(task["line_end"])]) for task in tasks}}
+    except Exception:  # the parser's own errors or another answer shape: the plan is read whole
+        return None
+
+
+def _scoped_bytes(plan_text: str, plan_bytes: int, ids: Optional[List[str]], name: str,
+                  warnings: List[str]) -> Tuple[int, str]:
+    """Bytes an incremental pass reads: the plan's header plus the named tasks. Without the task parser the
+    whole plan, silently; with an empty list or an id the plan does not have, the whole plan and
+    `scope-unresolved: <name>`."""
+    if _task_parser() is None:
+        return plan_bytes, "full"
+    ranges = _task_ranges(plan_text)
+    if not ids or ranges is None or any(task_id not in ranges["tasks"] for task_id in ids):
+        warnings.append(f"scope-unresolved: {name}")
+        return plan_bytes, "full"
+    return ranges["header"] + sum(ranges["tasks"][task_id] for task_id in ids), "incremental"
+
+
+COST_FORMULA: Dict[str, Any] = {
+    "bytes_per_token": 3, "output_weight": 4, "cache": "not modelled",
+    "effective": "input_est + output_weight * output_est; actual (host) replaces the estimate when recorded",
+    "reads": {"writing": "spec",
+              "revision": "plan per review; incremental review (**Audit scope**/**Audit tasks**): plan header + the named tasks",
+              "split": "plan + parts; split_method=script: ~300 bytes per task (plan-tasks); skipped: nothing",
+              "execution": "parts with a roadmap, else plan",
+              "audit": "(plan + earlier reports) per report; a full pass with plan-writing's skeleton: plan × (1 − code_share); "
+                       "incremental report (audit_scope/audit_tasks): plan header + the named tasks + evidence files",
+              "diffs": "none", "commit": "none"}}
+_STATS_TASK_LIST_BYTES = 300  # one line of `plan-tasks` per task (id, title, files, refs)
+_STATS_EVIDENCE_HEAD_RE = re.compile(r"^## (?:Evidence fingerprint|Отпечаток улик)\s*$", re.MULTILINE)
+
+
+def _evidence_bytes(report_text: str, folder: str) -> int:
+    """Size of the files named in the report's evidence-fingerprint table, resolved against the nearest
+    ancestor of `folder` that holds `.git` (else `folder`); files that are gone count 0."""
+    match = _STATS_EVIDENCE_HEAD_RE.search(report_text)
+    if not match:
+        return 0
+    root = folder
+    while not os.path.exists(os.path.join(root, ".git")) and os.path.dirname(root) != root:
+        root = os.path.dirname(root)
+    root = root if os.path.exists(os.path.join(root, ".git")) else folder
+    total = 0
+    for line in report_text[match.end():].splitlines():
+        if line.startswith("## "):
+            break
+        cells = [cell.strip().strip("`") for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0] and cells[0] not in ("File", "Файл") and not set(cells[0]) <= set("-: "):
+            path = os.path.join(root, cells[0])
+            total += os.path.getsize(path) if os.path.isfile(path) else 0
+    return total
+
+
+def _skeleton_available() -> bool:
+    """plan-writing's plan_tool.py alongside and with `skeleton` (spec 7 of plan-refactoring-01): the
+    resolver's full passes then read the skeleton, not the plan."""
+    module = _sibling("plan-writing", "plan_tool.py")
+    return module is not None and hasattr(module, "_render_skeleton")
+
+
+def _mode_name(modes: set) -> str:
+    return "none" if not modes else modes.pop() if len(modes) == 1 else "mixed"
+
+
+def _reads_model(stage: str, stats: Dict[str, Any], folder: str, plan_text: str,
+                 warnings: List[str]) -> Tuple[int, str]:
+    """(bytes the stage put through the model, the reads mode that applied) by COST_FORMULA["reads"]."""
+    files, plan = stats["stages"][stage]["files"], stats["plan_bytes"]
+    if stage == "writing":
+        return (stats["spec_bytes"] if files else 0), "spec"
+    if stage == "revision":
+        total, modes = 0, set()
+        for item in (f for f in files if "-review-" in f["name"]):
+            scope, ids = _audit_scope(_text_metrics_text(os.path.join(folder, item["name"])), frontmatter=False)
+            size, mode = (plan, "full") if scope == "full" else _scoped_bytes(plan_text, plan, ids, item["name"], warnings)
+            total, modes = total + size, modes | {mode}
+        return total, _mode_name(modes)
+    if stage == "split":
+        if not files:
+            return 0, "skipped"
+        if (stats["stages"]["split"].get("artifacts") or {}).get("split_method") == "script":
+            return stats["tasks"] * _STATS_TASK_LIST_BYTES, "script"
+        return plan + sum(f["bytes"] for f in files if f["name"] in stats["parts"]), "full"
+    if stage == "execution":
+        if not files:
+            return 0, "none"
+        parts = sum(f["bytes"] for f in stats["stages"]["split"]["files"] if f["name"] in stats["parts"])
+        return (parts, "parts") if stats["parts"] else (plan, "plan")
+    if stage == "audit":
+        total, earlier, modes, skeleton = 0, 0, set(), _skeleton_available()
+        for item in files:
+            text = _text_metrics_text(os.path.join(folder, item["name"]))
+            scope, ids = _audit_scope(text, frontmatter=True)
+            if scope == "full":
+                size, mode = (round(plan * (1 - (stats["code_share"] or 0))), "skeleton") if skeleton else (plan, "full")
+            else:
+                size, mode = _scoped_bytes(plan_text, plan, ids, item["name"], warnings)
+                size += _evidence_bytes(text, folder) if mode == "incremental" else 0
+            total, earlier, modes = total + size + earlier, earlier + item["bytes"], modes | {mode}
+        return total, _mode_name(modes)
+    return 0, "none"
+
+
+def _cost_estimate(stats: Dict[str, Any], folder: str, warnings: List[str]) -> Dict[str, Any]:
+    """bytes_read_est (by _reads_model) and tokens per stage by COST_FORMULA; totals over the plan.
+    `actual_tokens` set by the journal layer wins and makes the stage's basis `host`."""
+    plan_text = "" if stats["plan_missing"] else _text_metrics_text(os.path.join(folder, stats["plan"]))
+    out: Dict[str, Any] = {"stages": {}}
+    for stage, item in stats["stages"].items():
+        read, mode = _reads_model(stage, stats, folder, plan_text, warnings)
+        input_est = round(read / COST_FORMULA["bytes_per_token"])
+        output_est = round(item["bytes_written"] / COST_FORMULA["bytes_per_token"])
+        actual = item.get("actual_tokens")
+        out["stages"][stage] = dict(item, bytes_read_est=read, reads_mode=mode,
+                                    basis="host" if actual is not None else "estimate",
+                                    tokens={"input_est": input_est, "output_est": output_est,
+                                            "effective_est": input_est + COST_FORMULA["output_weight"] * output_est,
+                                            "actual": actual})
+    values = list(out["stages"].values())
+    basis = "host" if any(s["basis"] == "host" for s in values) else "estimate"
+    out["totals"] = {"bytes_read_est": sum(s["bytes_read_est"] for s in values),
+                     "bytes_written": sum(s["bytes_written"] for s in values),
+                     "effective_tokens_est": sum(s["tokens"]["effective_est"] for s in values),
+                     "actual_tokens": sum(s["tokens"]["actual"] or 0 for s in values) if basis == "host" else None,
+                     "minutes": (round(sum(s.get("minutes") or 0 for s in values), 1)
+                                 if any(s.get("minutes") is not None for s in values) else None),
+                     "basis": basis}
+    return out
+
+
+_STATS_ISSUE_RE = re.compile(r"^\d+\)\s", re.MULTILINE)
+_STATS_FOUND_RE = re.compile(r"^\*\*Issues found\*\*:\s*(\d+)", re.MULTILINE)
+
+
+def _quality(stats: Dict[str, Any], folder: str) -> Dict[str, Any]:
+    """Quality of the run from the files (the journal layer overrides what it knows better): the last
+    report's status and issue count, the reviews and the last review's open issues, unit retries and
+    failed stages."""
+    reports = stats["reports"]
+    reviews = [f["name"] for f in stats["stages"]["revision"]["files"] if "-review-" in f["name"]]
+    completion = any(f["name"].endswith("-completion.md") for f in stats["stages"]["revision"]["files"])
+    last_report = _text_metrics_text(os.path.join(folder, reports[-1])) if reports else ""
+    last_review = _text_metrics_text(os.path.join(folder, reviews[-1])) if reviews else ""
+    found = _STATS_FOUND_RE.search(last_review)
+    return {"audit_status": ("final" if reports[-1].endswith("-final.md") else "open") if reports else None,
+            "audit_issues": len(_STATS_ISSUE_RE.findall(last_report)) if reports else None,
+            "reviews": len(reviews),
+            "review_remaining": 0 if completion else (int(found.group(1)) if found else None),
+            "unit_retries": (stats.get("units") or {}).get("retries"),
+            "failed_stages": list(stats.get("failed_stages") or [])}
+
+
+_STATS_DELTA_KEYS = ("bytes_read_est", "bytes_written", "effective_tokens_est", "minutes")
+
+
+def _baseline_delta(current: Dict[str, Any], baseline: Dict[str, Any], warnings: List[str]) -> Dict[str, Any]:
+    """Deltas current − baseline on the totals and per stage: absolute, per task and per KB of plan.
+    `minutes` only when both sides have it (a --plan baseline has none). A stage whose basis differs
+    between the two (host vs estimate) gets `basis-mixed: <stage>`: the numbers are not directly comparable."""
+    if not isinstance(baseline, dict) or "formula" not in baseline or "totals" not in baseline:
+        raise InputError("baseline-mismatch: not a run-stats result (formula and totals expected)")
+    if current.get("goal") and baseline.get("goal") and current["goal"] != baseline["goal"]:
+        raise InputError(f"baseline-mismatch: goal {baseline['goal']!r} differs from {current['goal']!r}")
+
+    def one(now: Dict[str, Any], then: Dict[str, Any]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for key in _STATS_DELTA_KEYS:
+            a, b = now.get(key), then.get(key)
+            if a is None or b is None:
+                out[key] = None
+                continue
+            per_task = a / max(current["totals"]["tasks"], 1) - b / max(baseline["totals"]["tasks"], 1)
+            per_kb = a / max(current["totals"]["plan_bytes"] / 1024, 1e-9) - b / max(baseline["totals"]["plan_bytes"] / 1024, 1e-9)
+            out[key] = {"abs": round(a - b, 2), "per_task": round(per_task, 2), "per_kb": round(per_kb, 2)}
+        return out
+
+    then_stages = baseline["totals"].get("stages", {})
+    stages: Dict[str, Any] = {}
+    for stage, now in current["totals"].get("stages", {}).items():
+        then = then_stages.get(stage, {})
+        if now.get("basis") and then.get("basis") and now["basis"] != then["basis"]:
+            warnings.append(f"basis-mixed: {stage}")
+        stages[stage] = one(now, then)
+    return {"stages": stages, "totals": one(current["totals"], baseline["totals"])}
+
+
 def _eta(data: Dict[str, Any], states: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Remaining stages of every plan and their estimate: the stage's average duration in this journal
     (basis history); execution with a known unit count: seconds per unit × units left (basis units)."""
@@ -1088,9 +1514,100 @@ def run_status(journal: str) -> Dict[str, Any]:
     _candidates(data, runner, states, waiting, {})
     waits = [item for item in waiting
              if item["reason"] in ("stage-failed: stop", "not-confirmed: stop", "model: stop") or item["reason"].startswith("code-busy: ")]
+    totals = run_stats(journal, None)["totals"]
     return {"ok": True, "goal": data.get("goal"), "profile": runner.get("profile"), "plans": plans,
             "open_questions": questions, "waits": waits, "eta_minutes": _eta(data, states)["eta_minutes"],
-            "session": _session_state(journal)}
+            "session": _session_state(journal),
+            "cost": {"effective_tokens_est": totals["effective_tokens_est"], "bytes_total": totals["bytes_written"],
+                     "basis": totals["basis"]}}
+
+
+def _plan_stats(plan_path: str, journal_layer: Optional[Dict[str, Any]], warnings: List[str]) -> Dict[str, Any]:
+    """One plan of run-stats: the artifact layer, the journal layer on top (status, minutes, model,
+    artifacts, actual cost; its units/audit/failed stages), then the cost estimate and the quality block."""
+    stats = _artifact_stats(plan_path, warnings)
+    folder = os.path.dirname(os.path.abspath(plan_path))
+    if stats["plan_missing"]:
+        warnings.append(f"plan-missing: {plan_path}")
+    warnings.extend(f"not-utf8: {f['name']}" for item in stats["stages"].values() for f in item["files"] if f["lines"] is None)
+    if journal_layer:
+        for stage, item in journal_layer["stages"].items():
+            stats["stages"].setdefault(stage, {"status": "pending", "files": [], "bytes_written": 0}).update(item)
+        stats.update(units=journal_layer["units"], failed_stages=journal_layer["failed_stages"])
+    else:  # --plan: no journal, so no durations; every stage still carries the key
+        for item in stats["stages"].values():
+            item.setdefault("minutes", None)
+    estimate = _cost_estimate(stats, folder, warnings)
+    quality = _quality(stats, folder)
+    if journal_layer and journal_layer["audit"]["status"]:
+        quality.update(audit_status=journal_layer["audit"]["status"], audit_issues=journal_layer["audit"]["issues"])
+    totals = dict(estimate["totals"], tasks=stats["tasks"], plan_bytes=stats["plan_bytes"])
+    return {"plan": stats["plan"], "plan_missing": stats["plan_missing"], "tasks": stats["tasks"],
+            "plan_bytes": stats["plan_bytes"], "code_share": stats["code_share"], "spec": stats["spec"],
+            "stages": estimate["stages"], "quality": quality, "totals": totals, "delta": None}
+
+
+def run_stats(journal: Optional[str], plan: Optional[str], baseline: Optional[str] = None) -> Dict[str, Any]:
+    """Sizes, durations, token estimate or recorded cost, and quality per stage of a run: from the journal
+    (all its plans) or from one plan's folder (--plan); --baseline adds deltas. Reads only."""
+    if bool(journal) == bool(plan):
+        raise InputError("bad-arguments: give a journal or --plan <plan.md>, not both")
+    warnings: List[str] = []
+    out: Dict[str, Any] = {"ok": True, "mode": "journal" if journal else "plan", "formula": COST_FORMULA}
+    if journal:
+        data, runner = _runner_journal(journal)
+        out["goal"] = data.get("goal")
+        folder = os.path.dirname(os.path.abspath(journal))
+        plans = [_plan_stats(os.path.join(folder, state["entry"].get("plan") or _derived_plan(state["spec"])),
+                             _journal_stats(data, runner, state), warnings) for state in _plan_states(journal, data, runner)]
+    else:
+        if not os.path.isfile(plan):
+            raise InputError(f"plan-not-found: {plan}")
+        plans = [_plan_stats(plan, None, warnings)]
+    stages: Dict[str, Dict[str, Any]] = {}
+    for item in plans:
+        for stage, record in item["stages"].items():
+            agg = stages.setdefault(stage, {"bytes_read_est": 0, "bytes_written": 0, "effective_tokens_est": 0,
+                                            "minutes": None, "bases": set()})
+            agg["bytes_read_est"] += record["bytes_read_est"]
+            agg["bytes_written"] += record["bytes_written"]
+            agg["effective_tokens_est"] += record["tokens"]["effective_est"]
+            agg["bases"].add(record["basis"])
+            if record.get("minutes") is not None:
+                agg["minutes"] = round((agg["minutes"] or 0) + record["minutes"], 1)
+    for agg in stages.values():
+        bases = agg.pop("bases")
+        agg["basis"] = bases.pop() if len(bases) == 1 else "mixed" if bases else "estimate"
+    out["plans"], out["warnings"] = plans, warnings
+    out["totals"] = {"tasks": sum(p["tasks"] for p in plans), "plan_bytes": sum(p["plan_bytes"] for p in plans),
+                     "bytes_read_est": sum(s["bytes_read_est"] for s in stages.values()),
+                     "bytes_written": sum(s["bytes_written"] for s in stages.values()),
+                     "effective_tokens_est": sum(s["effective_tokens_est"] for s in stages.values()),
+                     "minutes": (round(sum(s["minutes"] for s in stages.values() if s["minutes"] is not None), 1)
+                                 if any(s["minutes"] is not None for s in stages.values()) else None),
+                     "basis": "host" if any(p["totals"]["basis"] == "host" for p in plans) else "estimate",
+                     "stages": stages}
+    if baseline:
+        try:
+            with open(baseline, "r", encoding="utf-8") as fh:
+                previous = json.load(fh)
+        except (OSError, ValueError) as exc:
+            raise InputError(f"baseline-mismatch: cannot read {baseline}: {exc}") from exc
+        out["delta"] = _baseline_delta(out, previous, warnings)
+    else:
+        out["delta"] = None
+    return out
+
+
+def cmd_run_stats(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    result = run_stats(args.journal, args.plan, args.baseline)
+    if args.json_out:
+        try:
+            with open(args.json_out, "w", encoding="utf-8") as fh:
+                json.dump(result, fh, ensure_ascii=False, indent=2)
+        except OSError as exc:  # the computed result is still printed, next to the error (exit 2)
+            return 2, dict(result, ok=False, errors=[f"write-failed: {args.json_out}: {exc}"])
+    return 0, result
 
 
 def cmd_run_eta(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
@@ -1157,10 +1674,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_run_status = sub.add_parser("run-status", help="stages, progress, open questions, ETA and session of a run")
     p_run_status.add_argument("journal", help="path to <goal>-chain.json with a runner section")
     p_run_status.set_defaults(func=cmd_run_status)
+    p_run_stats = sub.add_parser("run-stats", help="sizes, durations, token cost (host fact or estimate) and quality per stage; --baseline adds deltas")
+    p_run_stats.add_argument("journal", nargs="?", help="path to <goal>-chain.json with a runner section")
+    p_run_stats.add_argument("--plan", help="a plan file instead of a journal: artifacts next to it, no durations")
+    p_run_stats.add_argument("--baseline", help="an earlier run-stats JSON to compare with")
+    p_run_stats.add_argument("--json-out", help="also write the JSON to this file (the only write of the command)")
+    p_run_stats.set_defaults(func=cmd_run_stats)
     return parser
 
 
-JOURNAL_READERS = ("run-next", "run-eta", "run-status")
+JOURNAL_READERS = ("run-next", "run-eta", "run-status", "run-stats")
 
 
 def main(argv: Optional[List[str]] = None) -> int:

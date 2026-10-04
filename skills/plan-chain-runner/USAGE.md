@@ -64,6 +64,10 @@ Without `<goal>` the runner finds the journals with unfinished stages; with seve
 
 `~/.planforge/runner.json` holds the model and effort of each role (`writing`, `revision`, `split`, `execution`, `audit`, `commit`) per profile (`claude-code`, `github-copilot`, `fallback`) and `parallel`. Without the file the built-in defaults apply. The runner writes the file only when you agree to remember an edited table.
 
+## Cost
+
+`chain_tool.py run-stats <journal>` shows what a run cost: per plan and stage the files written, their size and code share, the minutes, the model, the host's token count when the runner recorded it (`basis: host`) or an estimate of input/output/effective tokens from what the stage read and wrote (bytes / 3, output weighted 4×; `basis: estimate`), and quality (audit status and issues, reviews, unit retries). The reads model follows the artifacts: an incremental review or report (`**Audit tasks**`, `audit_tasks`) counts only the named tasks, a script split (`split_method=script`) only the task list. `--plan <plan.md>` does the same for a plan without a journal (no durations); `--baseline <json>` adds deltas against an earlier result, absolute, per task and per KB of plan, and warns `basis-mixed` when a stage was measured differently on the two sides. The summary's "Volume" line is this number; the model, the baseline and the checkpoints of the toolkit's own refactoring are in `docs/COST.md`.
+
 ## Prerequisites
 
 - Python 3.8 or newer in PATH; the six pipeline skills installed side by side with this one.

@@ -46,6 +46,7 @@ Without `<goal>` the runner looks for `*-chain.json` journals with unfinished st
 | `C run-session <journal> --begin [--host H] [--takeover]` / `--heartbeat --id ID` / `--end stopped\|complete\|interrupted --id ID` | the active-session mark; `ID` is the `id` that `--begin` returned |
 | `C run-next <journal> [--parallel N] [--in-flight PLAN:STAGE]...` | the actions to launch now (not the in-flight pairs, which still count), the waiting plans, `done`, `blocked` |
 | `C run-eta <journal>` / `C run-status <journal>` | ETA; the per-plan status table |
+| `C run-stats (<journal> \| --plan <plan.md>) [--baseline <json>] [--json-out <file>]` | sizes, durations, token cost (the host's fact when recorded, else an estimate from the artifacts) and quality per stage; the summary's volume line; deltas against an earlier result ([docs/COST.md](../../docs/COST.md)) |
 
 Journal commands: `J spec-check`, `journal-path --create`, `journal-event`, `journal-question`, `journal-answer`, `journal-show`, `journal-reconcile`, `journal-export-findings`, `backlog-parse`. `executor_tool.py` is used only through the plan-executor skill.
 

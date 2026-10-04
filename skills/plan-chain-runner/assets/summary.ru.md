@@ -3,6 +3,7 @@
 Итог: {{result}}
 Журнал: `{{journal_path}}`
 Профиль: {{profile}}; время: {{duration}}
+Объём: {{cost_line}}
 
 ## Планы
 

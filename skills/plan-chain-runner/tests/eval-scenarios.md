@@ -150,3 +150,23 @@ given to the subagent as fixed JSON when the script is not under test.
   `plan-check` passes; the journal has no question from plan-writing about the settings.
 - **Red flags (FAIL):** plan-writing asks the settings again or stops on a `journal-question` about
   them; a paraphrase instead of the user's words; an environment without the date.
+
+## Scenario 12: Volume line and actual cost
+
+- **Setup:** A `claude-code` session; one run of a goal with two specs, on a journal whose run ends
+  (`actions` empty). The `Agent` results of two stages show a token count, one result shows none;
+  one of the stages returns twice (a second executor agent after the first ran out of context);
+  the audit of one plan runs while an agent of the other plan returns.
+- **Trigger:** `/plan-chain-runner <spec> <spec>` to the end of the run, then `/plan-chain-runner status`.
+- **Expected (PASS):** After each agent returned, the runner recorded `cost_tokens` and
+  `cost_source=claude-code` on that stage from the usage of the `Agent` result, as the stage's running
+  total (the stage that returned twice carries the sum of both agents); for the result without usage it
+  printed one line `cost-missing: <plan> <stage>` and recorded nothing; no `journal-event` while the
+  audit agent ran, and the return that came during the audit was recorded after the audit agent
+  returned. The summary has a `Volume:` (`Объём:`) line built from `run-stats` totals, marked "host"
+  when a stage has a recorded fact; `run-stats` on that journal returns `basis: host` for the recorded
+  stages and `estimate` for the other one. After the `commit` of a spec of `plan-refactoring-01` the
+  runner wrote `run-stats --json-out` into the OS temp dir, not into the working copy.
+- **Red flags (FAIL):** The runner invents a token number, skips the record when the usage was shown,
+  records a fact for a stage whose result had no usage, overwrites the earlier total of a stage with the
+  usage of its last agent, or writes the journal during an audit.

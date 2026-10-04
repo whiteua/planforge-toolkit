@@ -1949,6 +1949,21 @@ class TestStagedUnits(_SplitCase):
         self.assertEqual([u.get("id", u.get("stage")) for u in units], ["a", "task-2", "part-b-done"])
         self.assertEqual(units[1]["depends"], ["a"])
 
+    def test_part_without_tasks_depends_on_the_checkpoint_of_a_part_with_tasks(self):
+        roadmap, rows = self.write_split(part_b="# Stage b: B\n\n## Tasks\n1. do\n")
+        units, warnings = self.tool._staged_units(roadmap, rows)
+        self.assertEqual(warnings, ["part-without-tasks: b"])
+        self.assertEqual([u.get("id", u.get("stage")) for u in units],
+                         ["task-1", "task-1.1", "part-a-done", "b"])
+        self.assertEqual(units[-1]["depends"], ["part-a-done"])
+        self.assertEqual(rows[1]["depends"], ["a"])
+        self.init(roadmap)
+        for unit in ("task-1", "task-1.1", "part-a-done"):
+            self.tool.unit_begin(self.exec_dir)
+            self.tool.unit_finish(self.exec_dir, unit, "pass")
+        nxt = self.tool.ledger_next(self.exec_dir)
+        self.assertEqual((nxt["unit"]["id"], nxt["reason"]), ("b", "ready"))
+
     def test_part_without_criteria_and_duplicate_ids(self):
         roadmap, rows = self.write_split(part_b=PART_B.split("## Completion criteria")[0])
         units, warnings = self.tool._staged_units(roadmap, rows)

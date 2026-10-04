@@ -1044,7 +1044,7 @@ def _staged_units(roadmap_path, rows):
         if found is None:
             if text is not None:
                 warnings.append(f"part-without-tasks: {stage}")
-            units.append(row)
+            units.append(dict(row, depends=[last_unit[dep] for dep in row["depends"]]))
             continue
         if found["duplicates"]:
             raise ToolError(f"duplicate-unit-id: task-{found['duplicates'][0]['id']}", 2)

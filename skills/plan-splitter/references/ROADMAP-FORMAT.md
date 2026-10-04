@@ -54,7 +54,9 @@ graph LR
 ```
 
 `LR` preferred; `TB` for long graphs. Every edge corresponds to a `Depends on` entry and vice
-versa. No cycles (`validate-all` checks).
+versa, with one exception: when no part depends on another, `split-write` draws an edge from a
+`plan` node to each part (`plan --> a`), because the block needs at least one edge; `plan` is not a
+part. No cycles (`validate-all` checks).
 
 ## 6. Stages section
 

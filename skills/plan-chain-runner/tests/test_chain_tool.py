@@ -2028,5 +2028,68 @@ class RunStatsCliTest(RunStatsTest):
         self.assertEqual((code, out["ok"]), (2, False))
 
 
+FIXTURE_PLAN = Path(__file__).resolve().parents[2] / "plan-writing" / "tests" / "fixtures" / "plan01-impl.md"
+WIDE_PLAN = "# P\n\n" + "".join(f"### Task {n}: t{n}\n\n**Files:**\n- Modify: `m{n % 4}/s/f{n}.py`\n\n"
+                                for n in range(1, 46))
+
+
+class SplitGateTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+
+    def step(self, plan=None, split="auto"):
+        if plan is not None:
+            with open(os.path.join(self.root, "a-impl.md"), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(plan)
+        state = _t2_state(_t2_plan("a-spec.md", done=("writing", "revision")),
+                          chain={"split": split, "resolver": "audit"}, root=self.root)
+        return ct._stage_step({"events": []}, state, "split", None)
+
+    def test_keep_is_a_skip_without_an_agent(self):
+        step = self.step(FIXTURE_PLAN.read_text(encoding="utf-8"))
+        self.assertEqual((step["kind"], step["why"]), ("skip", "gate: keep (3 tasks, 2 KB, 2 modules, linear)"))
+
+    def test_split_runs_the_splitter(self):
+        step = self.step(WIDE_PLAN)
+        self.assertEqual((step["kind"], step["skill"], step.get("warnings")), ("run", "plan-splitter", None))
+
+    def test_gate_failure_or_missing_splitter_runs_with_a_warning(self):
+        step = self.step()
+        self.assertEqual(step["kind"], "run")
+        self.assertTrue(step["warnings"][0].startswith("gate-unavailable: plan-unreadable: "), step)
+        with mock.patch.object(ct, "_splitter", return_value=None):
+            self.assertEqual(self.step(WIDE_PLAN)["warnings"], ["gate-unavailable: plan-splitter not installed alongside"])
+        broken = mock.Mock(gate_verdict=mock.Mock(side_effect=RuntimeError("boom")))
+        with mock.patch.object(ct, "_splitter", return_value=broken):
+            self.assertEqual(self.step(WIDE_PLAN)["warnings"], ["gate-unavailable: boom"])
+
+    def test_always_and_never_do_not_call_the_gate(self):
+        with mock.patch.object(ct, "_split_gate") as gate:
+            self.assertEqual(self.step(split="always")["kind"], "run")
+            self.assertEqual(self.step(split="never")["why"], "split=never")
+        gate.assert_not_called()
+
+    def test_loader(self):
+        self.assertTrue(callable(ct._splitter().gate_verdict))
+        fake = os.path.join(self.root, "skills", "plan-chain-runner", "scripts", "chain_tool.py")
+        with mock.patch.object(ct, "_SPLITTER", None), mock.patch.object(ct, "__file__", fake):
+            self.assertIsNone(ct._splitter())
+
+
+class SplitGateRunNextTest(_T2Case):
+    def test_kept_plan_is_skipped_and_the_wide_one_split(self):
+        plans = [_t2_plan("a-spec.md", done=("writing", "revision")), _t2_plan("b-spec.md", done=("writing", "revision"))]
+        path = self.journal(["a-spec.md", "b-spec.md"], plans=plans)
+        shutil.copyfile(FIXTURE_PLAN, os.path.join(self.tmp, "a-impl.md"))
+        with open(os.path.join(self.tmp, "b-impl.md"), "w", encoding="utf-8") as fh:
+            fh.write(WIDE_PLAN)
+        actions = ct.run_next(path, 3)["actions"]
+        self.assertEqual([(a["kind"], a["plan"], a["stage"]) for a in actions],
+                         [("run", "b-impl.md", "split"), ("skip", "a-impl.md", "split")])
+        self.assertTrue(actions[1]["why"].startswith("gate: keep (3 tasks, "))
+
+
 if __name__ == "__main__":
     unittest.main()

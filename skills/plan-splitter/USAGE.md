@@ -39,11 +39,11 @@ dependency roadmap, each part executable in a single agent pass.
 
 ```
 1. BOOTSTRAP        — language, write preflight, existing artifacts
-2. GATE DECISION    — split setting: always → split, never → not needed; auto or none → 5 factors ("keep" is a normal outcome)
-3. ANALYSIS         — boundaries, dependency graph, parallel groups, weights 🔴/🟡/🟢
+2. GATE DECISION    — split setting: always → split, never → not needed; auto or none → `gate` (numbers: tasks, bytes, modules, dependency shape; "keep" is a normal outcome)
+3. ANALYSIS         — boundaries from `plan-tasks` (the plan is not read): dependency graph, parallel groups, weights 🔴/🟡/🟢
 4. DRAFT & CONFIRM  — you approve the split table (one retry)
-5. GENERATE         — <base>-roadmap.md + <base>-a.md, -b.md, …
-6. VERIFY           — validate-all (files, DAG, coverage, External/Size lines copied verbatim, hash) + content re-read
+5. GENERATE         — `split-write`: <base>-roadmap.md + <base>-a.md, -b.md, …, task texts copied byte for byte
+6. VERIFY           — validate-all (files, DAG, equal task coverage, task bodies, External/Size lines, hash) + handoff check
 7. VERIFY CHOICE    — deep verification? (scope, depth, mode)
 8. DEEP VERIFY      — one plan-iterative-revision batch run over the parts, machine gate
 ```
@@ -70,6 +70,7 @@ re-dispatched once; `inconsistent` stops the run. Parts with warnings are listed
 ## Prerequisites
 
 - Python ≥ 3.8 in PATH
+- `plan-brainstorming` installed next to this skill: `gate`, `split-write` and `validate-all` exit 2 without its task parser
 - Writable plan directory
 - For deep verification: `plan-iterative-revision` installed next to this skill, and a subagent tool
 
@@ -78,6 +79,9 @@ re-dispatched once; `inconsistent` stops the run. Parts with warnings are listed
 | Symptom | Cause | Fix |
 |---|---|---|
 | "Gate: keep" | Plan is small or focused enough | Not an error; run plan-executor directly |
+| `no-tasks` from `gate` | The plan has no `### Task N:` headings | Write the roadmap by hand, or add task headings |
+| `dependency-order` / `missing-depends` from `split-write` | A Preconditions reference crosses the part boundaries | Move the task, or add the dependency in parts.json |
+| `plan-brainstorming not installed alongside` (exit 2) | The shared task parser is missing | Install `plan-brainstorming` next to this skill |
 | "Cannot write to directory" | Directory not writable | Check permissions |
 | Existing split artifacts | A previous split exists | Choose overwrite / another base / abort |
 | Part too large (> 15 tasks) | Coarse split | Re-run the splitter on that part |

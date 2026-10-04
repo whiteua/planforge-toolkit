@@ -6,6 +6,7 @@ Run: python -m pytest skills/plan-writing/tests -q
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ BRAINSTORM = os.path.abspath(os.path.join(HERE, "..", "..", "plan-brainstorming"
 SETTINGS_SPEC = os.path.join(HERE, "fixtures", "settings01-spec.md")
 SETTINGS_PLAN = os.path.join(HERE, "fixtures", "settings01-impl.md")
 SPLITTER = os.path.abspath(os.path.join(HERE, "..", "..", "plan-splitter", "scripts", "splitter_tool.py"))
+REVISION = os.path.abspath(os.path.join(HERE, "..", "..", "plan-iterative-revision", "scripts", "next_review_index.py"))
 
 
 def _load_module():
@@ -793,6 +795,47 @@ class TaskParserContractTest(unittest.TestCase):
         for path in self.FIXTURES:
             text, parsed = self.parsed(path)
             self.assertEqual(chain._count_plan_tasks(text), len(parsed["tasks"]), path)
+
+
+@unittest.skipUnless(all(os.path.isfile(p) for p in (BRAINSTORM, EXECUTOR, RESOLVER, SPLITTER, REVISION)),
+                     "pipeline skills not installed alongside")
+class SplitWriteContractTest(unittest.TestCase):
+    """Roadmap and parts written by splitter split-write are read by every parser of roadmaps and parts."""
+
+    def split(self, tmp, source, name, parts):
+        plan = os.path.join(tmp, name)
+        shutil.copyfile(source, plan)
+        path = os.path.join(tmp, "parts.json")
+        entries = [{"id": pid, "title": f"Part {pid}", "depends": deps, "group": group, "weight": "🟡 medium",
+                    "goal": "g", "inputs": "i", "outputs": "o", "notes": "", "tasks": tasks}
+                   for pid, tasks, deps, group in parts]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"parts": entries}, fh)
+        code, out = _run(SPLITTER, "split-write", plan, "--parts", path)
+        self.assertEqual(code, 0, out)
+        return plan, out["roadmap"]
+
+    def test_parsers_agree_on_split_write_parts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan, roadmap = self.split(tmp, FIXTURE, "plan01-impl.md",
+                                       [("a", ["1", "1.1"], [], "A"), ("b", ["2"], ["a"], "B")])
+            code, rows = _run(EXECUTOR, "parse-roadmap", roadmap)
+            self.assertEqual((code, [r["stage"] for r in rows], rows[1]["depends"]), (0, ["a", "b"], ["a"]))
+            code, out = _run(REVISION, "parts", roadmap)
+            self.assertEqual((code, [p["id"] for p in out["parts"]]), (0, ["a", "b"]))
+            code, out = _run(SPLITTER, "validate-all", tmp, "plan01-impl")
+            self.assertEqual((code, out["task_bodies"]["matched"], out["coverage"]["ok"]), (0, 3, True))
+            report = os.path.join(tmp, "plan01-impl-report-1.md")
+            with open(report, "w", encoding="utf-8") as fh:
+                fh.write("# r\n\n## Основные стадии плана\n\n- ✅ 1 Task\n")
+            _, census = _run(RESOLVER, "task-census", plan, report)
+            self.assertEqual(census["plan_ids"], ["1", "1.1", "2"])
+
+    def test_external_lines_reach_the_parts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.split(tmp, SETTINGS_PLAN, "settings01-impl.md", [("a", ["1"], [], "A"), ("b", ["2"], ["a"], "B")])
+            code, out = _run(SPLITTER, "validate-all", tmp, "settings01-impl")
+            self.assertEqual((code, out["task_lines"]), (0, {"original": 2, "missing": []}))
 
 
 if __name__ == "__main__":

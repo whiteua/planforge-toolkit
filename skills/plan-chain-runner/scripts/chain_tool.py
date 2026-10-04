@@ -248,6 +248,42 @@ def _brainstorm() -> Any:
     return _BRAINSTORM
 
 
+_SPLITTER: Any = None
+
+
+def _splitter() -> Any:
+    """plan-splitter's splitter_tool.py, loaded by path once per process; None when it is not installed
+    alongside (the split stage then runs as before)."""
+    global _SPLITTER
+    if _SPLITTER is None:
+        path = Path(__file__).resolve().parents[2] / "plan-splitter" / "scripts" / "splitter_tool.py"
+        if not path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location("splitter_tool", str(path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _SPLITTER = module
+    return _SPLITTER
+
+
+def _split_gate(state: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """The splitter's numeric gate on the plan (split=auto): (verdict, None), or (None, "gate-unavailable:
+    <error>") when the splitter is missing or the gate fails; a failing gate never stops the chain."""
+    plan = os.path.join(state["root"], state["entry"]["plan"])
+    try:
+        splitter = _splitter()
+        if splitter is None:
+            raise RuntimeError("plan-splitter not installed alongside")
+        return splitter.gate_verdict(plan), None
+    except Exception as exc:  # any failure of the gate: the splitter agent decides as before
+        return None, f"gate-unavailable: {exc}"
+
+
+def _gate_why(factors: Dict[str, Any]) -> str:
+    return (f"gate: keep ({factors['task_count']} tasks, {round(factors['plan_bytes'] / 1000)} KB, "
+            f"{factors['modules']} modules, {factors['dependency_shape']})")
+
+
 def _brainstorm_exit(exc: BaseException) -> Optional[int]:
     """Exit code of an error raised inside brainstorm_tool: JournalError → 1, its InputError → 2."""
     module = _BRAINSTORM
@@ -929,6 +965,11 @@ def _stage_step(data: Dict[str, Any], state: Dict[str, Any], stage: str, reason:
         return dict(where, kind="skip", why="split=never")
     if status == "pending" and stage == "audit" and state["chain"].get("resolver") == "skip":
         return dict(where, kind="skip", why="resolver=skip")
+    gate_warning = None
+    if status == "pending" and stage == "split" and state["chain"].get("split") == "auto":
+        verdict, gate_warning = _split_gate(state)
+        if verdict is not None and verdict["verdict"] == "keep":
+            return dict(where, kind="skip", why=_gate_why(verdict["factors"]))
     touched = max(record.get("started_at") or "", record.get("finished_at") or "")
     for prefix, name in (("not-confirmed", stage), ("stage-failed", stage), ("model", STAGE_ROLES[stage])):
         # stop: the plan waits until the stage moves again (the user ran or fixed it by hand).
@@ -953,7 +994,10 @@ def _stage_step(data: Dict[str, Any], state: Dict[str, Any], stage: str, reason:
         if (starts and (starts[-1].get("data") or {}).get("reason") == "audit-open" and decided is not None
                 and decided.get("status") != "open" and decided.get("answer") == "fix"):
             reason = "audit-open"
-    return _run_action(state, stage, reason)
+    action = _run_action(state, stage, reason)
+    if gate_warning:
+        action["warnings"] = [gate_warning]
+    return action
 
 
 def _dependency_wait(runner: Dict[str, Any], by_spec: Dict[str, Dict[str, Any]], state: Dict[str, Any],

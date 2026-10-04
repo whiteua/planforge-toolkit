@@ -37,8 +37,9 @@ the part files next to the source plan and **never edits the plan itself**.
   run without a confirmation channel (a chain run, a subagent call) `verify` defaults to `none`:
   plan-iterative-revision has already audited the whole plan. An interactive run keeps
   `verify=ask` and asks, whatever `S.chain_explicit` says; an explicit `verify` argument always
-  wins. Without `plan-brainstorming` next to this skill, or with `S.ok` false, run the gate and
-  keep `verify` as given.
+  wins. With `S.ok` false, run the gate and keep `verify` as given. Without `plan-brainstorming`
+  next to this skill nothing can be cut: `gate`, `split-write` and `validate-all` exit `2`
+  (`plan-brainstorming not installed alongside`); stop and say so.
 
 Derived: `DIR` = the plan's directory; `BASE` = file name without `.md`;
 `LANG` = `TOOL detect-lang PLAN` (`ru` when more than 5% of letters are Cyrillic, else `en`).
@@ -71,7 +72,9 @@ parse the same ids.
 4. Existing split artifacts for `BASE` are never overwritten without an explicit user choice
    (overwrite / different base / abort).
 5. At most two rounds of draft → feedback → redraft; a second rejection ends the run without files.
-6. Every part is self-contained: no "see above", "as in the original", "previous section".
+6. Every part is self-contained: `split-write` copies the plan header and the full text of its tasks
+   into it; the fields the model writes (goal, inputs, outputs, notes, criteria) have no "see above",
+   "as in the original", "previous section".
 7. All generated files are in the plan's language (`LANG`).
 8. After step 8 only these files may differ from the pre-run state: roadmap, parts, the two
    verify JSONs, the review/completion files of the verified parts, and the chain journal
@@ -79,9 +82,9 @@ parse the same ids.
    `brainstorm_tool.py`, Chain journal).
 9. A verified part is "done" only when `TOOL verify-status` exits 0. `missing` → one re-dispatch,
    then stop; `inconsistent` → stop immediately; never downgrade to a warning.
-10. Every `**External:**` and `**Size:**` line of a source task is copied verbatim into the part
-    task that holds it (references/STAGE-FORMAT.md §6); `validate-all` fails when one is missing.
-    The part header does not change.
+10. Task texts are copied by `split-write` byte for byte, so every `**External:**` and `**Size:**`
+    line stays in its task (references/STAGE-FORMAT.md §6); `validate-all` fails when a task body
+    (`task_bodies`) or one of these lines is missing. The model never writes task text into a part.
 
 ## Algorithm
 
@@ -94,33 +97,48 @@ parse the same ids.
    journal start: stage split → running (Chain journal below)
 
 2. GATE DECISION (references/GATE-DECISION.md)
-   S.chain.split == always → verdict "split" without scoring; say it comes from the settings.
+   S.chain.split == always → verdict "split" without the gate; say it comes from the settings.
    S.chain.split == never  → the splitter is not needed: without a confirmation channel exit
                              without files; interactively ask whether to split anyway.
-   otherwise: score the 5 factors, tell the user the verdict.
-   "do not split" → journal: split skipped; print assets/gate-pass.<LANG>.md and exit (a normal outcome).
+   otherwise: G = TOOL gate PLAN; tell the user the verdict with G.reasons.
+     exit 1 no-tasks → journal: split skipped (why: no-tasks); exit without files (a roadmap
+                       for a plan without task headings is written by hand).
+     keep            → journal: split skipped (why: gate); print assets/gate-pass.<LANG>.md, exit.
+     split           → step 3.
+     borderline      → decide from T (step 3) alone, never from the plan text; "keep" as above.
 
 3. ANALYSIS (references/STAGE-FORMAT.md §4-5, references/ROADMAP-FORMAT.md)
-   Part boundaries, dependency graph, parallel groups, weights 🔴/🟡/🟢,
-   one row per part: id (a, b, …), title, depends, group, weight, summary.
+   T = python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" plan-tasks PLAN
+   # ids, titles, files, refs, sizes: the only view of the plan; do not read the plan itself.
+   Group T's tasks into parts: ids a, b, … in order, title, depends, parallel group, weight
+   🔴/🟡/🟢, goal, inputs, outputs, notes, optional criteria. A task's refs never point into a
+   later part, nor into a part its own part does not depend on (directly or through others).
 
 4. DRAFT & CONFIRM
-   Show the split table; on rejection with feedback retry step 3 once; on a second
-   rejection exit without files. Never generate without explicit confirmation.
+   Write the boundaries as parts.json (references/STAGE-FORMAT.md §6) in a temp folder outside
+   the repository and show the split table (id, title, tasks, depends, group, weight); on
+   rejection with feedback retry step 3 once; on a second rejection exit without files.
+   Never generate without explicit confirmation.
 
 5. GENERATE
-   if P.existing: ask overwrite / other base / abort.
-   Write <BASE>-roadmap.md from assets/roadmap-template.<LANG>.md and one
-   <BASE>-<id>.md per part from assets/stage-template.<LANG>.md (names via TOOL stage-name).
+   R = TOOL split-write PLAN --parts <parts.json>
+   exit 1 exists → ask overwrite (repeat with --force) / other base / abort (invariant 4).
+   exit 1 boundary errors (tasks-*, part-ids-not-sequential, unknown-dependency, dependency-cycle,
+   group-conflict, dependency-order, missing-depends) → fix parts.json and repeat; nothing was written.
+   R.warnings (subtask-separated, lines-outside-tasks) → mention them in the parts' notes when they
+   matter for the executor; never edit task text. Lines outside parsed task bodies are copied into
+   the part after their task, but an executor unit's text is the parsed body only: name such lines
+   in the notes of their part.
 
-6. VERIFY (three levels, at most 3 rounds)
-   A/B: TOOL validate-all DIR BASE   # files, sections, DAG, depends, groups, task coverage,
-                                     # External/Size lines copied verbatim, original hash;
-                                     # also run TOOL validate-stage per part
+6. VERIFY (at most 3 rounds)
+   A/B: TOOL validate-all DIR BASE   # files, sections, DAG, depends, groups, task coverage (equal),
+                                     # task bodies byte for byte (task_bodies), External/Size lines,
+                                     # original hash; also TOOL validate-stage per part
                                      # for the granularity warning (> 15 tasks)
-   C:   re-read every part: self-sufficiency, context, handoff (outputs of X cover the
-        inputs of every Y that depends on X), consistency with the roadmap.
-   Fix defects and repeat; after 3 failed rounds exit with a warning, files kept.
+   C:   handoff only, from parts.json: the outputs of X cover the inputs of every Y that depends
+        on X. No part is re-read.
+   A failure: fix parts.json, split-write --force, repeat; after 3 failed rounds exit with a
+   warning, files kept.
 
 7. DONE NOTICE / VERIFY CHOICE
    Scope comes from `verify` (`none` by default without a confirmation channel, see Inputs);
@@ -134,7 +152,7 @@ parse the same ids.
    preset=verify_depth, mode=verify_mode, parts=<list> unless the scope is all), sequentially per part.
    TOOL verify-record DIR BASE --results <its batch JSON file> --ledger DIR/<BASE>-verify-ledger.json --mode verify_mode
    TOOL verify-status DIR BASE --baseline ... --ledger ... --validator <SKILL_DIR>/../plan-iterative-revision/scripts/next_review_index.py --stages <scope>
-   exit 0 → (full-cycle: re-run validate-all, parts were edited) → journal: split done → print assets/verify-summary.<LANG>.md, then completion.
+   exit 0 → (full-cycle: TOOL validate-all DIR BASE --skip-task-bodies, the parts were edited) → journal: split done → print assets/verify-summary.<LANG>.md, then completion.
    missing → re-dispatch those parts once and repeat; still missing or any inconsistent → stop.
 ```
 
@@ -169,10 +187,12 @@ parse the same ids.
   `plan-executor`; stop.
 - **No split** (the gate's verdict "do not split", `S.chain.split == never` without a
   confirmation channel, or the user's "do not split" at the `never` question):
-  `J journal-event <journal> --skill plan-splitter --plan P --stage split --status skipped --data '{"why": "<gate | split=never | user>"}'`.
+  `J journal-event <journal> --skill plan-splitter --plan P --stage split --status skipped --data '{"why": "<gate | no-tasks | split=never | user>"}'`
+  (`no-tasks`: `gate` exit `1`, the plan has no `### Task N:` headings).
 - **Split done** (step 7 with `scope = none`, or step 8 after `verify-status` exit 0):
-  `J journal-event <journal> --skill plan-splitter --plan P --stage split --status done --input PLAN --artifact roadmap=<BASE>-roadmap.md --artifact parts[]=<BASE>-a.md --artifact parts[]=<BASE>-b.md ...`
-  (one `parts[]` per part; paths relative to the journal's directory, forward slashes). The batch
+  `J journal-event <journal> --skill plan-splitter --plan P --stage split --status done --input PLAN --artifact roadmap=<BASE>-roadmap.md --artifact parts[]=<BASE>-a.md --artifact parts[]=<BASE>-b.md ... --artifact split_method=script`
+  (one `parts[]` per part; paths relative to the journal's directory, forward slashes;
+  `split_method=script` tells `chain_tool.py run-stats` that the stage read the task list, not the plan). The batch
   verification of step 8 belongs to this stage: plan-iterative-revision writes no stage events on
   a roadmap.
 - **No usable split** (second rejection of the draft, step 6 failing after 3 rounds):

@@ -45,7 +45,7 @@ Journal errors never block the run's own work:
 
 ## BOOTSTRAP
 
-1. `ledger-init <exec_dir> <plan_path> --workdir <repo>` detects the input (roadmap or whole plan), parses units, writes `state.json`, and takes a baseline snapshot of `<repo>`; its tree becomes `expected_tree`, the state the working tree must have before the next unit.
+1. `ledger-init <exec_dir> <plan_path> --workdir <repo>` detects the input (roadmap or whole plan), parses units, writes `state.json`, and takes a baseline snapshot of `<repo>`; its tree becomes `expected_tree`, the state the working tree must have before the next unit. For a roadmap the units are the tasks of its parts plus one checkpoint `part-<id>-done` per part (INPUT-DETECTION.md).
 2. `exec_dir` MUST be outside `<repo>` or git-ignored; otherwise `exec-dir-inside-workdir`. Snapshots and restores then never touch `state.json`. Pass `auto` to get the default `<repo parent>/.exec/<repo>-<plan>/`. A directory inside the OS temp dir is refused with `exec-dir-ephemeral` (the ledger would vanish with the session); `--allow-temp` overrides it for throwaway runs. The result's `exec_dir` field is the absolute path: report it to the engineer.
 3. A dirty working tree gives `dirty-worktree`: ask the engineer to commit/stash, or re-run with `--allow-dirty` (the baseline then includes those changes). `BACKLOG.md` at the repository root does not count: the skills append to it between runs. Neither do the pipeline's own files (GATE.md, Foreign Changes: specs, plans, parts, roadmaps, completion, review and report files, `*-diffs.md`, `*-followups.json`) and the run's chain journal; a `*-chain.json` other than the run's journal does.
 4. Without git (`workdir` not a repository) snapshots are `null`: rollback is manual, so ask the engineer before every retry.
@@ -95,7 +95,7 @@ Subagents may inspect code and return diff/status/logs. Only the parent session 
    - No journal: with `plan-brainstorming` alongside (the journal is `journal-corrupt`), `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" backlog-append <root> --section <S> --source "plan-executor, <plan file name>" --item "<path:line — summary>" --lang <plan language>`; `action: exists` is fine, exit `1` with `user-section:` writes nothing at all, any other exit `1` → by hand as above. Without `plan-brainstorming`, by hand as above. Say so in the final summary.
    - `<S>` = the journal's `goal`; without a journal, `settings.backlog` from the ledger (`<exec_dir>/state.json`, read only), else the master plan's file name without `.md` and `-impl` (`values-fix-1-impl.md` → `values-fix-1`).
    Then `J journal-export-findings <journal>` (with no findings and no file the file is `[]`; items already in the file stay, the journal's findings it lacks are added; a file that is unreadable or not a JSON list gives `followups-unreadable`, exit `2`, and is left unchanged: name it in the stop report). Its `path` is `<goal>-followups.json` next to the journal, the machine input of the next cycle (`/plan-brainstorming <goal>-followups.json`); name it in the summary.
-4. Propose `plan-resolver` per `RESOLVER-PROPOSAL.md`.
+4. Propose `plan-resolver` per `RESOLVER-PROPOSAL.md`. Unfinished units are named by their ids: `task-<N>` is Task N of the master plan (also in a roadmap run), `part-<id>-done` the checkpoint of part `<id>`.
 5. Do not offer `checkpoint-prune` here: the COMMIT stage diffs and commits from the run's snapshots. It is offered when COMMIT is `done`.
 
 ## COMMIT

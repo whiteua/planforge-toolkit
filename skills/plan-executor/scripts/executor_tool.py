@@ -386,7 +386,7 @@ def _full_unit(unit):
     unit_id = unit.get("id") or unit.get("stage")
     if not unit_id:
         raise ToolError("unit missing id/stage", 2)
-    return {
+    full = {
         "id": unit_id,
         "title": unit.get("title", unit_id),
         "weight": _normalize_weight(unit.get("weight", "yellow")),
@@ -400,6 +400,9 @@ def _full_unit(unit):
         "source": unit.get("source"),
         "notes": [],
     }
+    if unit.get("part"):
+        full["part"] = unit["part"]  # staged units from a part's tasks (spec plan-refactoring-01-3)
+    return full
 
 
 def build_ledger(plan_path, input_type, units, source_sha256=None):
@@ -988,6 +991,78 @@ def _stage_source(roadmap_path, stage):
     base = roadmap.name[: -len(ROADMAP_SUFFIX)]
     candidate = roadmap.parent / f"{base}-{stage}.md"
     return {"path": str(candidate.resolve()), "line_start": None, "line_end": None} if candidate.exists() else None
+
+
+_PART_CHECK_RE = re.compile(r"^##\s+(?:критерии завершения|completion criteria|выходные данные|outputs)\b",
+                            re.IGNORECASE)
+
+
+def _part_checkpoint_lines(lines, after):
+    """1-based (first, last) lines of a part's completion criteria and handoff sections (Russian or
+    English headings) after line `after` (the last task's end), up to the next level-2 heading such as
+    Notes, trailing blank lines dropped; None when the part has neither section."""
+    heads = [(index, level, line) for index, level, line in _headings(lines) if index >= after]
+    start = next((index for index, level, line in heads if level == 2 and _PART_CHECK_RE.match(line)), None)
+    if start is None:
+        return None
+    end = next((index for index, level, line in heads
+                if index > start and level <= 2 and not _PART_CHECK_RE.match(line)), len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    return start + 1, end
+
+
+def _part_checkpoint(stage, row, lines, after, depends, warnings):
+    """Checkpoint unit `part-<id>-done` of a part: green, its text the part's completion criteria and
+    handoff; without those sections the title says what to check and `part-without-criteria` warns."""
+    ru = detect_lang("\n".join(lines))["lang"] == "ru"
+    title = f"Checkpoint — часть {stage}" if ru else f"Checkpoint — part {stage}"
+    span = _part_checkpoint_lines(lines, after)
+    if span is None:
+        warnings.append(f"part-without-criteria: {stage}")
+        title += (": нет критериев завершения; проверить, что задачи части закрыты" if ru
+                  else ": no completion criteria; check that the part's tasks are done")
+    source = dict(row["source"], line_start=span[0], line_end=span[1]) if span else None
+    return {"id": f"part-{stage}-done", "title": title, "weight": "green", "depends": depends,
+            "parallel_group": row["group"], "part": stage, "source": source}
+
+
+def _staged_units(roadmap_path, rows):
+    """Units of a staged run (spec plan-refactoring-01-3): the tasks of each part (`task-<id>`, shared
+    parser), then a checkpoint `part-<id>-done`. The first task of a part depends on the checkpoints of
+    the parts in its `Depends on`, every later unit on the one before it. A part without contract tasks
+    (written by hand) stays one unit `<id>` as before. Returns (units, warnings)."""
+    roadmap = Path(roadmap_path)
+    master = roadmap.with_name(roadmap.name[: -len(ROADMAP_SUFFIX)] + ".md")
+    master_text = _read_text(master) if master.is_file() else ""
+    texts = {row["stage"]: _read_text(row["source"]["path"]) if row.get("source") else None for row in rows}
+    parsed = {stage: _contract_tasks(text) if text is not None else None for stage, text in texts.items()}
+    last_unit = {stage: f"part-{stage}-done" if found else stage for stage, found in parsed.items()}
+    units, warnings, seen = [], [], set()
+    for row in rows:
+        stage, found, text = row["stage"], parsed[row["stage"]], texts[row["stage"]]
+        if found is None:
+            if text is not None:
+                warnings.append(f"part-without-tasks: {stage}")
+            units.append(row)
+            continue
+        if found["duplicates"]:
+            raise ToolError(f"duplicate-unit-id: task-{found['duplicates'][0]['id']}", 2)
+        lines = text.splitlines()
+        weight = _plan_weight(master_text if _TIER_RE.search(master_text) else text)
+        depends = [last_unit[dep] for dep in row["depends"]]
+        for task in found["tasks"]:
+            unit_id = f"task-{task['id']}"
+            if unit_id in seen:
+                raise ToolError(f"duplicate-unit-id: {unit_id}", 2)
+            seen.add(unit_id)
+            body = "\n".join(lines[task["line_start"] - 1:task["line_end"]])
+            units.append({"id": unit_id, "title": task["title"], "weight": _task_weight(weight, task["title"], body),
+                          "depends": depends, "parallel_group": row["group"], "part": stage,
+                          "source": dict(row["source"], line_start=task["line_start"], line_end=task["line_end"])})
+            depends = [unit_id]
+        units.append(_part_checkpoint(stage, row, lines, found["tasks"][-1]["line_end"], depends, warnings))
+    return units, warnings
 
 
 def unit_text(unit):
@@ -2032,12 +2107,16 @@ def _resolve_settings(plan_path):
 
 def cmd_ledger_init(args):
     detected = detect_input(args.plan_path, force_whole=args.whole)
+    staged_warnings = []
     if detected["input_type"] == "staged":
         source_file = detected["roadmap"]
-        units = parse_roadmap(source_file)
-        for unit in units:
-            unit["source"] = _stage_source(source_file, unit["stage"])
-        source_sha256 = _staged_sha256(source_file, units)
+        rows = parse_roadmap(source_file)
+        for row in rows:
+            row["source"] = _stage_source(source_file, row["stage"])
+        # The drift fingerprint stays over the roadmap rows and part files: a ledger written before task
+        # units (units a, b) resumes without a false plan-drift.
+        source_sha256 = _staged_sha256(source_file, rows)
+        units, staged_warnings = _staged_units(source_file, rows)
     else:
         source_file = args.plan_path
         source_sha256 = _sha256_file(source_file)
@@ -2060,6 +2139,7 @@ def cmd_ledger_init(args):
             raise ToolError("dirty-worktree: uncommitted changes in workdir; ask the engineer (commit/stash or --allow-dirty)", 1)
     settings, warning = _resolve_settings(args.plan_path)
     warnings = [warning] if warning else list((settings or {}).get("warnings") or [])
+    warnings.extend(staged_warnings)
     if settings is not None and not settings.get("ok", True):
         raw_units = units.get("units", []) if isinstance(units, dict) else units
         problems = "; ".join(settings.get("errors") or [])

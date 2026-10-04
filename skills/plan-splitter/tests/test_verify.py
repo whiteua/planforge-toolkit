@@ -507,7 +507,8 @@ class ValidateAllTaskLineTests(unittest.TestCase):
                 "1. Do the focused task.\n",
                 "1. Do the focused task.\n   " + EXTERNAL_LINE + "\n   " + SIZE_LINE + "\n",
             ))
-            process = run_tool("validate-all", str(directory), "plan")
+            write(directory / "plan-b.md", stage_text("Stage b").replace("1. Do the focused task.\n", ""))
+            process = run_tool("validate-all", str(directory), "plan", "--skip-task-bodies")
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
             self.assertEqual(read_json(process)["task_lines"], {"missing": [], "original": 2})
 

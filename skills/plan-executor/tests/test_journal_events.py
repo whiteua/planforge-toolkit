@@ -258,5 +258,19 @@ class TestBrainstormToolLoadedOnce(JournalCase):
         self.assertIs(self.tool._load_brainstorm_tool(), self.tool._load_brainstorm_tool())
 
 
+class TestStagedUnitsTotal(JournalCase):
+    def test_units_total_counts_the_part_checkpoints(self):
+        (self.root / "plan01-impl-a.md").write_text(
+            "# Stage a: A\n\n> Source: [plan01-impl.md](./plan01-impl.md)\n\n## Tasks\n\n### Task 1: A\n\nx\n\n"
+            "### Task 2: B\n\ny\n\n## Completion criteria\n\n- [ ] ok\n", encoding="utf-8")
+        roadmap = self.root / "plan01-impl-roadmap.md"
+        roadmap.write_text("# R\n\n> Source: [plan01-impl.md](./plan01-impl.md)\n\n"
+                           "| Stage | Title | Depends on | Parallel group | Weight |\n|---|---|---|---|---|\n"
+                           "| a | A | — | A | 🟡 medium |\n", encoding="utf-8")
+        led = self.init(plan_path=str(roadmap))
+        self.assertEqual([u["id"] for u in led["units"]], ["task-1", "task-2", "part-a-done"])
+        self.assertEqual(self.stage()["artifacts"]["units_total"], "3")
+
+
 if __name__ == "__main__":
     unittest.main()

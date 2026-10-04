@@ -14,6 +14,6 @@ Titles with whole words such as refactor, architecture, security, migration, con
 
 ## Context
 
-Work from `unit-begin`'s `text` (the unit's own section or stage file) and `files` (paths from its `Files`/`Inputs`/`Outputs` blocks, with `lines` hints such as `4-6`). Read those files yourself; do not re-read the whole plan for every unit. `lines` describe the file before the plan started; earlier units shift them, so locate the code by the quote in the step, not by the number.
+Work from `unit-begin`'s `text` (the unit's own task: its section of the plan or of a part; for `part-<id>-done`, the part's completion criteria and handoff; for a hand-written part, the whole part file) and `files` (paths from its `Files`/`Inputs`/`Outputs` blocks, with `lines` hints such as `4-6`). Read those files yourself; do not re-read the whole plan for every unit. `lines` describe the file before the plan started; earlier units shift them, so locate the code by the quote in the step, not by the number.
 
 If `files` is empty, search with Grep/Glob for class, function, command or file names from `text`. Do not build or rely on a repo map; keep context local to the unit.

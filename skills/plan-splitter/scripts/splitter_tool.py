@@ -28,10 +28,12 @@ Subcommands:
       Validate roadmap structure: required sections, dependency table, stage links.
       Print JSON: {"valid": bool, "missing": [...], "errors": [...], "stages": [...]}.
 
-  validate-all <dir> <base_name>
+  validate-all <dir> <base_name> [--skip-task-bodies]
       Cross-validation of the whole set: '<base>-roadmap.md' + all '<base>-<id>.md' parts.
       Checks: file existence, DAG (no cycles), depends->exist, parallel-group consistency,
-      task-coverage (sum of part tasks >= original-plan tasks), original-plan hash,
+      task-coverage (sum of part tasks == original-plan tasks), original-plan hash,
+      task bodies (task_bodies: every plan task body in exactly one part, by the shared parser's
+      sha1; skipped by --skip-task-bodies, e.g. after a full-cycle verification edited the parts),
       task lines (every '**External:**' and '**Size:**' line of the original, outside
       code fences, appears verbatim in some part).
       Print JSON with detailed results. Exit 0 on success, 1 on failure.
@@ -50,10 +52,25 @@ Subcommands:
   hash <file>
       Print SHA-256 hex of <file> raw bytes.
 
+  gate <plan> [--keep-tasks 20] [--keep-bytes 100000] [--split-tasks 40] [--split-bytes 150000] [--modules 3]
+      Numeric split gate over brainstorm_tool.parse_plan_tasks: factors task_count, plan_bytes, modules
+      (distinct Files folders two levels deep), dependency_shape (linear | groups by Preconditions refs);
+      verdict keep | split | borderline with reasons and thresholds. Exit 1 no-tasks; exit 2 for an
+      unreadable plan, a bad flag value or plan-brainstorming not installed alongside.
+      Errors of gate, split-write and validate-all print {"ok": false, "errors": [...]}.
+
+  split-write <plan> --parts <parts.json> [--lang ru|en] [--force]
+      Write <base>-roadmap.md and <base>-<id>.md from assets/*-template.<lang>.md and the model's
+      boundaries (parts.json: optional title/overview; per part id, title, depends, group, weight,
+      goal, inputs, outputs, notes, optional criteria, tasks). Task texts are copied byte for byte
+      (heading to the next task); every check runs before the first write. Exit 1 for boundary errors
+      or existing files without --force (nothing written), exit 2 for bad input. The plan is not changed.
+
 Stdlib only. Python 3.8+.
 """
 from __future__ import annotations
 
+import datetime
 import functools
 import hashlib
 import importlib.util
@@ -106,6 +123,23 @@ REQUIRED_ROADMAP_SECTIONS_EN = (
 )
 
 GRANULARITY_TASK_THRESHOLD = 15  # tasks per stage; above this is a soft warning
+
+# Numeric split gate (gate / gate_verdict). split_tasks and split_bytes are plan-brainstorming's SIZE_BUDGET,
+# the plan-oversized threshold of plan-check; plan-writing/tests SizeBudgetContractTest holds them equal.
+GATE_THRESHOLDS = {"keep_tasks": 20, "keep_bytes": 100000, "split_tasks": 40, "split_bytes": 150000, "modules": 3}
+GATE_FLAGS = (("--keep-tasks", "keep_tasks"), ("--keep-bytes", "keep_bytes"), ("--split-tasks", "split_tasks"),
+              ("--split-bytes", "split_bytes"), ("--modules", "modules"))
+BRAINSTORM_MISSING = "plan-brainstorming not installed alongside"
+
+
+class SplitterError(Exception):
+    """Error of gate, split-write and validate-all, printed as JSON: code 2 = input, 1 = contract.
+    `details` go into the JSON; details["errors"] replaces the one-message list."""
+
+    def __init__(self, message: str, code: int = 1, **details: object) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
 
 
 def print_json(data: object, exit_code: int = 0) -> None:
@@ -500,7 +534,14 @@ def _lines_outside_fences(text: str) -> List[str]:
 
 
 def count_tasks_in_stage(text: str) -> int:
-    """Count top-level numbered items in the '## Задачи' / '## Tasks' section (code fences ignored)."""
+    """Tasks of a part: its `### Task N:` bodies by brainstorm_tool.parse_plan_tasks when it has them (a part
+    from split-write lists each task twice: the numbered list and the body); otherwise the top-level
+    numbered items in the '## Задачи' / '## Tasks' section (code fences ignored)."""
+    parse = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parse is not None:
+        parsed = parse(text)
+        if parsed["tasks"] and not parsed["malformed"]:
+            return len(parsed["tasks"])
     m = re.search(r"^##\s+(?:Задачи|Tasks)\s*$", text, re.MULTILINE)
     if not m:
         return 0
@@ -522,6 +563,407 @@ def _load_brainstorm_tool():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _brainstorm_required():
+    """brainstorm_tool with parse_plan_tasks, else SplitterError exit 2: gate, split-write and validate-all
+    cannot cut or check a plan without the shared task parser."""
+    module = _load_brainstorm_tool()
+    if module is None or not hasattr(module, "parse_plan_tasks"):
+        raise SplitterError(BRAINSTORM_MISSING, 2)
+    return module
+
+
+def _read_plan(path: str) -> str:
+    try:
+        return read_text(path)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SplitterError(f"plan-unreadable: {path}: {exc}", 2) from exc
+
+
+def _module_of(path: str) -> str:
+    """Module of a Files path: its folder, at most two levels deep ('.' for a file at the root)."""
+    folders = path.replace("\\", "/").strip("/").split("/")[:-1]
+    return "/".join(folders[:2]) or "."
+
+
+def _dependency_shape(tasks: List[Dict[str, object]]) -> str:
+    """'linear' when the Preconditions references (refs) branch nowhere: no task has two or more
+    incoming or outgoing edges; otherwise 'groups'. References to unknown tasks are ignored."""
+    ids = {task["id"] for task in tasks}
+    incoming: Dict[str, int] = {}
+    outgoing: Dict[str, int] = {}
+    for task in tasks:
+        for ref in task["refs"]:
+            if ref in ids and ref != task["id"]:
+                outgoing[ref] = outgoing.get(ref, 0) + 1
+                incoming[task["id"]] = incoming.get(task["id"], 0) + 1
+    return "groups" if any(n >= 2 for n in list(incoming.values()) + list(outgoing.values())) else "linear"
+
+
+def _gate_reason(name: str, value: int, keep: int, split: int) -> str:
+    if value <= keep:
+        return f"{name} {value} <= {keep}"
+    if value > split:
+        return f"{name} {value} > {split}"
+    return f"{name} {value} in ({keep}, {split}]"
+
+
+def gate_verdict(plan_path: str, thresholds: Optional[Dict[str, int]] = None) -> Dict[str, object]:
+    """Numeric split gate over brainstorm_tool.parse_plan_tasks. keep: <= keep_tasks tasks, <= keep_bytes
+    bytes and <= modules modules; split: (> split_tasks tasks or > split_bytes bytes) and (> modules modules
+    or dependency_shape 'groups'); otherwise borderline. Pure (no printing, no exit): plan-chain-runner
+    calls it in-process. Raises SplitterError: no-tasks (1), plan-unreadable or no parser (2)."""
+    limits = dict(GATE_THRESHOLDS, **(thresholds or {}))
+    parsed = _brainstorm_required().parse_plan_tasks(_read_plan(plan_path))
+    tasks = parsed["tasks"]
+    if not tasks:
+        raise SplitterError(f"no-tasks: {plan_path}", 1)
+    factors = {
+        "task_count": len(tasks),
+        "plan_bytes": os.path.getsize(plan_path),
+        "modules": len({_module_of(entry["path"]) for task in tasks for entry in task["files"]}),
+        "dependency_shape": _dependency_shape(tasks),
+    }
+    count, size, modules = factors["task_count"], factors["plan_bytes"], factors["modules"]
+    if count <= limits["keep_tasks"] and size <= limits["keep_bytes"] and modules <= limits["modules"]:
+        verdict = "keep"
+    elif ((count > limits["split_tasks"] or size > limits["split_bytes"])
+          and (modules > limits["modules"] or factors["dependency_shape"] == "groups")):
+        verdict = "split"
+    else:
+        verdict = "borderline"
+    reasons = [
+        _gate_reason("task_count", count, limits["keep_tasks"], limits["split_tasks"]),
+        _gate_reason("plan_bytes", size, limits["keep_bytes"], limits["split_bytes"]),
+        f"modules {modules} {'>' if modules > limits['modules'] else '<='} {limits['modules']}",
+        f"dependency_shape {factors['dependency_shape']}",
+    ]
+    return {"ok": True, "plan": plan_path, "verdict": verdict, "factors": factors, "thresholds": limits,
+            "reasons": reasons,
+            "warnings": [f"malformed-task-heading: line {item['line']}" for item in parsed["malformed"]]}
+
+
+def check_parts(tasks: List[Dict[str, object]], parts: List[Dict[str, object]]) -> Tuple[List[str], List[str]]:
+    """Errors and warnings of the model's part boundaries (parts.json) against the plan's tasks. Every
+    check runs before split-write writes anything; one error means no file is written."""
+    errors: List[str] = []
+    ids = [str(part["id"]) for part in parts]
+    expected = [part_id(n) for n in range(1, len(parts) + 1)]
+    if ids != expected:
+        errors.append(f"part-ids-not-sequential: {', '.join(ids)} (expected {', '.join(expected)})")
+    known = {task["id"] for task in tasks}
+    owner: Dict[str, str] = {}
+    duplicated: List[str] = []
+    unknown: List[str] = []
+    for part in parts:
+        for task_id in part["tasks"]:
+            if task_id not in known:
+                unknown.append(task_id)
+            elif task_id in owner:
+                duplicated.append(task_id)
+            else:
+                owner[task_id] = str(part["id"])
+    unassigned = [task["id"] for task in tasks if task["id"] not in owner]
+    for code, found in (("tasks-unassigned", unassigned), ("tasks-duplicated", duplicated),
+                        ("tasks-unknown", unknown)):
+        if found:
+            errors.append(f"{code}: {', '.join(found)}")
+    graph_errors, warnings = _check_part_graph(tasks, parts, owner)
+    return errors + graph_errors, warnings
+
+
+def _ancestors(graph: Dict[str, List[str]], node: str) -> Set[str]:
+    """Every part `node` depends on, directly or through other parts (cycles tolerated)."""
+    seen: Set[str] = set()
+    stack = list(graph.get(node, []))
+    while stack:
+        dep = stack.pop()
+        if dep not in seen:
+            seen.add(dep)
+            stack.extend(graph.get(dep, []))
+    return seen
+
+
+def _check_part_graph(tasks: List[Dict[str, object]], parts: List[Dict[str, object]],
+                      owner: Dict[str, str]) -> Tuple[List[str], List[str]]:
+    """Part dependencies: known, acyclic, never in the part's own parallel group. A Preconditions reference
+    never points into a later part, nor into a part the referring one does not depend on (directly or
+    through other parts). Task N.M in another part than Task N is only a warning."""
+    errors: List[str] = []
+    graph = {str(part["id"]): [str(dep) for dep in part["depends"]] for part in parts}
+    group = {str(part["id"]): part["group"] for part in parts}
+    unknown = [f"{pid} -> {dep}" for pid, deps in graph.items() for dep in deps if dep not in graph]
+    if unknown:
+        errors.append("unknown-dependency: " + ", ".join(unknown))
+    cycle = has_cycle(graph)
+    if cycle:
+        errors.append("dependency-cycle: " + " -> ".join(cycle))
+    same = [f"{pid} and {dep} in group {group[pid]}" for pid, deps in graph.items() for dep in deps
+            if group.get(dep) == group[pid]]
+    if same:
+        errors.append("group-conflict: " + ", ".join(same))
+    position = {pid: index for index, pid in enumerate(graph)}
+    late: List[str] = []
+    missing: List[str] = []
+    for task in tasks:
+        here = owner.get(task["id"])
+        for ref in task["refs"]:
+            there = owner.get(ref)
+            if here is None or there is None or there == here:
+                continue
+            link = f"Task {task['id']} ({here}) -> Task {ref} ({there})"
+            if position[there] > position[here]:
+                late.append(link)
+            elif there not in _ancestors(graph, here):
+                missing.append(link)
+    if late:
+        errors.append("dependency-order: " + ", ".join(late))
+    if missing:
+        errors.append("missing-depends: " + ", ".join(missing))
+    warnings = []
+    for task in tasks:
+        base = str(task["id"]).split(".")[0]
+        if base != task["id"] and base in owner and task["id"] in owner and owner[base] != owner[task["id"]]:
+            warnings.append(f"subtask-separated: Task {task['id']} ({owner[task['id']]}) and Task {base} ({owner[base]})")
+    return errors, warnings
+
+
+# ---------- split-write: templates ----------
+
+TEMPLATE_ITEM_RE = re.compile(r"<!-- item:(?P<name>[a-z-]+) -->\n(?P<body>.*?)\n<!-- /item -->\n?", re.DOTALL)
+PLACEHOLDER_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+
+
+def _split_items(text: str) -> Tuple[str, Dict[str, str]]:
+    """A template without its `<!-- item:name -->` blocks (the one-line patterns split-write repeats),
+    and those blocks by name."""
+    items = {match.group("name"): match.group("body") for match in TEMPLATE_ITEM_RE.finditer(text)}
+    return TEMPLATE_ITEM_RE.sub("", text).rstrip("\n") + "\n", items
+
+
+def _template(name: str, lang: str) -> Tuple[str, Dict[str, str]]:
+    return _split_items(read_text(os.path.join(ASSETS_DIR, f"{name}.{lang}.md")))
+
+
+def _fill(template: str, values: Dict[str, str]) -> str:
+    """`{{NAME}}` replaced in one pass: inserted text (task bodies) is never scanned again."""
+    return PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], template)
+
+
+H1_RE = re.compile(r"^#\s+(.+?)\s*$")
+GOAL_RE = re.compile(r"^\*\*Goal:\*\*\s*(\S.*?)\s*$")
+
+
+def _task_spans(lines: List[str], tasks: List[Dict[str, object]]) -> Dict[str, str]:
+    """Each task's text as split-write copies it: from its heading to the line before the next task (the
+    last task: to the end of the plan), trailing blank lines dropped. That is the parser's body plus the
+    lines the parser leaves outside every task (e.g. a heading inside a nested fence it took for a section
+    end): the body stays byte for byte, the shared parser finds the same task (same sha1) in the part,
+    and nothing of the plan is lost."""
+    spans: Dict[str, str] = {}
+    for index, task in enumerate(tasks):
+        end = tasks[index + 1]["line_start"] - 1 if index + 1 < len(tasks) else len(lines)
+        block = lines[task["line_start"] - 1:end]
+        while block and not block[-1].strip():
+            block.pop()
+        spans[task["id"]] = "\n".join(block)
+    return spans
+
+
+def _plan_header(lines: List[str], first_task: int) -> str:
+    """Plan lines before the first task, verbatim, without the H1 title, a closing `---` and edge blank lines."""
+    head = list(lines[:first_task - 1])
+    title = next((index for index, line in enumerate(head) if H1_RE.match(line)), None)
+    if title is not None:
+        del head[title]
+    while head and (not head[-1].strip() or head[-1].strip() == "---"):
+        head.pop()
+    while head and not head[0].strip():
+        head.pop(0)
+    return "\n".join(head)
+
+
+DONE_WHEN_RE = re.compile(r"^\*\*Done when:\*\*\s*(\S.*?)\s*$")
+POSTCONDITIONS_RE = re.compile(r"^\*\*Postconditions:\*\*")
+
+
+def _done_state(text: str) -> Optional[str]:
+    """The task's done-state in one line: its **Done when:** text, else its Postconditions items joined
+    with '; ' (code fences ignored); None when it has neither."""
+    lines = [line.strip() for line in _lines_outside_fences(text)]
+    for line in lines:
+        match = DONE_WHEN_RE.match(line)
+        if match:
+            return match.group(1)
+    items: List[str] = []
+    inside = False
+    for line in lines:
+        if POSTCONDITIONS_RE.match(line):
+            inside = True
+        elif inside and line.startswith(("- ", "* ")) and not line.startswith("- [ ]"):
+            items.append(line[2:].strip())
+        elif inside and line:
+            break
+    return "; ".join(items) or None
+
+
+def _lines_outside_tasks(lines: List[str], tasks: List[Dict[str, object]]) -> List[str]:
+    """Ranges of the non-blank plan lines after the first task that belong to no parsed task body;
+    split-write copies them with the task before them and names them in a warning."""
+    covered: Set[int] = set()
+    for task in tasks:
+        covered.update(range(task["line_start"], task["line_end"] + 1))
+    groups: List[List[int]] = []
+    for number in range(tasks[0]["line_start"], len(lines) + 1):
+        if number in covered:
+            continue
+        if groups and groups[-1][-1] == number - 1:
+            groups[-1].append(number)
+        else:
+            groups.append([number])
+    ranges: List[str] = []
+    for group in groups:
+        filled = [number for number in group if lines[number - 1].strip()]
+        if filled:
+            ranges.append(str(filled[0]) if filled[0] == filled[-1] else f"{filled[0]}-{filled[-1]}")
+    return ranges
+
+
+def _or_dash(value: object) -> str:
+    return str(value or "").strip() or "—"
+
+
+def _render_part(base: str, part: Dict[str, object], tasks: List[Dict[str, object]], spans: Dict[str, str],
+                 header: str, blocks: List[str], lang: str) -> str:
+    """One part from assets/stage-template.<lang>.md: the model's fields, the plan header and the task
+    texts verbatim; criteria from parts.json, else one line per task from its done-state."""
+    template, items = _template("stage-template", lang)
+    texts = [spans[task["id"]] for task in tasks]
+    task_list = [_fill(items["task"], {"N": str(number), "TASK_ID": task["id"], "TASK_TITLE": task["title"]})
+                 for number, task in enumerate(tasks, start=1)]
+    if part.get("criteria"):
+        criteria = [_fill(items["criterion-text"], {"TEXT": line}) for line in part["criteria"]]
+    else:
+        criteria = []
+        for task, text in zip(tasks, texts):
+            state = _done_state(text)
+            criteria.append(_fill(items["criterion"] if state else items["criterion-empty"],
+                                  {"TASK_ID": task["id"], "TEXT": state or ""}))
+    return _fill(template, {
+        "ID": part["id"], "TITLE": part["title"], "BASE_NAME": base,
+        "DEPENDS_ON_OR_DASH": ", ".join(part["depends"]) or "—", "BLOCKS_OR_DASH": ", ".join(blocks) or "—",
+        "WEIGHT": part["weight"], "GOAL": _or_dash(part["goal"]), "INPUTS": _or_dash(part["inputs"]),
+        "PLAN_HEADER": header or "—", "TASK_LIST": "\n".join(task_list), "TASK_BODIES": "\n\n".join(texts),
+        "CRITERIA": "\n".join(criteria), "OUTPUTS": _or_dash(part["outputs"]), "NOTES": _or_dash(part["notes"]),
+    })
+
+
+def _render_roadmap(base: str, title: str, overview: str, parts: List[Dict[str, object]],
+                    blocks: Dict[str, List[str]], lang: str) -> str:
+    """The roadmap from assets/roadmap-template.<lang>.md: table, parallel groups, one Mermaid edge per
+    dependency (no dependency at all: an edge from `plan` to each part, the diagram needs one) and one
+    stage block per part with the part's goal as its summary."""
+    template, items = _template("roadmap-template", lang)
+    rows: List[str] = []
+    sections: List[str] = []
+    edges: List[str] = []
+    groups: Dict[str, List[str]] = {}
+    for part in parts:
+        fields = {"ID": part["id"], "TITLE": part["title"], "DEPENDS": ", ".join(part["depends"]) or "—",
+                  "GROUP": part["group"], "WEIGHT": part["weight"], "BASE_NAME": base,
+                  "BLOCKS": ", ".join(blocks[part["id"]]) or "—", "SUMMARY": _or_dash(part["goal"])}
+        rows.append(_fill(items["row"], fields))
+        sections.append(_fill(items["stage"], fields))
+        groups.setdefault(part["group"], []).append(part["id"])
+        edges.extend(f"    {dep} --> {part['id']}" for dep in part["depends"])
+    if not edges:
+        edges = [f"    plan --> {part['id']}" for part in parts]
+    return _fill(template, {
+        "PLAN_TITLE": title, "BASE_NAME": base, "N": str(len(parts)), "OVERVIEW": _or_dash(overview),
+        "ISO8601_UTC": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "TABLE_ROWS": "\n".join(rows), "MERMAID_EDGES": "\n".join(edges), "STAGE_SECTIONS": "\n\n".join(sections),
+        "GROUP_LINES": "\n".join(_fill(items["group"], {"GROUP": name, "MEMBERS": ", ".join(members)})
+                                 for name, members in groups.items()),
+    })
+
+
+def render_split(plan_path: str, payload: Dict[str, object], lang: str) -> Dict[str, object]:
+    """split-write without writing: checks the plan and every boundary first, then renders the roadmap and
+    the parts. A boundary error raises SplitterError (exit 1) with all errors in details["errors"]."""
+    text = _read_plan(plan_path)
+    parsed = _brainstorm_required().parse_plan_tasks(text)
+    tasks = parsed["tasks"]
+    if not tasks:
+        raise SplitterError(f"no-tasks: {plan_path}", 1)
+    broken = [f"malformed task heading at line {item['line']}" for item in parsed["malformed"]]
+    broken += [f"Task {item['id']} repeated at lines {', '.join(map(str, item['lines']))}"
+               for item in parsed["duplicates"]]
+    if broken:
+        raise SplitterError("plan-task-headings: " + "; ".join(broken), 1)
+    parts = _parts_shape(payload)
+    errors, warnings = check_parts(tasks, parts)
+    if errors:
+        raise SplitterError(errors[0], 1, errors=errors, warnings=warnings)
+    lines = text.splitlines()
+    loose = _lines_outside_tasks(lines, tasks)
+    if loose:
+        warnings.append("lines-outside-tasks: " + ", ".join(loose) + " (copied with the task before them)")
+    base = os.path.splitext(os.path.basename(plan_path))[0]
+    head_lines = lines[:tasks[0]["line_start"] - 1]
+    header = _plan_header(lines, tasks[0]["line_start"])
+    title = payload.get("title") or next((m.group(1) for m in map(H1_RE.match, head_lines) if m), base)
+    overview = payload.get("overview") or next((m.group(1) for m in map(GOAL_RE.match, head_lines) if m), "")
+    spans = _task_spans(lines, tasks)
+    order = {task["id"]: index for index, task in enumerate(tasks)}
+    by_id = {task["id"]: task for task in tasks}
+    blocks = {part["id"]: [other["id"] for other in parts if part["id"] in other["depends"]] for part in parts}
+    files = [(roadmap_filename(base), _render_roadmap(base, title, overview, parts, blocks, lang))]
+    summary = []
+    for part in parts:
+        own = sorted((by_id[task_id] for task_id in part["tasks"]), key=lambda task: order[task["id"]])
+        files.append((stage_filename(base, part["id"]),
+                      _render_part(base, part, own, spans, header, blocks[part["id"]], lang)))
+        summary.append({"id": part["id"], "tasks": len(own)})
+    return {"base": base, "files": files, "parts": summary, "warnings": warnings}
+
+
+PART_TEXT_KEYS = ("id", "title", "group", "weight", "goal", "inputs", "outputs", "notes")
+PART_LIST_KEYS = ("depends", "tasks")
+
+
+def _parts_shape(payload: Dict[str, object]) -> List[Dict[str, object]]:
+    """The parts of parts.json after a shape check; every violation goes into one SplitterError (exit 2)."""
+    parts = payload.get("parts")
+    if not isinstance(parts, list) or not parts:
+        raise SplitterError("parts-json-invalid: 'parts' must be a non-empty list", 2)
+    problems = [f"'{key}' must be a string" for key in ("title", "overview")
+                if key in payload and not isinstance(payload[key], str)]
+    for index, part in enumerate(parts):
+        where = f"parts[{index}]"
+        if not isinstance(part, dict):
+            problems.append(f"{where} must be an object")
+            continue
+        problems += [f"{where}.{key} must be a string" for key in PART_TEXT_KEYS if not isinstance(part.get(key), str)]
+        for key in PART_LIST_KEYS + (("criteria",) if "criteria" in part else ()):
+            value = part.get(key)
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                problems.append(f"{where}.{key} must be a list of strings")
+        for key in ("title", "group", "weight"):
+            value = part.get(key)
+            if isinstance(value, str) and ("|" in value or "\n" in value or not value.strip()):
+                problems.append(f"{where}.{key} must be one non-empty line without '|'")
+    if problems:
+        raise SplitterError("parts-json-invalid: " + "; ".join(problems), 2)
+    return parts
+
+
+def _load_parts(path: str) -> Dict[str, object]:
+    try:
+        return _load_json(path)
+    except (ValueError, OSError, UnicodeDecodeError) as exc:
+        raise SplitterError(f"parts-json-invalid: {exc}", 2) from exc
 
 
 def count_tasks_in_original(text: str) -> int:
@@ -548,7 +990,31 @@ def task_property_lines(text: str) -> List[str]:
     return [line.strip() for line in _lines_outside_fences(text) if TASK_LINE_RE.match(line)]
 
 
-def cmd_validate_all(directory: str, base_name: str) -> None:
+def task_bodies_check(original_text: str, stage_texts: Dict[str, str]) -> Optional[Dict[str, object]]:
+    """Task bodies of the parts against the plan by the shared parser's sha1: every plan task exactly once.
+    None when the plan has no contract tasks (such a plan keeps the previous checks only)."""
+    module = _brainstorm_required()
+    plan = module.parse_plan_tasks(original_text)
+    if not plan["tasks"] or plan["malformed"]:
+        return None
+    wanted = {task["sha1"] for task in plan["tasks"]}
+    seen: Dict[str, int] = {}
+    foreign: List[str] = []
+    for stage_id, text in stage_texts.items():
+        for task in module.parse_plan_tasks(text)["tasks"]:
+            if task["sha1"] in wanted:
+                seen[task["sha1"]] = seen.get(task["sha1"], 0) + 1
+            else:
+                foreign.append(f"{stage_id}: Task {task['id']}")
+    return {"plan": len(plan["tasks"]),
+            "matched": sum(1 for task in plan["tasks"] if seen.get(task["sha1"]) == 1),
+            "missing": [task["id"] for task in plan["tasks"] if not seen.get(task["sha1"])],
+            "duplicated": [task["id"] for task in plan["tasks"] if seen.get(task["sha1"], 0) > 1],
+            "foreign": foreign}
+
+
+def cmd_validate_all(directory: str, base_name: str, skip_task_bodies: bool = False) -> None:
+    _brainstorm_required()
     if not os.path.isdir(directory):
         print_json({"valid": False, "error": f"Directory not found: {directory}"}, 1)
 
@@ -629,11 +1095,11 @@ def cmd_validate_all(directory: str, base_name: str) -> None:
             "original_tasks": original_tasks,
             "stage_tasks_total": stage_tasks_total,
             "per_stage": per_stage,
-            "ok": stage_tasks_total >= original_tasks if original_tasks > 0 else True,
+            "ok": stage_tasks_total == original_tasks if original_tasks > 0 else True,
         }
-        if original_tasks > 0 and stage_tasks_total < original_tasks:
+        if original_tasks > 0 and stage_tasks_total != original_tasks:
             errors.append(
-                f"Task coverage below original: stages have {stage_tasks_total} "
+                f"Task coverage differs from original: stages have {stage_tasks_total} "
                 f"vs original {original_tasks}"
             )
         coverage["original_hash"] = sha256_file(original_path)
@@ -651,6 +1117,20 @@ def cmd_validate_all(directory: str, base_name: str) -> None:
         task_lines = {"original": len(original_lines), "missing": missing_lines}
         errors.extend(f"Task line not copied verbatim into any part: {line}" for line in missing_lines)
 
+    # 7. Task bodies: every plan task body is in exactly one part, byte for byte (shared parser, sha1).
+    # --skip-task-bodies: after a full-cycle deep verification, which edits the parts.
+    task_bodies: Optional[Dict[str, object]] = None
+    if os.path.isfile(original_path) and not skip_task_bodies:
+        task_bodies = task_bodies_check(read_text(original_path),
+                                        {sid: read_text(fpath) for sid, fpath in stage_files.items()})
+        if task_bodies is not None:
+            if task_bodies["missing"]:
+                errors.append("Task bodies missing from the parts: " + ", ".join(task_bodies["missing"]))
+            if task_bodies["duplicated"]:
+                errors.append("Task bodies in more than one part: " + ", ".join(task_bodies["duplicated"]))
+            if task_bodies["foreign"]:
+                errors.append("Part tasks not in the plan: " + ", ".join(task_bodies["foreign"]))
+
     valid = not errors
     print_json(
         {
@@ -659,6 +1139,7 @@ def cmd_validate_all(directory: str, base_name: str) -> None:
             "stages": stages,
             "coverage": coverage,
             "task_lines": task_lines,
+            "task_bodies": task_bodies,
         },
         0 if valid else 1,
     )
@@ -849,6 +1330,77 @@ def cmd_hash(path: str) -> None:
     print(sha256_file(path))
 
 
+# ---------- gate ----------
+
+def _flag_value(flags: List[str], flag: str) -> Optional[str]:
+    """_get_flag with its ValueError ("Missing value for <flag>") turned into SplitterError exit 2, so the
+    new commands answer a flag without a value with JSON and the input-error code."""
+    try:
+        return _get_flag(flags, flag)
+    except ValueError as exc:
+        raise SplitterError(str(exc), 2) from exc
+
+
+def cmd_gate(plan_path: str, flags: List[str]) -> None:
+    thresholds: Dict[str, int] = {}
+    for flag, key in GATE_FLAGS:
+        raw = _flag_value(flags, flag)
+        if raw is None:
+            continue
+        if not raw.isdigit():
+            raise SplitterError(f"{flag} needs a non-negative integer, got {raw}", 2)
+        thresholds[key] = int(raw)
+    print_json(gate_verdict(plan_path, thresholds), 0)
+
+
+# ---------- split-write ----------
+
+def _atomic_write(path: str, content: str) -> None:
+    """Write through a temp file in the same folder and os.replace: a file is either old or complete."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".splitter-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def cmd_split_write(plan_path: str, flags: List[str]) -> None:
+    parts_path = _flag_value(flags, "--parts")
+    if not parts_path:
+        raise SplitterError("split-write needs --parts <parts.json>", 2)
+    text = _read_plan(plan_path)
+    lang = _flag_value(flags, "--lang") or detect_lang_for_text(text)[0]
+    if lang not in ("ru", "en"):
+        raise SplitterError(f"--lang must be ru or en, got {lang}", 2)
+    payload = _load_parts(parts_path)
+    plan_sha = sha256_file(plan_path)
+    rendered = render_split(plan_path, payload, lang)
+    directory = os.path.dirname(os.path.abspath(plan_path))
+    existing = [name for name, _ in rendered["files"] if os.path.exists(os.path.join(directory, name))]
+    if existing and "--force" not in flags:
+        raise SplitterError("exists", 1, errors=[f"exists: {', '.join(existing)}"], exists=existing)
+    written: List[str] = []
+    for name, content in rendered["files"]:
+        try:
+            _atomic_write(os.path.join(directory, name), content)
+        except OSError as exc:
+            raise SplitterError(f"write-failed: {name}: {exc}", 1, written=written) from exc
+        written.append(name)
+    if sha256_file(plan_path) != plan_sha:
+        raise SplitterError("plan-changed: the source plan changed during split-write", 1, written=written)
+    sizes = {name: len(content.encode("utf-8")) for name, content in rendered["files"]}
+    parts = []
+    for item in rendered["parts"]:
+        name = stage_filename(rendered["base"], item["id"])
+        parts.append(dict(item, path=os.path.join(directory, name), bytes=sizes[name]))
+    print_json({"ok": True, "roadmap": os.path.join(directory, written[0]), "parts": parts, "plan_sha256": plan_sha,
+                "lang": lang, "warnings": rendered["warnings"], "written": written}, 0)
+
+
 # ---------- main ----------
 
 USAGE = """Usage:
@@ -858,11 +1410,13 @@ USAGE = """Usage:
   splitter_tool.py detect-lang <file>
   splitter_tool.py validate-stage <file>
   splitter_tool.py validate-roadmap <file>
-  splitter_tool.py validate-all <dir> <base_name>
+  splitter_tool.py validate-all <dir> <base_name> [--skip-task-bodies]
   splitter_tool.py verify-baseline <dir> <base_name> [--stages all|a[,b...]] [--out <file>]
   splitter_tool.py verify-record <dir> <base_name> --results <file|-> --ledger <file> [--mode full-cycle|audit-only]
   splitter_tool.py verify-status <dir> <base_name> --baseline <file> --ledger <file> --validator <file> [--stages all|a[,b...]]
   splitter_tool.py hash <file>
+  splitter_tool.py gate <plan> [--keep-tasks N] [--keep-bytes N] [--split-tasks N] [--split-bytes N] [--modules N]
+  splitter_tool.py split-write <plan> --parts <parts.json> [--lang ru|en] [--force]
 """
 
 
@@ -885,8 +1439,8 @@ def main(argv: List[str]) -> None:
             cmd_validate_stage(args[0])
         elif cmd == "validate-roadmap" and len(args) == 1:
             cmd_validate_roadmap(args[0])
-        elif cmd == "validate-all" and len(args) == 2:
-            cmd_validate_all(args[0], args[1])
+        elif cmd == "validate-all" and len(args) in (2, 3) and args[2:] in ([], ["--skip-task-bodies"]):
+            cmd_validate_all(args[0], args[1], skip_task_bodies=len(args) == 3)
         elif cmd == "verify-baseline" and len(args) >= 2:
             stages_arg = _get_flag(args[2:], "--stages", "all") or "all"
             cmd_verify_baseline(args[0], args[1], stages_arg, _get_flag(args[2:], "--out"))
@@ -907,9 +1461,15 @@ def main(argv: List[str]) -> None:
             cmd_verify_status(args[0], args[1], baseline_path, ledger_path, validator_path, stages_arg)
         elif cmd == "hash" and len(args) == 1:
             cmd_hash(args[0])
+        elif cmd == "gate" and args:
+            cmd_gate(args[0], args[1:])
+        elif cmd == "split-write" and args:
+            cmd_split_write(args[0], args[1:])
         else:
             sys.stderr.write(USAGE)
             sys.exit(2)
+    except SplitterError as e:
+        print_json(dict(e.details, ok=False, errors=e.details.get("errors") or [str(e)]), e.code)
     except Exception as e:
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)

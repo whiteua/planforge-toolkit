@@ -1872,5 +1872,145 @@ class TestSharedTaskParser(PlanTestCase):
         self.assertEqual([u["id"] for u in units], ["task-1", "task-2"])
 
 
+class TestPartField(unittest.TestCase):
+    def test_part_is_kept_only_when_given(self):
+        tool = load_tool()
+        self.assertEqual(tool._full_unit({"id": "task-1", "part": "a"})["part"], "a")
+        self.assertNotIn("part", tool._full_unit({"id": "task-1"}))
+        schema = json.loads((ROOT / "assets" / "ledger.schema.json").read_text(encoding="utf-8"))
+        items = schema["properties"]["units"]["items"]
+        self.assertEqual(items["properties"]["part"]["type"], "string")
+        self.assertNotIn("part", items["required"])
+
+
+MASTER = "# P\n\n**Tier:** Deep\n\n### Task 1: First\n\n### Task 1.1: Second\n\n### Task 2: Checkpoint — smoke\n"
+PART_A = (
+    "# Stage a: A\n\n> Source: [plan01-impl.md](./plan01-impl.md)\n\n## Goal\n\nG\n\n## Inputs\n\nNone.\n\n"
+    "## Tasks\n\n1. Task 1: First\n2. Task 1.1: Second\n\n"
+    "### Task 1: First\n\n**Files:**\n- Modify: `src/a.py`\n\n- [ ] **Step 1:** x\n\n"
+    "### Task 1.1: Second\n\n**Files:**\n- Test: `tests/test_a.py`\n\n- [ ] **Step 1:** y\n\n"
+    "## Completion criteria\n\n- [ ] Task 1: done\n\n## Outputs (handoff)\n\n`src/a.py` changed.\n\n## Notes\n\n—\n"
+)
+PART_B = (
+    "# Stage b: B\n\n> Source: [plan01-impl.md](./plan01-impl.md)\n\n## Goal\n\nG\n\n## Inputs\n\nPart a.\n\n"
+    "## Tasks\n\n1. Task 2: Checkpoint — smoke\n\n### Task 2: Checkpoint — smoke\n\n- [ ] **Step 1:** run\n\n"
+    "**Done when:** ok\n\n## Completion criteria\n\n- [ ] Task 2: ok\n\n## Outputs (handoff)\n\nNothing.\n\n"
+    "## Notes\n\n—\n"
+)
+ROADMAP_AB = (
+    "# Roadmap: P\n\n> Source: [plan01-impl.md](./plan01-impl.md)\n\n"
+    "| Stage | Title | Depends on | Parallel group | Weight |\n|---|---|---|---|---|\n"
+    "| a | A | — | A | 🟡 medium |\n| b | B | a | B | 🟢 light |\n"
+)
+
+
+class TestPartCheckpointLines(unittest.TestCase):
+    def test_criteria_and_handoff_until_notes(self):
+        tool = load_tool()
+        lines = PART_A.splitlines()
+        first, last = tool._part_checkpoint_lines(lines, lines.index("### Task 1.1: Second"))
+        self.assertEqual((lines[first - 1], lines[last - 1]), ("## Completion criteria", "`src/a.py` changed."))
+        self.assertIsNone(tool._part_checkpoint_lines(["# Stage a", "", "## Notes", ""], 0))
+        ru = ["### Task 1: x", "", "## Критерии завершения", "", "- [ ] ok", "", "## Примечания", "—"]
+        self.assertEqual(tool._part_checkpoint_lines(ru, 1), (3, 5))
+
+
+class _SplitCase(PlanTestCase):
+    def write_split(self, part_a=PART_A, part_b=PART_B):
+        self.plan(MASTER)
+        self.plan(part_a, name="plan01-impl-a.md")
+        self.plan(part_b, name="plan01-impl-b.md")
+        roadmap = self.plan(ROADMAP_AB, name="plan01-impl-roadmap.md")
+        rows = self.tool.parse_roadmap(roadmap)
+        for row in rows:
+            row["source"] = self.tool._stage_source(roadmap, row["stage"])
+        return roadmap, rows
+
+
+class TestStagedUnits(_SplitCase):
+    def test_tasks_and_checkpoints_in_roadmap_order(self):
+        roadmap, rows = self.write_split()
+        units, warnings = self.tool._staged_units(roadmap, rows)
+        self.assertEqual(warnings, [])
+        self.assertEqual([(u["id"], u["depends"], u["part"], u["parallel_group"], u["weight"]) for u in units],
+                         [("task-1", [], "a", "A", "red"), ("task-1.1", ["task-1"], "a", "A", "yellow"),
+                          ("part-a-done", ["task-1.1"], "a", "A", "green"),
+                          ("task-2", ["part-a-done"], "b", "B", "green"),
+                          ("part-b-done", ["task-2"], "b", "B", "green")])
+        lines = PART_A.splitlines()
+        self.assertEqual(units[0]["source"]["line_start"], lines.index("### Task 1: First") + 1)
+        self.assertEqual(lines[units[2]["source"]["line_start"] - 1], "## Completion criteria")
+        self.assertEqual(units[2]["title"], "Checkpoint — part a")
+
+    def test_part_without_tasks_stays_one_unit(self):
+        roadmap, rows = self.write_split(part_a="# Stage a\n\n## Tasks\n1. do\n")
+        units, warnings = self.tool._staged_units(roadmap, rows)
+        self.assertEqual(warnings, ["part-without-tasks: a"])
+        self.assertEqual([u.get("id", u.get("stage")) for u in units], ["a", "task-2", "part-b-done"])
+        self.assertEqual(units[1]["depends"], ["a"])
+
+    def test_part_without_criteria_and_duplicate_ids(self):
+        roadmap, rows = self.write_split(part_b=PART_B.split("## Completion criteria")[0])
+        units, warnings = self.tool._staged_units(roadmap, rows)
+        self.assertEqual(warnings, ["part-without-criteria: b"])
+        self.assertIsNone(units[-1]["source"])
+        self.assertIn("no completion criteria", units[-1]["title"])
+        roadmap, rows = self.write_split(part_b=PART_A.replace("Stage a", "Stage b"))
+        with self.assertRaises(ValueError) as ctx:
+            self.tool._staged_units(roadmap, rows)
+        self.assertIn("duplicate-unit-id: task-1", str(ctx.exception))
+
+
+class TestStagedLedger(_SplitCase):
+    def test_ledger_init_runs_the_tasks_of_the_parts(self):
+        roadmap, _ = self.write_split()
+        led = self.init(roadmap)
+        self.assertEqual([u["id"] for u in led["units"]],
+                         ["task-1", "task-1.1", "part-a-done", "task-2", "part-b-done"])
+        self.assertEqual((led["input_type"], led["units"][0]["part"], led["warnings"]), ("staged", "a", []))
+        begun = self.tool.unit_begin(self.exec_dir)
+        self.assertTrue(begun["text"].startswith("### Task 1: First"))
+        self.assertNotIn("### Task 1.1", begun["text"])
+        self.assertEqual([f["path"] for f in begun["files"]], ["src/a.py"])
+        self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+        self.tool.unit_begin(self.exec_dir)
+        self.tool.unit_finish(self.exec_dir, "task-1.1", "pass")
+        check = self.tool.unit_begin(self.exec_dir)
+        self.assertEqual(check["unit"]["id"], "part-a-done")
+        self.assertTrue(check["text"].startswith("## Completion criteria"))
+        self.assertEqual(self.tool.unit_finish(self.exec_dir, "part-a-done", "pass")["unit"]["status"], "done")
+
+    def test_old_ledger_resumes_without_drift(self):
+        roadmap, rows = self.write_split()
+        self.tool.ledger_init(self.exec_dir, roadmap, "staged", rows,
+                              source_sha256=self.tool._staged_sha256(roadmap, rows))
+        led = self.init(roadmap)
+        self.assertEqual([u["id"] for u in led["units"]], ["a", "b"])
+        self.assertEqual(self.tool.validate_ledger(self.tool._load(self.exec_dir)), [])
+        self.assertTrue(self.tool.unit_begin(self.exec_dir)["text"].startswith("# Stage a: A"))
+
+    def test_accept_drift_on_an_old_ledger_starts_the_tasks_again(self):
+        roadmap, rows = self.write_split()
+        self.tool.ledger_init(self.exec_dir, roadmap, "staged", rows,
+                              source_sha256=self.tool._staged_sha256(roadmap, rows))
+        self.tool.ledger_mark(self.exec_dir, "a", "running")
+        self.tool.ledger_mark(self.exec_dir, "a", "done")
+        (self.root / "plan01-impl-b.md").write_text(PART_B.replace("run", "run twice"), encoding="utf-8")
+        tasks = ["task-1", "task-1.1", "part-a-done", "task-2", "part-b-done"]
+        with self.assertRaises(ValueError) as ctx:
+            self.init(roadmap)
+        self.assertEqual(ctx.exception.details, {"added": tasks, "removed": ["a", "b"]})
+        led = self.init(roadmap, accept_drift=True)
+        self.assertEqual([(u["id"], u["status"]) for u in led["units"]], [(unit, "pending") for unit in tasks])
+
+    def test_changed_part_is_drift(self):
+        roadmap, _ = self.write_split()
+        self.init(roadmap)
+        (self.root / "plan01-impl-b.md").write_text(PART_B.replace("run", "run twice"), encoding="utf-8")
+        with self.assertRaises(ValueError) as ctx:
+            self.init(roadmap)
+        self.assertIn("plan-drift", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

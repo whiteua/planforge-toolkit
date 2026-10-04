@@ -40,7 +40,7 @@ In VS Code Copilot chat, type:
 
 | Input | Detection | Behavior |
 |---|---|---|
-| Staged roadmap (`-roadmap.md`) | Stage table + dependencies | Parts in dependency order; each part's text is its `<base>-<id>.md` (`a`, `b`, …) |
+| Staged roadmap (`-roadmap.md`) | Stage table + dependencies | The tasks of each part `<base>-<id>.md` (`a`, `b`, …) in dependency order, one unit per task, then a checkpoint `part-<id>-done` per part; a part without task headings is one unit |
 | Whole plan (`### Task N:` headings) | Task headings outside code blocks | Tasks strictly in order; `Phase`/`Step` headings do not become units when `Task` headings exist |
 
 ## What Happens

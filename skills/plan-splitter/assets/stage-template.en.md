@@ -8,29 +8,45 @@
 
 ## Goal
 
-{{CLEAR_GOAL_STATEMENT}}
+{{GOAL}}
 
 ## Inputs
 
-{{INPUTS:
-- no dependencies → "Original plan: [link]. No specific inputs."
-- depends on X → the concrete artifacts/state handed off by part X}}
+{{INPUTS}}
+
+Source plan context (header, verbatim):
+
+{{PLAN_HEADER}}
 
 ## Tasks
 
-1. {{TASK_1}}
-2. {{TASK_2}}
-3. {{TASK_3}}
+{{TASK_LIST}}
+
+Run them strictly in order. The full text of each task (Files, Preconditions, Postconditions, steps, commands and expected output) follows, verbatim from the source plan.
+
+{{TASK_BODIES}}
 
 ## Completion criteria
 
-- [ ] {{CRITERION_1}}
-- [ ] {{CRITERION_2}}
+{{CRITERIA}}
 
 ## Outputs (handoff)
 
-{{HANDOFF: what this part passes to downstream parts — artifacts, state, context}}
+{{OUTPUTS}}
 
 ## Notes
 
-{{RISKS_NOTES_RECOMMENDATIONS}}
+{{NOTES}}
+
+<!-- item:task -->
+{{N}}. Task {{TASK_ID}}: {{TASK_TITLE}}
+<!-- /item -->
+<!-- item:criterion -->
+- [ ] Task {{TASK_ID}}: {{TEXT}}
+<!-- /item -->
+<!-- item:criterion-empty -->
+- [ ] Task {{TASK_ID}} is done: all its steps passed.
+<!-- /item -->
+<!-- item:criterion-text -->
+- [ ] {{TEXT}}
+<!-- /item -->

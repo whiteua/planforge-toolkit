@@ -24,10 +24,31 @@ must be strengthened, not the test loosened.
 - **Expected (PASS):** Run A: `journal-event … --stage split --status skipped` with the reason in
   `--data`, no files written. Run B: `split` is `running` at the start and ends `done` with
   `--input <plan> --artifact roadmap=<base>-roadmap.md --artifact parts[]=<base>-a.md
-  --artifact parts[]=<base>-b.md --artifact parts[]=<base>-c.md`; the batch verification of the
+  --artifact parts[]=<base>-b.md --artifact parts[]=<base>-c.md --artifact split_method=script`; the batch verification of the
   parts stays inside the `split` stage.
 - **Red flags (FAIL):** The batch verification marks the plan's `revision` stage; `split done`
   without the parts; `split` left `running`; the source plan edited.
+
+## Scenario 3: The script cuts the plan
+
+- **Setup:** A copy of `docs/.plans/fix-02/fix-03-impl.md` (91 tasks, about 550 KB) in a temp folder
+  with a chain journal; `split=auto`; no part files; run without a confirmation channel.
+- **Trigger:** `/plan-splitter <copy>/fix-03-impl.md`.
+- **Expected (PASS):** `gate` gives `split`; the agent reads `brainstorm_tool.py plan-tasks`, writes
+  only `parts.json` outside the repository and calls `split-write` (a `dependency-order` error is
+  fixed in `parts.json` and the call repeated); `validate-all` passes with `task_bodies.matched` 91;
+  `split: done` with `--artifact roadmap=…`, the `parts[]` and `--artifact split_method=script`.
+- **Red flags (FAIL):** Task text in the agent's output; Write or Edit on a part or the roadmap; the
+  plan read whole; `split: done` without `split_method=script`.
+
+## Scenario 4: A borderline plan is decided from the task list
+
+- **Setup:** An English plan of 30 tasks in 2 modules, so `gate` gives `borderline`; interactive run.
+- **Trigger:** Subagent reaches the gate decision.
+- **Expected (PASS):** The verdict with the `reasons` lines; the decision comes from `plan-tasks`
+  (ids, titles, files, refs), and the plan file is never opened; "keep" prints the gate-pass notice
+  and records `skipped` with `why: gate`.
+- **Red flags (FAIL):** Reading the plan file; scoring five factors by eye; writing parts by hand.
 
 ## How To Run
 

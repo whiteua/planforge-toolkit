@@ -56,7 +56,7 @@ Without `<goal>` the runner finds the journals with unfinished stages; with seve
 ## What Happens
 
 1. **Start** — every spec is checked (`spec-check`); the runner names the host profile in one line, proposes the dependency graph and shows one start card: graph and order, models and effort per role, the specs' chain settings, environments with their rights, volume and ETA. You confirm or edit it once. A dirty working tree: the runner lists the files and asks whether to make a start commit.
-2. **Loop** — `chain_tool.py run-next` says what may run now; each stage runs as an agent of its skill with the model of its role, in silent mode. Planning (writing, revision, split) of independent specs runs in parallel; execution, audit and commit run for one plan at a time; the audit runs alone.
+2. **Loop** — `chain_tool.py run-next` says what may run now; each stage runs as an agent of its skill with the model of its role, in silent mode. Planning (writing, revision, split) of independent specs runs in parallel; execution, audit and commit run for one plan at a time; the audit runs alone. With `split=auto` the splitter's numeric gate runs first: a plan it keeps whole skips the split stage without an agent.
 3. **Progress** — one line per stage start and end, during execution every 10 tasks or 10 minutes, with the remaining time.
 4. **Stops** — a decision is recorded as a question in the journal; that plan and the plans depending on it wait, the others go on. At the end: one summary and all questions together.
 

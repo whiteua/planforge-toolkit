@@ -45,9 +45,10 @@ the machine gate `verify-status`. Read this before step 8.
    The tool upserts one ledger entry per part and counts attempts.
 4. Gate: `TOOL verify-status DIR BASE --baseline DIR/<BASE>-verify-baseline.json --ledger DIR/<BASE>-verify-ledger.json --validator <VALIDATOR> --stages <scope>`
    (with `all`, the gate covers the parts present in the baseline).
-5. `full-cycle` only, after the gate passed: the parts were edited, so run `TOOL validate-all DIR BASE`
-   again and re-check the handoff (outputs of X still cover the inputs of every Y that depends
-   on X). A failure here is fixed like a step-6 defect.
+5. `full-cycle` only, after the gate passed: the parts were edited, so run
+   `TOOL validate-all DIR BASE --skip-task-bodies` again (edited task texts no longer match the plan
+   byte for byte) and re-check the handoff (outputs of X still cover the inputs of every Y that
+   depends on X). A failure here is fixed like a step-6 defect.
 
 ## Verdicts (from `verify-status`)
 

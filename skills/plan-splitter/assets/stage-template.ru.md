@@ -8,29 +8,45 @@
 
 ## Цель
 
-{{CLEAR_GOAL_STATEMENT}}
+{{GOAL}}
 
 ## Входные данные
 
-{{INPUTS:
-- нет зависимостей → «Оригинальный план: [ссылка]. Специфических входов нет.»
-- зависит от X → конкретные артефакты/состояние, передаваемые частью X}}
+{{INPUTS}}
+
+Контекст исходного плана (шапка, дословно):
+
+{{PLAN_HEADER}}
 
 ## Задачи
 
-1. {{TASK_1}}
-2. {{TASK_2}}
-3. {{TASK_3}}
+{{TASK_LIST}}
+
+Выполнять строго по порядку. Полный текст каждой задачи (Files, Preconditions, Postconditions, шаги, команды и ожидаемый вывод) — ниже, дословно из исходного плана.
+
+{{TASK_BODIES}}
 
 ## Критерии завершения
 
-- [ ] {{CRITERION_1}}
-- [ ] {{CRITERION_2}}
+{{CRITERIA}}
 
 ## Выходные данные (handoff)
 
-{{HANDOFF: что эта часть передаёт следующим — артефакты, состояние, контекст}}
+{{OUTPUTS}}
 
 ## Примечания
 
-{{RISKS_NOTES_RECOMMENDATIONS}}
+{{NOTES}}
+
+<!-- item:task -->
+{{N}}. Task {{TASK_ID}}: {{TASK_TITLE}}
+<!-- /item -->
+<!-- item:criterion -->
+- [ ] Task {{TASK_ID}}: {{TEXT}}
+<!-- /item -->
+<!-- item:criterion-empty -->
+- [ ] Task {{TASK_ID}} выполнена: все её шаги пройдены.
+<!-- /item -->
+<!-- item:criterion-text -->
+- [ ] {{TEXT}}
+<!-- /item -->

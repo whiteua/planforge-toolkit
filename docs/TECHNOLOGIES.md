@@ -100,11 +100,11 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Hierarchical decomposition | WBS — Work Breakdown Structure (PMBOK/PMI, 1987); SAFe decomposition (Dean Leffingwell, ~2011) | Plan is split into self-contained parts |
 | DAG dependencies | Make (Stuart Feldman, 1976); Bazel (Google, 2015); Apache Airflow DAGs (2015) | Stages declare explicit dependency edges |
 | Self-contained bounded units | Bounded Context (Eric Evans, DDD, 2003); Independent Deployability (Sam Newman, 2015) | Each part is executable without back-references |
-| "Do not split" gate | Stage-Gate kill decision (Cooper, 1986) | Splitting is refused when the plan is already atomic |
+| "Do not split" gate | Stage-Gate kill decision (Cooper, 1986); threshold rules | `gate` decides by numbers (tasks, bytes, modules, dependency shape): keep, split or borderline; only borderline goes to the model, which reads the task list, not the plan |
 | Roadmap file | Project Charter (PMBOK) | `<base>-roadmap.md` holds the dependency table and parallel groups; parts are `<base>-a.md`, `-b.md`, … |
-| Three-level verification | Three Lines of Defense (Basel Committee, ~2000s); Multi-tier code review (Google, Microsoft) | A: formal checks (`validate-all`), B: cross-validation (task coverage, origin hash), C: the agent re-reads every part for self-sufficiency and handoff |
+| Three-level verification | Three Lines of Defense (Basel Committee, ~2000s); Multi-tier code review (Google, Microsoft) | A: formal checks (`validate-all`), B: cross-validation (equal task coverage, task bodies by hash, origin hash), C: handoff between parts |
 | Deep verification with a machine gate | Red Team / Blue Team (military, cybersecurity, ~1990s); Independent QA team; Quality Gates (SonarQube) | One `plan-iterative-revision` run audits every part in turn; `verify-status` accepts a claimed result only when the review files and part hashes prove it |
-| Task properties carried verbatim | Lossless transformation; traceability | `**External:**` and `**Size:**` lines move into the parts unchanged; the `split` setting replaces the gate in a chain |
+| Task text copied by script | Lossless transformation; content-addressed verification | `split-write` copies every task's text byte for byte, so `**External:**` and `**Size:**` lines stay in place; `validate-all` compares the task bodies by hash; the `split` setting replaces the gate in a chain |
 
 ---
 
@@ -120,6 +120,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Destructive operation confirmation | Terraform plan output with confirmation prompt (2014) | Irreversible actions require explicit approval |
 | Retry-first ordering with stagnation stop | Circuit breaker (Nygard, *Release It!*, 2007); bounded retry with backoff | A failed unit is retried before anything else runs; 3 attempts or the same error signature twice stops the run |
 | Drift detection on resume | Terraform state refresh / plan drift (HashiCorp); lockfile hashes (npm, Cargo) | The ledger stores the plan's SHA-256; a changed plan stops the run until the engineer decides |
+| Task-level units in split parts | Work packages (WBS); savepoints per statement | A roadmap's units are the tasks of its parts plus one checkpoint per part, so gates, snapshots and context stay at the size of one task |
 | Confirmation for external units | Change approval for production access (ITIL change enablement); least privilege; standard changes pre-approved | A unit marked `External` runs without a question only when its access is `run` in the settings or consented for the run (`consent`); `unit-begin` reports `confirmed` and the `source` of the consent, and run consents are cleared on resume |
 | Foreign-change detection | File integrity monitoring (Tripwire, 1992); expected-state comparison | `unit-begin` compares the working tree with the ledger's `expected_tree` and stops with `foreign-changes` (added, modified, deleted paths) before the next unit |
 | Per-file restore | Partial rollback; `git checkout <tree> -- <paths>` | `checkpoint-restore --paths` restores only the listed files; `--exec-dir` moves the expected tree so a retry raises no false alarm |
@@ -157,6 +158,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Technique | Origin | How it's applied |
 |---|---|---|
 | Dependency-graph scheduling | Make (Stuart Feldman, 1976); Apache Airflow DAG scheduler (2015) | `run-next` issues a spec's stages only after the specs it depends on are committed; independent specs are planned in parallel up to `parallel` |
+| Gate before launch | Admission control; short-circuit evaluation | With `split=auto`, `run-next` calls the splitter's `gate_verdict` in-process and skips the split stage for a plan it keeps whole; a failing gate never blocks the chain (`gate-unavailable`) |
 | Mutual exclusion for code stages | Critical sections (Dijkstra, 1965); single-writer principle | Execution, diffs, audit and commit run for one plan at a time, because the executor and the resolver watch the whole working tree |
 | Quiescent audit | Write freeze during an audit; snapshot isolation | Nothing else is issued while an audit runs, and the runner writes nothing into the journal then; only the session file outside the working tree |
 | Trust, but verify agent reports | Reconciliation loop (Kubernetes controllers, 2014) | A stage counts as done only when `journal-reconcile` and `journal-show` confirm it; an unconfirmed stage after any return of the agent (or 60 minutes of silence) gets one retry, then a `not-confirmed:` question |

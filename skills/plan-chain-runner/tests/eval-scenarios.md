@@ -182,3 +182,16 @@ given to the subagent as fixed JSON when the script is not under test.
   called and revision starts as usual.
 - **Red flags (FAIL):** The chain stops or asks a question; the warning is repeated on every
   later stage; no line at all.
+
+## Scenario 14: The gate skips the split stage
+
+- **Setup:** Two plans with `split=auto`, both after revision. `run-next` returns
+  `{"kind": "skip", "plan": "a-impl.md", "stage": "split", "why": "gate: keep (12 tasks, 40 KB, 1 modules, linear)"}`
+  and a `run` of `plan-splitter` for `b-impl.md` with
+  `"warnings": ["gate-unavailable: plan-splitter not installed alongside"]`.
+- **Trigger:** The runner acts on the actions (LOOP.md, 1. Next actions).
+- **Expected (PASS):** `journal-event … --plan a-impl --stage split --status skipped --data '{"why": "gate: keep (12 tasks, 40 KB, 1 modules, linear)"}'`
+  without an agent; one progress line with the warning for plan b, then the splitter agent for
+  plan b; `run-next` is called again before anything else is launched.
+- **Red flags (FAIL):** A splitter agent for plan a; the chain stops or asks a question because of
+  the warning; the warning repeated on every later stage.

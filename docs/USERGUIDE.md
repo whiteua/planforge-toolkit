@@ -190,7 +190,7 @@ Settings are not copied into the plan: `plan-check` reads them from the spec nam
 
 With `verify`, the skill runs `plan-iterative-revision` once over the roadmap (every selected part in turn, one review trail each) and accepts the result only through the machine gate `verify-status`. Requires `plan-iterative-revision` installed next to it.
 
-**Gate decision:** The skill evaluates 5 factors and may decide the plan does NOT need splitting. This is a valid outcome — you'll get a `gate-pass` notice and can proceed directly to `plan-executor`.
+**Gate decision:** `splitter_tool.py gate` decides by numbers (tasks, bytes, modules, dependency shape) and may decide the plan does NOT need splitting. This is a valid outcome — you'll get a `gate-pass` notice and can proceed directly to `plan-executor`. When the plan is split, the model only chooses the part boundaries from the task list; `split-write` writes the roadmap and the parts and copies every task's text byte for byte, and `validate-all` checks the copy.
 
 In a chain, the `split` setting decides: `always` skips the gate, `never` means no split. `**External:**` lines of tasks are copied into the parts verbatim.
 
@@ -217,7 +217,7 @@ In a chain, the `split` setting decides: `always` skips the gate, `never` means 
 
 | Input | Detection | Behavior |
 |---|---|---|
-| Staged roadmap (`-roadmap.md`) | Has part table + dependencies | Executes parts in dependency order |
+| Staged roadmap (`-roadmap.md`) | Has part table + dependencies | Executes the tasks of each part in dependency order, one task per unit, and closes each part with a checkpoint unit |
 | Whole plan (with `### Task N:` headings) | Task headings outside code blocks | Executes tasks strictly in order; a failed task is retried before anything else |
 
 **Phases:**
@@ -337,7 +337,7 @@ Without a goal the runner looks for `*-chain.json` journals with unfinished stag
 
 **Loop.** `run-next` names the stages to run now; each is launched as an agent of the host profile with the model of its role and a silent brief: run `/<skill> <args>`, there is no confirmation channel, a needed decision is recorded with `journal-question` and the agent stops. After each agent the runner checks the journal and the artifacts, never the agent's word. Progress lines in the spec's language: start and end of each stage with the remaining time, execution progress every 10 tasks or 10 minutes, and a line when an agent is silent for more than 10 minutes.
 
-**Scheduling.** The stages of a plan go in order; independent specs are planned in parallel; execution, diffs, audit and commit run for one plan at a time; nothing else runs during an audit; a spec that depends on another starts after that spec's commit. A plan stopped on a question waits with the specs that depend on it; the others go on.
+**Scheduling.** The stages of a plan go in order; independent specs are planned in parallel; execution, diffs, audit and commit run for one plan at a time; nothing else runs during an audit; a spec that depends on another starts after that spec's commit. A plan stopped on a question waits with the specs that depend on it; the others go on. With `split=auto` the splitter's gate runs before the split stage: a plan it keeps whole skips the stage without an agent.
 
 **Stops and questions.** At the end you get one summary (per plan: the plan, reviews, roadmap, ledger, report, `-diffs.md`, commits; plus `<goal>-followups.json` and the BACKLOG lines) and all open questions at once. `discuss` takes them one by one with options and a recommendation and records your answers; an answer that changes a spec's Goal, Components or Out of Scope is handed to `/plan-brainstorming <spec>` (amend mode). `continue` resumes: the owner of each stage applies the answers.
 

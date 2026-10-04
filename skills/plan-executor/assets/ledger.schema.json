@@ -85,6 +85,10 @@
               "null"
             ]
           },
+          "part": {
+            "type": "string",
+            "description": "Part id (a, b, …) of a staged unit taken from a part's tasks or its checkpoint; absent for whole plans, hand-written parts and old ledgers"
+          },
           "last_error": {
             "type": [
               "string",

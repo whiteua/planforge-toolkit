@@ -242,7 +242,8 @@ given to the subagent as fixed JSON when the script is not under test.
   execution.
 - **Trigger:** `/plan-chain-runner continue`.
 - **Expected (PASS):** Before the loop: `roadmap-check`, `roadmap-parse`, `subset-check … --roadmap
-  g-roadmap.md`; the card `roadmap-changed` names the removed edge g-2 → g-3. "Apply" → `run-init` from the
+  <journal_dir>/g-roadmap.md` with one `--spec` per spec of `runner.specs`; the card `roadmap-changed` names the removed
+  edge `g-3 --> g-2`, drawn as the roadmap's `## Graph` draws it. "Apply" → `run-init` from the
   journal's directory with the same profile, models and `parallel`, the new graph and `--roadmap
   g-roadmap.md`, without `--start-commit`; then `run-next`. "Keep the old graph" → nothing written, the loop
   runs on `runner.graph`.
@@ -280,3 +281,28 @@ given to the subagent as fixed JSON when the script is not under test.
 - **Expected (PASS):** Refusal "one run is one goal" naming both journals, before `journal-path --create`;
   nothing written.
 - **Red flags (FAIL):** A run started; the spec registered in h's journal; the roadmap edited.
+
+## Scenario 22: A stop on questions sends one push
+
+- **Setup:** Profile `claude-code`; the session has the `PushNotification` tool and the host's question tool. A run
+  of two specs ends with `blocked: true`: plan A waits on Q1 (`stage-failed: revision`, options `retry` / `stop`).
+- **Trigger:** The loop's End (LOOP.md, 7), then `/plan-chain-runner discuss`.
+- **Expected (PASS):** No `run-checklist` (the run is not done); the summary with Q1 and the hint `discuss`, its
+  checklist line `—`, exactly one `PushNotification` call with one line naming the goal, the stop and `discuss`, in
+  the dialogue language, then `run-session --end stopped`. In `discuss`: Q1 is asked through the question tool with
+  `retry` and `stop` explained and one of them recommended; the answer is recorded as one token.
+- **Red flags (FAIL):** No push; a push per question or per progress line; a push while an audit agent runs; the
+  options only as text while the question tool exists; a translated token recorded; `run-checklist` on a stop with
+  open questions.
+
+## Scenario 23: A changed roadmap in a run of part of its specs
+
+- **Setup:** Goal `g` of Scenario 16; the run was started with `/plan-chain-runner g-1-spec.md g-3-spec.md`, so
+  `runner.specs` holds g-1 and g-3. Later the roadmap was amended: only the notes of g-1 changed. `run-status`
+  returns `roadmap.sha_matches: false`.
+- **Trigger:** `/plan-chain-runner continue`.
+- **Expected (PASS):** `subset-check <journal> --roadmap <journal_dir>/g-roadmap.md --spec <journal_dir>/g-1-spec.md
+  --spec <journal_dir>/g-3-spec.md`; the card `roadmap-changed` shows no edge or order change between g-1 and g-3 and
+  names g-2 as "in the roadmap, not in this run", not as an added spec; "Apply" → `run-init` with g-1 and g-3 only.
+- **Red flags (FAIL):** g-2 named as added or passed to `run-init`; `subset-check` without `--spec`; `spec-check` or
+  `journal-path --create` for g-2 without the user adding it.

@@ -105,6 +105,8 @@ instructions ("Spec written to …", "MAX review passes done …", "I'm using th
 skill …") are templates: say them in the dialogue language, not verbatim. The language is
 detected, not guessed: `ru` when more than 5% of the letters are Cyrillic, otherwise `en`.
 
+**Free backlog.** `BACKLOG.md` at the repository root is a free file: the user writes to it at any moment, and no stage treats a change to it as a foreign change.
+
 In this skill: `executor_tool.py detect-lang <plan>`; the stop reports below use the same language.
 
 ## Stop Reports

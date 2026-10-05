@@ -17,9 +17,10 @@ Commands:
   run-eta        <journal>
   run-status     <journal>
   run-stats      (<journal> | --plan PLAN) [--baseline JSON] [--json-out FILE]
+  run-checklist  <journal> [--backlog-root R]
 
 Exit codes: 0 ok, 1 contract (graph-cycle, session-active, session-stale-running, session-taken-over,
-runner-missing, no-model) or scheduler-bug (run-next, run-eta, run-status, run-stats, subset-check), 2 usage or
+runner-missing, no-model) or scheduler-bug (run-next, run-eta, run-status, run-stats, subset-check, run-checklist), 2 usage or
 I/O error (journal-corrupt, roadmap-mismatch and not-in-roadmap included).
 """
 from __future__ import annotations
@@ -1080,6 +1081,9 @@ def _dependency_wait(runner: Dict[str, Any], by_spec: Dict[str, Dict[str, Any]],
 
 
 CODE_STAGES = ("execution", "diffs", "audit", "commit")
+# Stages that read the code the holder of CODE_STAGES changes in the shared working copy (F2 of plan-refactoring-02):
+# the revision's diff guard compares the whole `git status`, so they wait for the holder; writing does not wait.
+CODE_READING_STAGES = ("revision", "split")
 
 
 def _uncommitted(state: Dict[str, Any]) -> bool:
@@ -1128,7 +1132,9 @@ def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[
     """Rules 1, 2, 4, 7-10: one step per plan that can move; every other unfinished plan goes to
     `waiting` with its reason. One plan at a time holds the code stages: the one already in them
     (even while it waits for an answer), the one with uncommitted changes first (a committed plan
-    sent back by drift must not execute over them), else the first plan in runner order that reaches them.
+    sent back by drift must not execute over them), else the first plan in runner order that reaches them
+    (taken before the loop, so a revision earlier in runner order does not start next to it). The revision
+    and split of the other plans wait for the holder too (CODE_READING_STAGES).
     Rule 9 cascade questions do not hold their plan: they become `answer` steps. A plan whose agent
     is in flight (`flying`: plan id -> stage) gets no step; an agent in a code stage holds them."""
     flying = flying or {}
@@ -1142,6 +1148,8 @@ def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[
         state["open"] = [qid for qid in state["open"] if qid not in {q["id"] for q in cascade}]
         steps.extend({"kind": "answer", "spec": state["spec"], "plan": state["entry"]["plan"], "stage": q["stage"],
                       "qid": q["id"], "answer": "rewrite", "running": False} for q in cascade)
+    holder = holder or next((state for state in states if state["entry"]["id"] not in flying and not state["open"]
+                             and state["next"] is not None and state["next"][0] in CODE_STAGES), None)
     for state in states:
         if state["entry"]["id"] in flying:
             stage = flying[state["entry"]["id"]]
@@ -1157,10 +1165,8 @@ def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[
             why = "open-question: " + ", ".join(state["open"])
         elif stage == "writing" and _record(state, "writing").get("status") == "pending":
             why = _dependency_wait(runner, by_spec, state, asks)
-        if why is None and stage in CODE_STAGES:
-            holder = holder or state
-            if holder is not state:
-                why = f"code-busy: {holder['entry']['id']}"
+        if why is None and stage in CODE_STAGES + CODE_READING_STAGES and holder is not None and holder is not state:
+            why = f"code-busy: {holder['entry']['id']}"
         step = _stage_step(data, state, stage, reason) if why is None else {"kind": "wait", "why": why}
         if step["kind"] == "wait":
             waiting.append(dict(where, reason=step["why"]))
@@ -1791,6 +1797,123 @@ def run_stats(journal: Optional[str], plan: Optional[str], baseline: Optional[st
     return out
 
 
+# run-checklist (spec 2 of plan-refactoring-02): what is left to do by hand after a run, as lines of the goal's
+# BACKLOG.md section, written only through brainstorm_tool.backlog_append; a line already open is not repeated.
+CHECKLIST_TEXT = {
+    "ru": {"skills": "обновить установленные копии скиллов после коммитов прогона: {skills}",
+           "prune": "удалить снимки закоммиченного плана {plan}: executor_tool.py checkpoint-prune {exec_dir}",
+           "unverified": "повторить контрольную проверку плана {plan} там, где есть инструмент субагента: юниты "
+                         "{units} шли в основном агенте (subagent-unavailable)",
+           "amend": "amend спеки {spec}: {count} отклонений плана {plan}, строки «поправить спеку» этого раздела"},
+    "en": {"skills": "update the installed copies of the skills after the run's commits: {skills}",
+           "prune": "remove the snapshots of the committed plan {plan}: executor_tool.py checkpoint-prune {exec_dir}",
+           "unverified": "repeat the control check of plan {plan} where a subagent tool exists: units {units} ran "
+                         "in the main agent (subagent-unavailable)",
+           "amend": "amend the spec {spec}: {count} deviation(s) of plan {plan}, the amend spec lines of this section"},
+}
+SUBAGENT_UNAVAILABLE = "subagent-unavailable"  # executor_tool.SUBAGENT_UNAVAILABLE
+
+
+def _ledger_units(exec_dir: str) -> List[Dict[str, Any]]:
+    """The units of <exec_dir>/state.json; [] when the ledger cannot be read."""
+    try:
+        with open(os.path.join(exec_dir, "state.json"), "r", encoding="utf-8") as fh:
+            units = json.load(fh).get("units")
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [unit for unit in units if isinstance(unit, dict)] if isinstance(units, list) else []
+
+
+def _checklist_items(journal: str, data: Dict[str, Any], runner: Dict[str, Any], lang: str,
+                     warnings: List[str]) -> List[str]:
+    """The checklist of the plans of runner.specs: installed skills after commits under skills/, checkpoint-prune
+    of each committed plan, units with the note subagent-unavailable, specs whose plans deviate
+    (executor_tool.plan_deviations; left out with `executor-not-installed` without plan-executor)."""
+    text = CHECKLIST_TEXT[lang]
+    folder = os.path.dirname(os.path.abspath(journal))
+    executor = _executor()
+    if executor is None:
+        warnings.append("executor-not-installed")
+    skills, items = set(), []
+    for state in _plan_states(journal, data, runner):
+        plan_id = state["entry"]["id"]
+        commit = _record(state, "commit")
+        for record in (commit.get("artifacts") or {}).get("commits") or []:
+            for path in (record.get("files") or []) if isinstance(record, dict) else []:
+                parts = str(path).replace("\\", "/").split("/")
+                if len(parts) > 2 and parts[0] == "skills":
+                    skills.add(parts[1])
+        exec_dir = (_record(state, "execution").get("artifacts") or {}).get("exec_dir")
+        units = _ledger_units(os.path.join(folder, exec_dir)) if isinstance(exec_dir, str) and exec_dir else []
+        if commit.get("status") == "done" and units:
+            items.append(text["prune"].format(plan=plan_id, exec_dir=os.path.normpath(os.path.join(folder, exec_dir))))
+        unverified = [str(unit.get("id")) for unit in units if SUBAGENT_UNAVAILABLE in (unit.get("notes") or [])]
+        if unverified:
+            items.append(text["unverified"].format(plan=plan_id, units=", ".join(unverified)))
+        if executor is not None:
+            plan = os.path.join(folder, state["entry"].get("plan") or _derived_plan(state["spec"]))
+            count = len(executor.plan_deviations(_text_metrics_text(plan), units))
+            if count:
+                items.append(text["amend"].format(spec=state["spec"], plan=plan_id, count=count))
+    if skills:
+        items.insert(0, text["skills"].format(skills=", ".join(sorted(skills))))
+    return items
+
+
+def _repo_root(start: str) -> str:
+    """backlog-append's root: the nearest folder from `start` up that holds `.git` (a folder, or the file of a
+    worktree); the working directory outside git."""
+    current = os.path.abspath(start)
+    while not os.path.exists(os.path.join(current, ".git")):
+        parent = os.path.dirname(current)
+        if parent == current:
+            return os.getcwd()
+        current = parent
+    return current
+
+
+def run_checklist(journal: str, backlog_root: Optional[str] = None) -> Dict[str, Any]:
+    """The checklist after a run (_checklist_items) appended to the goal's section of <root>/BACKLOG.md; `exists`
+    for a line already there, open or not. Without plan-brainstorming nothing is written (`backlog-unavailable`);
+    the backlog is never a gate, so a failed write is a warning."""
+    journal = os.path.abspath(journal)
+    result: Dict[str, Any] = {"ok": True, "journal": journal, "section": None, "backlog": None, "items": [],
+                              "appended": [], "exists": [], "warnings": []}
+    try:
+        bt = _brainstorm()
+    except InputError as exc:
+        result["warnings"].append(f"backlog-unavailable: {exc}")
+        return result
+    data, runner = _runner_journal(journal)
+    lang = data.get("lang") if data.get("lang") in CHECKLIST_TEXT else "en"
+    root = backlog_root or _repo_root(os.path.dirname(journal))
+    section = data["goal"]
+    items = _checklist_items(journal, data, runner, lang, result["warnings"])
+    path = os.path.join(root, bt.BACKLOG_FILE)
+    result.update(section=section, backlog=path, items=items)
+    try:
+        known = {item["text"] for item in bt.backlog_parse(path, section)["items"]} if os.path.isfile(path) else set()
+    except Exception as exc:  # e.g. BACKLOG.md not in UTF-8: backlog_append reports it per item
+        known = set()
+        result["warnings"].append(f"backlog-write-failed: {exc}")
+    for item in items:
+        if item in known:
+            result["exists"].append(item)
+            continue
+        try:
+            outcome = bt.backlog_append(root, section, "plan-chain-runner, " + os.path.basename(journal), item, lang=lang)
+        except (bt.BacklogError, bt.InputError) as exc:
+            result["warnings"].append(f"backlog-write-failed: {exc}")
+            continue
+        result["exists" if outcome["action"] == "exists" else "appended"].append(item)
+    result["warnings"] = list(dict.fromkeys(result["warnings"]))
+    return result
+
+
+def cmd_run_checklist(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    return 0, run_checklist(args.journal, args.backlog_root)
+
+
 def cmd_run_stats(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     result = run_stats(args.journal, args.plan, args.baseline)
     if args.json_out:
@@ -1884,10 +2007,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_run_stats.add_argument("--baseline", help="an earlier run-stats JSON to compare with")
     p_run_stats.add_argument("--json-out", help="also write the JSON to this file (the only write of the command)")
     p_run_stats.set_defaults(func=cmd_run_stats)
+    p_checklist = sub.add_parser("run-checklist", help="the checklist after a run as lines of the goal's BACKLOG.md section")
+    p_checklist.add_argument("journal", help="path to <goal>-chain.json with a runner section")
+    p_checklist.add_argument("--backlog-root", help="folder of BACKLOG.md (default: the git top-level of the journal's "
+                                                    "folder, else the working directory)")
+    p_checklist.set_defaults(func=cmd_run_checklist)
     return parser
 
 
-JOURNAL_READERS = ("run-next", "run-eta", "run-status", "run-stats", "subset-check")
+JOURNAL_READERS = ("run-next", "run-eta", "run-status", "run-stats", "subset-check", "run-checklist")
 
 
 def main(argv: Optional[List[str]] = None) -> int:

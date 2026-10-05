@@ -85,6 +85,8 @@ instructions ("Spec written to …", "MAX review passes done …", "I'm using th
 skill …") are templates: say them in the dialogue language, not verbatim. The language is
 detected, not guessed: `ru` when more than 5% of the letters are Cyrillic, otherwise `en`.
 
+**Free backlog.** `BACKLOG.md` at the repository root is a free file: the user writes to it at any moment, and no stage treats a change to it as a foreign change.
+
 In this skill: the `lang` of `inputs` (the goal file's, else the instruction's, else the first readable
 file's); `detect-lang <file>` for a single file; for an inline idea, the language of the user's message.
 

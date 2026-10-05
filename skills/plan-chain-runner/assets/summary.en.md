@@ -25,6 +25,7 @@ Volume: {{cost_line}}
 
 - Defects outside the plans: `{{followups_path}}`
 - BACKLOG.md, section `{{backlog_section}}`: {{backlog_lines}}
+- Checklist after the run: {{checklist_lines}}
 
 ## Open questions
 

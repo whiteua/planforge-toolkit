@@ -47,17 +47,18 @@ Without `<goal>` the runner looks for `*-chain.json` journals with unfinished st
 | `C subset-check <journal> --roadmap R [--spec S]...` | the run a goal roadmap allows for these specs (none: all of them): `specs` in `#` order, `not_in_roadmap`, `missing_dependencies`, `graph` inside the set, `dropped_uncommitted` ([START.md](references/START.md)) |
 | `C run-session <journal> --begin [--host H] [--takeover]` / `--heartbeat --id ID` / `--end stopped\|complete\|interrupted --id ID` | the active-session mark; `ID` is the `id` that `--begin` returned |
 | `C run-next <journal> [--parallel N] [--in-flight PLAN:STAGE]...` | the actions to launch now (not the in-flight pairs, which still count), the waiting plans, `done`, `blocked` |
-| `C run-eta <journal>` / `C run-status <journal>` | ETA; the per-plan status table, with `roadmap` (`path`, `sha_matches`, `missing`, `not_in_roadmap`; `null` without one) and `order` (`plan`, `#`, group) |
+| `C run-eta <journal>` / `C run-status <journal>` | ETA; the per-plan status table, with `roadmap` (`path`, `sha_matches`, `missing`, `not_in_roadmap`; `null` without one) and `order` (`plan`, `n` — the `#`, `group`) |
 | `C run-stats (<journal> \| --plan <plan.md>) [--baseline <json>] [--json-out <file>]` | sizes, durations, token cost (the host's fact when recorded, else an estimate from the artifacts) and quality per stage; the summary's volume line; deltas against an earlier result ([docs/COST.md](../../docs/COST.md)) |
+| `C run-checklist <journal> [--backlog-root R]` | at the end of a finished run (`done: true`) the checklist after it as lines of the goal's `BACKLOG.md` section: installed skills after commits under `skills/`, `checkpoint-prune` of the committed plans, units noted `subagent-unavailable`, specs to amend after deviations; only the plans of `runner.specs`; a line already there is not repeated (`appended`, `exists`); `warnings` (`backlog-unavailable`, `backlog-write-failed`, `executor-not-installed`) never stop the summary ([LOOP.md](references/LOOP.md), 7. End) |
 
-Journal commands: `J spec-check`, `roadmap-check`, `roadmap-parse`, `journal-path --create`, `journal-event`, `journal-question`, `journal-answer`, `journal-show`, `journal-reconcile`, `journal-export-findings`, `backlog-parse`. `executor_tool.py` is used only through the plan-executor skill.
+Journal commands: `J spec-check`, `roadmap-check`, `roadmap-parse`, `journal-path --create`, `journal-event`, `journal-question`, `journal-answer`, `journal-finding`, `journal-show`, `journal-reconcile`, `journal-export-findings`, `backlog-parse`. `executor_tool.py` is used only through the plan-executor skill.
 
 ## The loop (LOOP.md is authoritative)
 
 1. `C run-next <journal> --in-flight <plan id>:<stage>...` at the start and whenever an agent returns, naming the agents still working; never while an audit agent works.
 2. `skip` → `J journal-event … --status skipped`; `ask` → `J journal-question … --skill plan-chain-runner --spec <spec>`; `answer` → `J journal-answer … --answer rewrite` (the drift cascade); `run` → an agent of the profile with the role's model and the silent brief ([PROFILES.md](references/PROFILES.md)); the `run` actions of one answer start together.
-3. After each agent: `J journal-reconcile`, `J journal-show --plan`, a progress line; a stage the journal does not confirm after the agent returned (whatever it said) gets one repeat, then a `not-confirmed:` question; an agent silent for 60 minutes counts as failed.
-4. `actions` empty → the summary ([summary.en.md](assets/summary.en.md) / [summary.ru.md](assets/summary.ru.md)), the open questions with the hint `discuss`, then `C run-session <journal> --end … --id <id>`.
+3. After each agent: `J journal-reconcile`, `J journal-show --plan`, a progress line, its notes worth knowing as `J journal-finding` ([LOOP.md](references/LOOP.md), After the agents, 7); a stage the journal does not confirm after the agent returned (whatever it said) gets one repeat, then a `not-confirmed:` question; an agent silent for 60 minutes counts as failed.
+4. `actions` empty → (`done: true`: `C run-checklist <journal>`,) the summary ([summary.en.md](assets/summary.en.md) / [summary.ru.md](assets/summary.ru.md)), the open questions with the hint `discuss`, one push line (PROFILES.md, Notifications and questions), then `C run-session <journal> --end … --id <id>`.
 
 ## Language
 
@@ -69,5 +70,7 @@ summaries and stop reports. Only tokens that parsers match stay in English: `###
 instructions ("Spec written to …", "MAX review passes done …", "I'm using the plan-writing
 skill …") are templates: say them in the dialogue language, not verbatim. The language is
 detected, not guessed: `ru` when more than 5% of the letters are Cyrillic, otherwise `en`.
+
+**Free backlog.** `BACKLOG.md` at the repository root is a free file: the user writes to it at any moment, and no stage treats a change to it as a foreign change.
 
 In this skill: the `lang` field of `spec-check` of the first spec at the start, then the journal's `lang` (`journal-show`); the summary uses the same language; `help` without a spec or journal answers in the language of the user's message.

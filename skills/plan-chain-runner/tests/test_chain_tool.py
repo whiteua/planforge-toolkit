@@ -946,11 +946,11 @@ class RunNextTest(_T2Case):
 
     def test_rule3_running_audit_alone_and_audit_waits_for_running_stage(self):
         a = _t2_plan("a-spec.md", done=T2_STAGES[:5], audit="running")
-        b = _t2_plan("b-spec.md", revision="running", done=("writing",))
+        b = _t2_plan("b-spec.md", writing="running")  # writing: the one stage next to another plan's code stages
         self.assertEqual(self.run_next([a, b])["pairs"], [("run", "a-impl.md", "audit")])
         a["stages"]["audit"]["status"] = "pending"
         result = self.run_next([a, b])
-        self.assertEqual(result["pairs"], [("run", "b-impl.md", "revision"), ("run", "c-impl.md", "writing")])
+        self.assertEqual(result["pairs"], [("run", "b-impl.md", "writing"), ("run", "c-impl.md", "writing")])
         self.assertEqual(result["waits"], [("a-impl.md", "audit-waits")])
 
     def test_rule5_parallel_width_running_first(self):
@@ -1563,6 +1563,171 @@ class RunnerDocsTest(unittest.TestCase):
             self.assertIn("does not pin the version", text, name)
             self.assertIn("pinned", text, name)
         self.assertIn("subagent_type: planforge-<role>", (self.REFS / "PROFILES.md").read_text(encoding="utf-8"))
+
+
+class CodeBusyReadingStagesTest(_T2Case):
+    """F2 of plan-refactoring-02: revision and split wait while another plan holds the code stages; writing does not."""
+    SPECS = ("a-spec.md", "b-spec.md", "c-spec.md")
+
+    def test_revision_and_split_wait_for_each_code_stage(self):
+        for stage in ct.CODE_STAGES:
+            a = _t2_plan("a-spec.md", done=T2_STAGES[:T2_STAGES.index(stage)], **{stage: "running"})
+            for done, waits in ((("writing",), "revision"), (("writing", "revision"), "split")):
+                with self.subTest(stage=stage, waits=waits):
+                    steps, waiting = CandidatesTest.candidates(self, [a, _t2_plan("b-spec.md", done=done)],
+                                                               specs=self.SPECS)
+                    self.assertEqual(steps, [("a-impl.md", stage, True), ("c-impl.md", "writing", False)])
+                    self.assertEqual(waiting, [("b-impl.md", "code-busy: a-impl")])
+
+    def test_a_code_stage_holds_a_revision_before_it_in_runner_order(self):
+        a = _t2_plan("a-spec.md", done=("writing", "revision", "split"))  # execution pending: not yet holding
+        b = _t2_plan("b-spec.md", done=("writing",))
+        steps, waiting = CandidatesTest.candidates(self, [a, b], specs=("b-spec.md", "a-spec.md"))
+        self.assertEqual((steps, waiting), ([("a-impl.md", "execution", False)], [("b-impl.md", "code-busy: a-impl")]))
+
+    def test_an_agent_in_a_code_stage_holds_revision(self):
+        path = self.journal(list(self.SPECS[:2]), plans=[_t2_plan("a-spec.md", done=("writing", "revision", "split")),
+                                                         _t2_plan("b-spec.md", done=("writing",))])
+        result = ct.run_next(path, 3, ["a-impl:execution"])
+        self.assertEqual((result["actions"], [(w["plan"], w["reason"]) for w in result["waiting"]]),
+                         ([], [("a-impl.md", "in-flight: execution"), ("b-impl.md", "code-busy: a-impl")]))
+
+    def test_revision_starts_after_the_commit(self):
+        a = _t2_plan("a-spec.md", done=T2_STAGES)
+        steps, waiting = CandidatesTest.candidates(self, [a, _t2_plan("b-spec.md", done=("writing",))],
+                                                   specs=self.SPECS[:2])
+        self.assertEqual((steps, waiting), ([("b-impl.md", "revision", False)], []))
+
+    def test_the_holder_itself_revises(self):
+        a = _t2_plan("a-spec.md", done=T2_STAGES[:6])  # executed, not committed, sent back to revision by drift
+        a["stages"]["revision"]["finished_at"] = "2026-10-02T03:00:00Z"
+        a["stages"]["revision"]["status"] = "pending"
+        steps, waiting = CandidatesTest.candidates(self, [a, _t2_plan("b-spec.md", done=("writing",))],
+                                                   specs=self.SPECS[:2])
+        self.assertEqual((steps, waiting), ([("a-impl.md", "revision", False)], [("b-impl.md", "code-busy: a-impl")]))
+
+
+class LedgerUnitsTest(HomeCase):
+    """Spec 2 of plan-refactoring-02: run-checklist reads the units of a ledger and keeps its texts per language."""
+
+    def test_units_of_a_ledger_or_nothing(self):
+        exec_dir = os.path.join(self.tmp, "exec")
+        os.makedirs(exec_dir)
+        self.assertEqual(ct._ledger_units(exec_dir), [])
+        with open(os.path.join(exec_dir, "state.json"), "w", encoding="utf-8") as fh:
+            json.dump({"units": [{"id": "task-1"}, "junk"]}, fh)
+        self.assertEqual(ct._ledger_units(exec_dir), [{"id": "task-1"}])
+        with open(os.path.join(exec_dir, "state.json"), "w", encoding="utf-8") as fh:
+            fh.write("not json")
+        self.assertEqual(ct._ledger_units(exec_dir), [])
+
+    def test_texts_and_the_token(self):
+        self.assertEqual(sorted(ct.CHECKLIST_TEXT), ["en", "ru"])
+        for lang in ("en", "ru"):
+            self.assertEqual(sorted(ct.CHECKLIST_TEXT[lang]), ["amend", "prune", "skills", "unverified"])
+        self.assertEqual(ct.SUBAGENT_UNAVAILABLE, ct._executor().SUBAGENT_UNAVAILABLE)
+
+
+CHECKLIST_PLAN = ("# A\n\n**Spec:** a-spec.md\n\n**Deviations from spec:**\n- one thing differs (the user, 2026-10-05)\n\n"
+                  "---\n\n### Task 1: x\n")
+
+
+class _ChecklistCase(_T2Case):
+    """A run of a-spec (committed, ledger with notes, a deviation in its header) and b-spec (written only)."""
+
+    TEMPLATES = ["update the installed copies of the skills after the run's commits: plan-chain-runner, plan-executor",
+                 "remove the snapshots of the committed plan a-impl: executor_tool.py checkpoint-prune {exec_dir}",
+                 "repeat the control check of plan a-impl where a subagent tool exists: units task-1 ran in the main "
+                 "agent (subagent-unavailable)",
+                 "amend the spec a-spec.md: 2 deviation(s) of plan a-impl, the amend spec lines of this section"]
+
+    def setUp(self):
+        super().setUp()
+        a = _t2_plan("a-spec.md", done=T2_STAGES)
+        a["stages"]["execution"]["artifacts"] = {"exec_dir": "exec-a"}
+        a["stages"]["commit"]["artifacts"] = {"commits": [
+            {"sha": "a1b2c3d", "subject": "feat(x): y", "at": "2026-10-02T01:06:30Z",
+             "files": ["skills/plan-executor/scripts/executor_tool.py", "skills/plan-chain-runner/SKILL.md", "README.md"]}]}
+        self.path = self.journal(["a-spec.md", "b-spec.md"], plans=[a, _t2_plan("b-spec.md", done=("writing",))])
+        with open(os.path.join(self.tmp, "a-impl.md"), "w", encoding="utf-8") as fh:
+            fh.write(CHECKLIST_PLAN)
+        os.makedirs(os.path.join(self.tmp, "exec-a"))
+        with open(os.path.join(self.tmp, "exec-a", "state.json"), "w", encoding="utf-8") as fh:
+            json.dump({"units": [{"id": "task-1", "notes": ["subagent-unavailable"]},
+                                 {"id": "task-2", "notes": ["kept the old flag"]}]}, fh)
+        self.root = os.path.join(self.tmp, "repo")
+        os.makedirs(self.root)
+        # the prune command names the ledger folder by its absolute path, not relative to the journal
+        prune_dir = os.path.normpath(os.path.join(os.path.abspath(self.tmp), "exec-a"))
+        self.EXPECTED = [line.format(exec_dir=prune_dir) for line in self.TEMPLATES]
+
+
+class ChecklistItemsTest(_ChecklistCase):
+    def items(self, lang="en"):
+        data, runner = ct._runner_journal(self.path)
+        warnings = []
+        return ct._checklist_items(self.path, data, runner, lang, warnings), warnings
+
+    def test_one_item_per_source(self):
+        self.assertEqual(self.items(), (self.EXPECTED, []))
+        self.assertTrue(self.items("ru")[0][0].startswith("обновить установленные копии скиллов"))
+
+    def test_only_the_plans_of_the_run(self):
+        with open(self.path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["runner"]["specs"] = ["b-spec.md"]
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        self.assertEqual(self.items(), ([], []))
+
+    def test_without_plan_executor_no_amend_line(self):
+        with mock.patch.object(ct, "_executor", return_value=None):
+            self.assertEqual(self.items(), (self.EXPECTED[:3], ["executor-not-installed"]))
+
+
+class RunChecklistTest(_ChecklistCase):
+    """Spec 2 of plan-refactoring-02: run-checklist writes the checklist after a run into BACKLOG.md once."""
+
+    def test_lines_are_appended_once(self):
+        result = ct.run_checklist(self.path, self.root)
+        self.assertEqual((result["section"], result["items"], result["appended"], result["exists"], result["warnings"]),
+                         ("g", self.EXPECTED, self.EXPECTED, [], []))
+        backlog = os.path.join(self.root, "BACKLOG.md")
+        with open(backlog, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("## g\n", text)
+        self.assertEqual(text.count("— plan-chain-runner, g-chain.json, "), 4)
+        again = ct.run_checklist(self.path, self.root)
+        self.assertEqual((again["appended"], again["exists"]), ([], self.EXPECTED))
+        with open(backlog, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), text)
+
+    def test_an_open_item_of_another_source_is_not_appended(self):
+        with open(os.path.join(self.root, "BACKLOG.md"), "w", encoding="utf-8") as fh:
+            fh.write(f"# Backlog\n\n## g\n\n- [ ] {self.EXPECTED[1]} — someone, 2026-10-01\n")
+        result = ct.run_checklist(self.path, self.root)
+        self.assertEqual((result["exists"], len(result["appended"])), ([self.EXPECTED[1]], 3))
+
+    def test_without_plan_brainstorming_a_warning(self):
+        with mock.patch.object(ct, "_brainstorm", side_effect=ct.InputError("plan-brainstorming not installed alongside: x")):
+            result = ct.run_checklist(self.path, self.root)
+        self.assertEqual((result["ok"], result["items"]), (True, []))
+        self.assertTrue(result["warnings"][0].startswith("backlog-unavailable: "))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "BACKLOG.md")))
+
+    def test_repo_root_is_the_nearest_git_folder(self):
+        nested = os.path.join(self.root, "docs", "plans")
+        os.makedirs(nested)
+        os.makedirs(os.path.join(self.root, ".git"))
+        self.assertEqual(ct._repo_root(nested), os.path.abspath(self.root))
+
+
+class RunChecklistCliTest(_ChecklistCase):
+    def test_cli_exit_codes(self):
+        code, result = self.run_cli("run-checklist", self.path, "--backlog-root", self.root)
+        self.assertEqual((code, result["appended"]), (0, self.EXPECTED))
+        code, result = self.run_cli("run-checklist", self.journal(["a-spec.md"], runner=False), "--backlog-root", self.root)
+        self.assertEqual((code, result["errors"][0].startswith("runner-missing: ")), (1, True))
 
 
 class _StatsCase(HomeCase):
@@ -2471,6 +2636,71 @@ class RoadmapDocsTest(unittest.TestCase):
         text = (self.ROOT.parent / "plan-brainstorming" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("`/plan-chain-runner <goal>-roadmap.md`", text)
         self.assertNotIn("until the runner takes it as an argument", text)
+
+
+class Spec2RunnerDocsTest(unittest.TestCase):
+    """Spec 2 of plan-refactoring-02: the runner's documents."""
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def read(self, *parts):
+        return self.ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+    def test_f2_revision_and_split_wait(self):
+        self.assertIn("the revision and the split of every other plan wait too", self.read("references", "LOOP.md"))
+        self.assertIn("their revision, split and execution wait (`code-busy`)", self.read("references", "START.md"))
+        usage = self.read("USAGE.md")
+        self.assertIn("the revision and split of the others wait", usage)
+        self.assertNotIn("Planning (writing, revision, split) of independent specs runs in parallel", usage)
+
+    def test_dirty_list_leaves_out_the_backlog(self):
+        self.assertIn("step 1: `BACKLOG.md` at the repository root (a free file", self.read("references", "START.md"))
+
+    def test_findings_are_recorded_after_each_agent(self):
+        loop = self.read("references", "LOOP.md")
+        self.assertIn("7. **Findings.**", loop)
+        self.assertIn("J journal-finding <journal> --skill plan-chain-runner --plan <plan> --file", loop)
+        self.assertLess(loop.index("6. **Actual cost.**"), loop.index("7. **Findings.**"))
+        self.assertIn("the same `file` and the same substance", loop)
+        skill = self.read("SKILL.md")
+        self.assertIn("`journal-answer`, `journal-finding`, `journal-show`", skill)
+        self.assertIn("as `J journal-finding` ([LOOP.md](references/LOOP.md), After the agents, 7)", skill)
+
+    def test_checklist_after_the_run(self):
+        self.assertIn("| `C run-checklist <journal> [--backlog-root R]` |", self.read("SKILL.md"))
+        self.assertIn("`actions` empty → (`done: true`: `C run-checklist <journal>`,) the summary", self.read("SKILL.md"))
+        loop = self.read("references", "LOOP.md")
+        self.assertIn("`C run-checklist <journal> --backlog-root <repo root>`", loop)
+        self.assertIn("`done: true` only", loop)
+        for lang in ("en", "ru"):
+            self.assertIn("{{checklist_lines}}", self.read("assets", f"summary.{lang}.md"))
+        self.assertIn("`run-checklist`", self.read("USAGE.md"))
+
+    def test_push_and_question_tools(self):
+        profiles = self.read("references", "PROFILES.md")
+        self.assertIn("## Notifications and questions", profiles)
+        self.assertIn("`PushNotification`", profiles)
+        self.assertLess(profiles.index("## Notifications and questions"), profiles.index("## Models and effort"))
+        self.assertEqual(self.read("references", "LOOP.md").count("one push line (PROFILES.md, Notifications and questions)"), 2)
+        for name in ("START.md", "DISCUSS.md"):
+            self.assertIn("(PROFILES.md, Notifications and questions)", self.read("references", name))
+        self.assertIn("one push line (PROFILES.md, Notifications and questions)", self.read("SKILL.md"))
+
+    def test_roadmap_instructions_f20_to_f23(self):
+        self.assertIn("`order` (`plan`, `n` — the `#`, `group`)", self.read("SKILL.md"))
+        start = self.read("references", "START.md")
+        self.assertIn("so no `journal-path --create` runs", start)
+        self.assertIn("with one `--spec` per spec of `runner.specs`", start)
+        self.assertIn('"in the roadmap, not in this run"', start)
+        self.assertIn("`J spec-check <journal_dir>/<spec>`", start)
+        self.assertIn("`J journal-path <journal_dir>/<spec> --create`", start)
+        self.assertNotIn("for each added spec `J spec-check <spec>`", start)
+
+    def test_eval_scenarios(self):
+        text = self.read("tests", "eval-scenarios.md")
+        self.assertIn("names the removed\n  edge `g-3 --> g-2`", text)
+        self.assertNotIn("g-2 → g-3", text)
+        self.assertIn("## Scenario 22: A stop on questions sends one push", text)
+        self.assertIn("## Scenario 23: A changed roadmap in a run of part of its specs", text)
 
 
 if __name__ == "__main__":

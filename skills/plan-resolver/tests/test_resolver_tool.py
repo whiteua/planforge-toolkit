@@ -1309,6 +1309,111 @@ class EvidenceTableTests(IncrementalFixture, unittest.TestCase):
             self.assertTrue(any(w.startswith("plan-files-unavailable") for w in warnings), warnings)
 
 
+class PipelineFileTests(unittest.TestCase):
+    """F10 of plan-refactoring-02: which paths are the pipeline's own files."""
+
+    def test_backlog_at_the_root_and_chain_names_in_the_plan_folder(self) -> None:
+        module = load_resolver()
+        for path, plan_dir, expected in (("BACKLOG.md", "docs", True), ("docs/BACKLOG.md", "docs", False),
+                                         ("docs/g-chain.json", "docs", True), ("docs/g-impl-review-2.md", "docs", True),
+                                         ("api/openapi-spec.md", "docs", False), ("docs/notes.md", "docs", False),
+                                         ("g-chain.json", "", True), ("docs/g-chain.json", None, False)):
+            with self.subTest(path=path, plan_dir=plan_dir):
+                self.assertIs(module.is_pipeline_file(path, plan_dir), expected)
+
+    def test_plan_dir_of(self) -> None:
+        module = load_resolver()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            root = Path(tmp)
+            write(root / "docs" / "p-impl.md", "x\n")
+            write(root / "p-impl.md", "x\n")
+            self.assertEqual(module.plan_dir_of(str(root / "docs" / "p-impl.md"), str(root)), "docs")
+            self.assertEqual(module.plan_dir_of(str(root / "p-impl.md"), str(root)), "")
+            self.assertIsNone(module.plan_dir_of(str(Path(other) / "p-impl.md"), str(root)))
+
+    def test_chain_file_pattern_equals_the_executors(self) -> None:
+        import importlib.util
+        path = ROOT.parent / "plan-executor" / "scripts" / "executor_tool.py"
+        spec = importlib.util.spec_from_file_location("executor_tool_for_resolver_test", str(path))
+        executor = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(executor)
+        self.assertEqual(load_resolver().CHAIN_FILE_RE.pattern, executor._CHAIN_FILE_RE.pattern)
+
+
+PIPE_PLAN = (
+    "# Plan\n\n"
+    "### Task 1: Alpha\n\n**Files:**\n- Modify: `src/a.py`\n- Modify: `BACKLOG.md`\n- Modify: `g-chain.json`\n\n"
+    "### Task 2: Beta\n\n**Files:**\n- Modify: `src/b.py`\n\n"
+    "### Task 3: Gamma\n\n**Files:**\n- Modify: `docs/x-spec.md`\n"
+)
+PIPE_FILES = {
+    "src/a.py": "a1\n",
+    "src/b.py": "b1\n",
+    "docs/x-spec.md": "x1\n",
+    ".gitignore": "BACKLOG.md\n*-chain.json\n",
+    "BACKLOG.md": "# Backlog\n",
+    "g-chain.json": "{}\n",
+}
+PIPE_STAGES = (
+    "- ✅ 1. Alpha evidence_anchor: src/a.py#L1-L1\n"
+    "- ✅ 2. Beta evidence_anchor: src/b.py#L1-L1\n"
+    "- ✅ 3. Gamma evidence_anchor: docs/x-spec.md#L1-L1"
+)
+
+
+class PipelineEvidenceTests(unittest.TestCase):
+    """F10 of plan-refactoring-02: BACKLOG.md and the chain files in the plan's folder are never evidence; a file
+    with a chain-like name elsewhere is."""
+
+    def make(self, tmp: str, snaps: str):
+        root = Path(tmp)
+        write(root / "main-plan.md", PIPE_PLAN)
+        for rel, body in PIPE_FILES.items():
+            write(root / rel, body)
+        report = root / "main-plan-report-1.md"
+        write(report, inc_report(sha256(root / "main-plan.md"), PIPE_STAGES))
+        start = Path(snaps) / "start.json"
+        self.assertEqual(run_tool("fingerprint-workspace", str(root), str(start)).returncode, 0)
+        return root, report, start
+
+    def test_the_table_leaves_out_the_pipeline_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, start = self.make(tmp, snaps)
+            snapshot = json.loads(start.read_text(encoding="utf-8"))
+            table, warnings = load_resolver().evidence_table(report.read_text(encoding="utf-8"), PIPE_PLAN, snapshot,
+                                                             str(root / "main-plan.md"))
+            self.assertEqual(sorted(table), ["docs/x-spec.md", "src/a.py", "src/b.py"])
+            self.assertEqual(warnings, [])
+            process = run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan",
+                               str(root / "main-plan.md"))
+            self.assertEqual((process.returncode, read_json(process)["excluded"]), (0, []))
+            self.assertNotIn("BACKLOG.md", report.read_text(encoding="utf-8"))
+
+    def test_old_pipeline_rows_send_no_task_to_reaudit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, start = self.make(tmp, snaps)
+            module = load_resolver()
+            snapshot = json.loads(start.read_text(encoding="utf-8"))
+            table, _ = module.evidence_table(report.read_text(encoding="utf-8"), PIPE_PLAN, snapshot)
+            table.update({"BACKLOG.md": "excluded", "g-chain.json": "excluded"})  # rows written before F10
+            text = module.put_evidence_section(report.read_text(encoding="utf-8"),
+                                               module.render_evidence_section(table, ru=True))
+            write(report, text)
+            data = module.rescan_scope(str(root / "main-plan.md"), str(report), snapshot, 0.5)
+            self.assertEqual((data["unverified_files"], data["reaudit"]), ([], []))
+            self.assertEqual((data["scope"], data["reason"]), ("incremental", "0 of 3 tasks touched"))
+
+    def test_a_chain_like_name_outside_the_plan_folder_is_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, start = self.make(tmp, snaps)
+            self.assertEqual(run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan",
+                                      str(root / "main-plan.md")).returncode, 0)
+            snapshot = json.loads(start.read_text(encoding="utf-8"))
+            snapshot["files"]["docs/x-spec.md"] = "0" * 64  # changed after the last report
+            data = load_resolver().rescan_scope(str(root / "main-plan.md"), str(report), snapshot, 0.5)
+            self.assertEqual((data["changed_files"], data["reaudit"]), (["docs/x-spec.md"], ["3"]))
+
+
 class EvidenceSectionTests(unittest.TestCase):
     """The evidence section: rendered in the report's language, replaced whole, placed before the Fix Log."""
 

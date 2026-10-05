@@ -138,11 +138,11 @@ end; the templates end with the placeholder `{{evidence_fingerprint}}`, which th
 | File | SHA-256 |
 |---|---|
 | skills/x/scripts/tool.py | <64 hex> |
-| BACKLOG.md | excluded |
+| notes/local.md | excluded |
 ```
 
 One row per evidence file: the anchors of the stages section and of issue `evidence`, and the files
-of the plan tasks' `Files` blocks. The value is the file's SHA-256 at the start of the audit,
+of the plan tasks' `Files` blocks, never `BACKLOG.md` or a chain file of the plan's folder. The value is the file's SHA-256 at the start of the audit,
 `excluded` (outside the snapshot) or `missing` (an anchored file that does not exist); any other
 row is an error. The next pass compares the table with its own start snapshot (`rescan-scope`).
 

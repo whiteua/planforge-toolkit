@@ -374,6 +374,114 @@ class TestCommitRun(CommitCase):
         self.assertEqual(ctx.exception.code, 1)
 
 
+DEVIATION_PLAN = ("# P\n\n**Deviations from spec:**\n- the spec says X -> the plan does Y (the user, 2026-10-05)\n\n---\n\n"
+                  "### Task 1: A\n\n- [ ] **Step 1: edit**\n\n### Task 2: B\n\n- [ ] **Step 1: edit**\n")
+
+
+class TestPlanDeviations(unittest.TestCase):
+    """Spec 2 of plan-refactoring-02: the deviations from the spec are the header's items and the units' notes."""
+
+    def test_header_items_and_notes_once(self):
+        tool = load_tool()
+        external = "External: prod (read) confirmed by the engineer for this task"  # GATE.md: a confirmation, not a deviation
+        units = [{"notes": ["kept the old flag", "subagent-unavailable", external, "kept the old flag"]}]
+        self.assertEqual(tool.plan_deviations(DEVIATION_PLAN, units),
+                         ["the spec says X -> the plan does Y (the user, 2026-10-05)", "kept the old flag"])
+        self.assertEqual(tool.plan_deviations(PLAN, [{"notes": ["subagent-unavailable", external]}]), [])
+        self.assertEqual(tool.SUBAGENT_UNAVAILABLE, "subagent-unavailable")
+
+    def test_the_block_ends_at_the_first_other_line(self):
+        text = "**Deviations from spec:**\n- one\n\n**Baseline:** x\n- not a deviation\n\n### Task 1: A\n- no\n"
+        self.assertEqual(load_tool().plan_deviations(text), ["one"])
+
+
+class TestBacklogDeviations(unittest.TestCase):
+    """Spec 2 of plan-refactoring-02: the deviations go into the goal's BACKLOG.md section once."""
+
+    EXPECTED = ["amend spec plan01-impl.md: the spec says X -> the plan does Y (the user, 2026-10-05)",
+                "amend spec plan01-impl.md: kept the old flag"]
+
+    def setUp(self):
+        self.tool = load_tool()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.top = Path(tmp.name)
+        (self.top / "docs").mkdir()
+        self.plan = self.top / "docs" / "plan01-impl.md"
+        self.plan.write_text(DEVIATION_PLAN, encoding="utf-8")
+        self.led = {"plan_path": str(self.plan),
+                    "units": [{"id": "task-1", "notes": ["kept the old flag", "subagent-unavailable"]}]}
+
+    def write(self):
+        return self.tool._backlog_deviations(self.led, str(self.top))
+
+    def test_lines_are_appended_once(self):
+        self.assertEqual(self.write(), ({"section": "plan01", "appended": self.EXPECTED, "exists": []}, []))
+        text = (self.top / "BACKLOG.md").read_text(encoding="utf-8")
+        self.assertEqual(text.count("- [ ] amend spec plan01-impl.md: "), 2)
+        self.assertNotIn("subagent-unavailable", text)
+        self.assertEqual(self.write(), ({"section": "plan01", "appended": [], "exists": self.EXPECTED}, []))
+        self.assertEqual((self.top / "BACKLOG.md").read_text(encoding="utf-8"), text)
+
+    def test_no_deviation_no_backlog(self):
+        self.plan.write_text(PLAN, encoding="utf-8")
+        self.led["units"] = [{"id": "task-1", "notes": ["subagent-unavailable"]}]
+        self.assertEqual(self.write(), (None, []))
+        self.assertFalse((self.top / "BACKLOG.md").exists())
+
+    def test_an_open_item_of_another_source_is_not_appended(self):
+        (self.top / "BACKLOG.md").write_text(f"# Backlog\n\n## plan01\n\n- [ ] {self.EXPECTED[1]} — someone, 2026-10-01\n",
+                                             encoding="utf-8")
+        self.assertEqual(self.write()[0], {"section": "plan01", "appended": self.EXPECTED[:1], "exists": self.EXPECTED[1:]})
+
+    def test_a_russian_plan_writes_russian_lines(self):
+        self.plan.write_text("# П\n\n**Deviations from spec:**\n- спека говорит X, план делает Y\n\n---\n\n### Task 1: А\n",
+                             encoding="utf-8")
+        self.led["units"] = []
+        self.assertEqual(self.write()[0]["appended"], ["поправить спеку plan01-impl.md: спека говорит X, план делает Y"])
+
+
+class TestCommitRunDeviations(CommitCase):
+    """Spec 2 of plan-refactoring-02: commit-run reports the deviations it wrote; the backlog never stops it."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("docs/plan01-impl.md", DEVIATION_PLAN)
+        self.commit_all()
+        self.run_plan({"app.py": "x = 2\n"})
+
+    def test_backlog_field_and_a_repeated_call(self):
+        result = self.commit()
+        self.assertEqual((result["files"], result["backlog"]["appended"], result["backlog"]["exists"]),
+                         (["app.py"], [TestBacklogDeviations.EXPECTED[0]], []))
+        self.assertNotIn("BACKLOG.md", self.files_of())
+        again = self.commit()
+        self.assertEqual((again["empty"], again["backlog"]["exists"]), (True, [TestBacklogDeviations.EXPECTED[0]]))
+
+    def test_without_brainstorm_tool_a_warning_and_the_commit(self):
+        self.tool._load_brainstorm_tool = lambda: None
+        result = self.commit()
+        self.assertEqual((result["files"], result["sha"]), (["app.py"], self.git("rev-parse", "HEAD")))
+        self.assertNotIn("backlog", result)
+        self.assertTrue(result["warnings"][0].startswith("backlog-unavailable: "), result["warnings"])
+        self.assertFalse((self.repo / "BACKLOG.md").exists())
+
+    def test_a_backlog_that_is_not_utf8_is_a_warning(self):
+        (self.repo / "BACKLOG.md").write_bytes("# Backlog\n\n## plan01\n\n- [ ] старое\n".encode("cp1251"))
+        result = self.commit()
+        self.assertEqual((result["files"], result["backlog"]["appended"]), (["app.py"], []))
+        self.assertTrue(all(w.startswith("backlog-write-failed: ") for w in result["warnings"]), result["warnings"])
+
+    def test_a_refused_commit_writes_nothing(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.commit(subject="update stuff")  # bad-subject: refused before anything is committed
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertFalse((self.repo / "BACKLOG.md").exists())
+        result = self.commit()
+        self.assertEqual((result["backlog"]["appended"], result["backlog"]["exists"]),
+                         ([TestBacklogDeviations.EXPECTED[0]], []))
+
+
 class TestCommitRefusals(CommitCase):
     def setUp(self):
         super().setUp()

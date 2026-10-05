@@ -34,6 +34,19 @@ When the profile's capability fails at run time (the tool refuses to start agent
 - No agents: the runner runs each action's skill itself, in this session, one at a time, in the same silent mode as the brief says (no questions; a decision is a `journal-question` and the stage stops). It still reads the result only from the journal (LOOP.md, After the agents).
 - No model choice: every role has `model: null`; `parallel` is `1`.
 
+## Notifications and questions
+
+Two host tools let a stop of the runner reach the user away from the terminal. A session without them works as before, in text; a missing tool or a failed call is skipped without an error.
+
+| Profile | Push notification | Question with options |
+|---|---|---|
+| `claude-code` | the `PushNotification` tool | the host's question tool (`AskUserQuestion`); with "Push when actions required" on, its questions notify too |
+| `github-copilot` | none known (Unverified) | text |
+| `fallback` | `PushNotification` when this session has it, else none | the question tool when this session has it, else text |
+
+- **Push:** one line, in the dialogue language, when the loop stops on questions and when the summary of a finished run is ready (LOOP.md, 7. End), e.g. "plan-refactoring-02: stopped, 2 questions — discuss" or "plan-refactoring-02: run complete". Nothing else is pushed: no progress lines, no push per question. The push is a host call, not a write; the runner sends it only at the End, when no audit agent runs.
+- **Questions with options:** the choices of the start (START.md: the card's confirm / edit, the start commit's yes / no, continue here / stop) and the question of `discuss` (DISCUSS.md: the options of one journal question) go through the question tool, the options in the dialogue language with one line of explanation each and the recommended one first; the user's own words stay possible. The tokens recorded in the journal stay as DISCUSS.md says.
+
 ## Models and effort
 
 - The settings file `~/.planforge/runner.json` (`PLANFORGE_HOME` replaces `~/.planforge`) holds per profile `parallel` and per role `model`, `effort` and an optional `fallback`, and for `execution` an optional `light`; `assets/runner.example.json` shows the format, with full model ids for `claude-code` (they pin the version; Pinned models). `C settings-load --profile <profile>` fills the roles the file does not name from the built-in defaults.

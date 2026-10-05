@@ -1117,19 +1117,23 @@ def evidence_value(path: str, files: Dict[str, str], root: str) -> str:
     return "excluded" if os.path.isfile(os.path.join(root, path)) else "missing"
 
 
-def evidence_table(report_text: str, plan_text: str, snapshot: Dict[str, object]) -> Tuple[Dict[str, str], List[str]]:
+def evidence_table(report_text: str, plan_text: str, snapshot: Dict[str, object],
+                   plan_path: Optional[str] = None) -> Tuple[Dict[str, str], List[str]]:
     """{path: SHA-256 | excluded | missing} for the evidence files of a report: the anchors of its stage items
-    and issue evidence, and the files of the plan tasks' Files blocks; plus warnings."""
+    and issue evidence, and the files of the plan tasks' Files blocks; plus warnings. The pipeline's own files
+    (is_pipeline_file; the plan's folder from `plan_path`) are left out."""
     root = os.path.abspath(str(snapshot.get("root") or ""))
+    plan_dir = plan_dir_of(plan_path, root) if plan_path else None
     files = dict(snapshot["files"])
     table: Dict[str, str] = {}
     for paths in stage_anchor_paths(report_text).values():
         for path in paths:
-            table[path] = evidence_value(path, files, root)
+            if not is_pipeline_file(path, plan_dir):
+                table[path] = evidence_value(path, files, root)
     for issue in parse_issues(report_text):
         for match in ANCHOR_RE.finditer(str(issue["evidence"])):
             path = anchor_path(match.group(0))
-            if path:
+            if path and not is_pipeline_file(path, plan_dir):
                 table[path] = evidence_value(path, files, root)
     warnings: List[str] = []
     plan_files = plan_task_files(plan_text)
@@ -1141,6 +1145,8 @@ def evidence_table(report_text: str, plan_text: str, snapshot: Dict[str, object]
     else:
         for paths in plan_files.values():
             for path in paths:
+                if is_pipeline_file(path, plan_dir):
+                    continue
                 value = table.get(path) or evidence_value(path, files, root)
                 # A Files token that names no file (`B.lang`, a bare `SKILL.md`) is not evidence.
                 if value != "missing":
@@ -1183,6 +1189,33 @@ def path_inside(root: str, path: str) -> bool:
         return os.path.commonpath([base, os.path.normcase(os.path.realpath(path))]) == base
     except ValueError:  # another drive on Windows
         return False
+
+
+# The pipeline's own files are never evidence (F10 of plan-refactoring-02): BACKLOG.md at the root, a free file the
+# user and the skills write at any moment, and the chain files by exact name in the plan's folder, by plan-executor's
+# rule (executor_tool._CHAIN_FILE_RE, _is_run_artifact). A file with such a name elsewhere is ordinary evidence.
+# CHAIN_FILE_RE is a copy for a resolver installed without plan-executor; a contract test keeps the two equal.
+CHAIN_FILE_RE = re.compile(
+    r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
+    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
+FREE_FILES = ("BACKLOG.md",)
+
+
+def plan_dir_of(plan: str, root: str) -> Optional[str]:
+    """Root-relative folder of the plan ("" for the root); None for a plan outside the root."""
+    if not path_inside(root, plan):
+        return None
+    folder = os.path.relpath(os.path.dirname(os.path.realpath(plan)), os.path.realpath(root)).replace(os.sep, "/")
+    return "" if folder == "." else folder
+
+
+def is_pipeline_file(path: str, plan_dir: Optional[str]) -> bool:
+    """BACKLOG.md at the root, or a CHAIN_FILE_RE name in `plan_dir` (root-relative; None: no folder matches)."""
+    path = path.replace("\\", "/")
+    if path in FREE_FILES:
+        return True
+    folder, _, name = path.rpartition("/")
+    return plan_dir is not None and folder == plan_dir and bool(CHAIN_FILE_RE.fullmatch(name))
 
 
 def validate_report(
@@ -1901,7 +1934,7 @@ def cmd_evidence_fingerprint(args: argparse.Namespace) -> int:
         plan_text = read_text(args.plan)
     except UnicodeDecodeError as exc:
         raise ToolError(f"not-utf8: {args.plan}: {exc}") from exc
-    table, warnings = evidence_table(text, plan_text, snapshot)
+    table, warnings = evidence_table(text, plan_text, snapshot, args.plan)
     ru = report_language(text, parse_header(text)) == "ru"
     updated = put_evidence_section(text, render_evidence_section(table, ru))
     with open(args.report, "w", encoding="utf-8", newline="\r\n" if crlf else "\n") as handle:
@@ -1971,7 +2004,9 @@ def rescan_scope(plan: str, last_report: str, snapshot: Dict[str, object], ratio
     plan_ids = extract_plan_task_ids(plan_text)
     all_ids = report_ids + [task_id for task_id in plan_ids if task_id not in report_ids]
 
-    rows = table or {}
+    # Rows of the pipeline's own files (an older report wrote BACKLOG.md as `excluded`) send no task to re-audit.
+    plan_dir = plan_dir_of(plan, str(snapshot["root"]))
+    rows = {path: value for path, value in (table or {}).items() if not is_pipeline_file(path, plan_dir)}
     changed = sorted(path for path, value in rows.items() if path in files and value not in ("excluded", "missing") and files[path] != value)
     gone = sorted(path for path, value in rows.items() if path not in files and value not in ("excluded", "missing"))
     unverified = sorted(path for path, value in rows.items() if value in ("excluded", "missing"))

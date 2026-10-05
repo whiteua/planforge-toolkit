@@ -198,6 +198,25 @@ class Guard(unittest.TestCase):
         self.assertEqual(out["violations"], ["code.py"])
         self.assertEqual(p.returncode, 1)
 
+    def test_backlog_at_the_root_is_a_free_file(self):
+        run("guard-begin", str(self.root), "backlog")
+        (self.root / "plan.md").write_text("plan v2\n", encoding="utf-8")
+        (self.root / "BACKLOG.md").write_text("# Backlog\n\n- [ ] note\n", encoding="utf-8")
+        p = run("guard-check", str(self.root), "backlog", str(self.root / "plan.md"))
+        out = json.loads(p.stdout)
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertEqual((out["changed"], out["violations"]), (["BACKLOG.md", "plan.md"], []))
+
+    def test_backlog_elsewhere_and_other_files_stay_violations(self):
+        run("guard-begin", str(self.root), "backlog-nested")
+        (self.root / "docs").mkdir()
+        (self.root / "docs" / "BACKLOG.md").write_text("x\n", encoding="utf-8")
+        (self.root / "BACKLOG.md").write_text("x\n", encoding="utf-8")
+        (self.root / "code.py").write_text("x = 4\n", encoding="utf-8")
+        p = run("guard-check", str(self.root), "backlog-nested", str(self.root / "plan.md"))
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertEqual(json.loads(p.stdout)["violations"], ["code.py", "docs/BACKLOG.md"])
+
     def test_check_without_begin(self):
         p = run("guard-check", str(self.root), "never-started", "plan.md")
         self.assertEqual(p.returncode, 2)

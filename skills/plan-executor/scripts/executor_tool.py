@@ -2105,6 +2105,94 @@ def _commit_conflicts(led, top, files, fix_files, current):
                         1, files=foreign)
 
 
+# Deviations from the spec (spec 2 of plan-refactoring-02): the `- ` items of the plan header's **Deviations from
+# spec:** block and the units' --note, except the token subagent-unavailable (a missing tool, not a deviation;
+# chain_tool.py run-checklist reads it) and the `External:` notes (the engineer's confirmation of an external
+# environment for one task, GATE.md; not a deviation either). commit-run writes each as one line of the goal's
+# BACKLOG.md section.
+_DEVIATIONS_RE = re.compile(r"^\*\*Deviations from spec:\*\*")
+SUBAGENT_UNAVAILABLE = "subagent-unavailable"
+_EXTERNAL_NOTE_PREFIX = "External:"
+_AMEND_SPEC = {"ru": "поправить спеку {spec}: {gist}", "en": "amend spec {spec}: {gist}"}
+
+
+def plan_deviations(plan_text, units=()):
+    """Gists of the deviations from the spec, once each and in order: the `- ` items of the header's
+    **Deviations from spec:** block (before the first `### ` heading), then the units' notes except
+    subagent-unavailable and the `External:` confirmations."""
+    found, block = [], False
+    for line in plan_text.splitlines():
+        if line.startswith("### "):
+            break
+        if _DEVIATIONS_RE.match(line):
+            block = True
+        elif block and line.startswith("- "):
+            found.append(line[2:])
+        elif block and line.strip() and not line.startswith(" "):
+            block = False
+    found += [note for unit in units for note in unit.get("notes") or []
+              if note != SUBAGENT_UNAVAILABLE and not str(note).startswith(_EXTERNAL_NOTE_PREFIX)]
+    return list(dict.fromkeys(gist for gist in (" ".join(str(item).split()) for item in found) if gist))
+
+
+def _backlog_deviations(led, top):
+    """(backlog, warnings) of commit-run: plan_deviations written through brainstorm_tool.backlog_append as
+    "amend spec <spec>: <gist>" into the goal's section (the settings' backlog, else the journal's goal) of
+    <top>/BACKLOG.md; an item already open in the section counts as `exists`. backlog is None when the run
+    has no deviation; the backlog is never a gate, so every failure is a warning."""
+    module = _load_brainstorm_tool()
+    master, spec, section, error = led["plan_path"], None, None, None
+    if module is not None and hasattr(module, "backlog_append"):
+        try:
+            info = module.journal_path_for(str(Path(led["plan_path"]).resolve()))
+            master, spec = info.get("plan") or master, info.get("spec")
+            section = module.resolve_settings(master).get("backlog") or info["goal"]
+        except Exception as exc:  # unreadable sources: no section is known
+            error = str(exc) or exc.__class__.__name__
+    try:
+        text = _read_text(master)
+    except ToolError:
+        text = ""
+    gists = plan_deviations(text, led["units"])
+    if not gists:
+        return None, []
+    if module is None or not hasattr(module, "backlog_append"):
+        return None, ["backlog-unavailable: plan-brainstorming not installed alongside; "
+                      f"{len(gists)} deviation(s) not written to BACKLOG.md"]
+    if error:
+        return None, [f"backlog-write-failed: {error}"]
+    lang = module.detect_lang_text(text)
+    path = os.path.join(top, module.BACKLOG_FILE)
+    warnings = []
+    try:
+        known = {item["text"] for item in module.backlog_parse(path, section)["items"]} if os.path.isfile(path) else set()
+    except Exception as exc:  # e.g. BACKLOG.md not in UTF-8: backlog_append reports it per item
+        known = set()
+        warnings.append(f"backlog-write-failed: {exc}")
+    result = {"section": section, "appended": [], "exists": []}
+    for gist in gists:
+        item = _AMEND_SPEC[lang].format(spec=os.path.basename(spec or master), gist=gist)
+        if item in known:
+            result["exists"].append(item)
+            continue
+        try:
+            outcome = module.backlog_append(top, section, f"plan-executor, {os.path.basename(master)}", item, lang=lang)
+        except Exception as exc:  # BacklogError, InputError: the line is missing, the commit goes on
+            warnings.append(f"backlog-write-failed: {exc}")
+            continue
+        result["exists" if outcome["action"] == "exists" else "appended"].append(item)
+    return result, list(dict.fromkeys(warnings))
+
+
+def _note_backlog(info, led, top):
+    """Add the deviations' `backlog` and the `warnings` of _backlog_deviations to the result `info` of commit-run."""
+    backlog, warnings = _backlog_deviations(led, top)
+    if backlog is not None:
+        info["backlog"] = backlog
+    if warnings:
+        info["warnings"] = warnings
+
+
 def commit_run(exec_dir, message_file, journal=None):
     """Commit the run's files and the audit's fixes on the user's branch (spec D): every refusal comes
     before the index is touched, and the commit runs the hooks. Never --no-verify, --amend, push or --force."""
@@ -2186,6 +2274,7 @@ def commit_run(exec_dir, message_file, journal=None):
         info["incomplete"] = incomplete
     _commit_conflicts(led, top, files, fix_files, current)
     if not files:
+        _note_backlog(info, led, top)
         return {"ok": True, "empty": True, "files": [], **info}
     message = _read_text(message_file)
     subject = (message.splitlines() or [""])[0].strip()
@@ -2198,6 +2287,7 @@ def commit_run(exec_dir, message_file, journal=None):
     except ToolError as exc:  # a hook refused the commit: the index goes back to how it was
         _git(top, "--literal-pathspecs", "reset", "-q", "--", *files)
         raise ToolError(f"commit-failed: {exc}", 1, files=files) from exc
+    _note_backlog(info, led, top)  # after the commit: a refusal above (bad-subject, a hook) leaves BACKLOG.md alone
     result = {"ok": True, "sha": _head_sha(top), "subject": subject, "files": files, "empty": False, **info}
     if journal:
         plan_id = (led.get("journal") or {}).get("plan") or _plan_id(led["plan_path"])

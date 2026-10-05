@@ -17,6 +17,8 @@ Give, in the dialogue language:
 - **The options:** the question's `options`, explained in one line each.
 - **A recommendation and its reason**, from the artifact and the specs, not from habit.
 
+With a question tool (PROFILES.md, Notifications and questions) ask it through that tool: the question's options as its options, each with its one-line explanation, the recommended one first and marked as such; the user's own words stay possible. Without one, as text.
+
 Then record the user's choice: `J journal-answer <journal> <Qn> --answer "<answer>"`.
 
 - **Machine questions** (text starts with `open-audit: `, `not-confirmed: `, `stage-failed: `, `drift: `, `model: `): show the options in the dialogue language, record exactly one token (the one exception is `model: <role>`, below): `accept` or `fix` (open audit of a plan others depend on: accept it as it is, or fix it first); `retry` or `stop` (a stage not confirmed or failed twice); `rewrite` or `keep` (the spec or plan changed after the stage: `rewrite` enters this stage and every later stage of the plan again, `keep` keeps this stage as it is). For `model: <role>` (the host refused the role's model and its fallback) record `retry <model>` with the model the user names for that role, `retry` alone to try the same model again, or `stop`; `retry <model>` is the only answer of two tokens.

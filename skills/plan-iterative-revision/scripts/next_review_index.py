@@ -1326,6 +1326,11 @@ def relative_to_root(root: str, path: str) -> str:
     return normalize_path(path)
 
 
+# BACKLOG.md at the repository root is a free file (CLAUDE.md, Shared paragraphs): the user writes to it at any
+# moment, so its change during a phase is never a violation. Any other path outside `allowed` still is.
+GUARD_FREE_FILES = ("BACKLOG.md",)
+
+
 def cmd_guard_check(root: str, label: str, allowed: Sequence[str]) -> int:
     snapshot_path = guard_snapshot_path(root, label)
     if not os.path.isfile(snapshot_path):
@@ -1341,7 +1346,7 @@ def cmd_guard_check(root: str, label: str, allowed: Sequence[str]) -> int:
     }
     allowed_rel = [relative_to_root(root, path) for path in allowed]
     changed = sorted(path for path in set(before) | set(after_map) if before.get(path) != after_map.get(path))
-    violations = [path for path in changed if not path_is_allowed(path, allowed_rel)]
+    violations = [path for path in changed if not path_is_allowed(path, allowed_rel) and path not in GUARD_FREE_FILES]
     os.remove(snapshot_path)
     print_json({"valid": not violations, "changed": changed, "allowed": allowed_rel, "violations": violations})
     return 0 if not violations else 1

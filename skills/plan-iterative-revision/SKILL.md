@@ -167,6 +167,7 @@ call, a chain run) is `autonomous`: `record --interaction autonomous` stops at t
 `result: limit` and never asks.
 
 A `guard-check` violation means a phase touched a forbidden file: stop and report the paths.
+`BACKLOG.md` at the repository root is never a violation: it is a free file (Language).
 The guard sees only what `git status` sees (not ignored files, not paths outside the repository).
 Without git, say that the guard is unavailable and list the files you changed yourself.
 
@@ -291,6 +292,8 @@ summaries and stop reports. Only tokens that parsers match stay in English: `###
 instructions ("Spec written to …", "MAX review passes done …", "I'm using the plan-writing
 skill …") are templates: say them in the dialogue language, not verbatim. The language is
 detected, not guessed: `ru` when more than 5% of the letters are Cyrillic, otherwise `en`.
+
+**Free backlog.** `BACKLOG.md` at the repository root is a free file: the user writes to it at any moment, and no stage treats a change to it as a foreign change.
 
 In this skill: `B.lang` from `bootstrap`.
 

@@ -113,7 +113,7 @@ same invocation.
 `## Evidence fingerprint` (`## Отпечаток улик` in a Russian report): one row `| path | SHA-256 |`
 per evidence file, that is every anchor path of the stages section and of issue `evidence`, and
 every file of the plan tasks' `Files` blocks (`brainstorm_tool.parse_plan_tasks`; a `Files` token
-that names no file is skipped). The hashes come from this audit's start snapshot: the audit is
+that names no file is skipped). The pipeline's own files are never evidence: `BACKLOG.md` at the root and the chain files by exact name in the plan's folder (`CHAIN_FILE_RE`, a copy of plan-executor's `_CHAIN_FILE_RE`); a file with such a name elsewhere is ordinary evidence. The hashes come from this audit's start snapshot: the audit is
 read-only, so they still hold at the end of the pass. A file the snapshot skips (`.gitignore`,
 outside the root) is `excluded`, with a warning; an anchored file that does not exist is
 `missing`. A second run replaces the section whole; it stands before the Fix Log, else at the end.
@@ -121,7 +121,7 @@ Without `plan-brainstorming` alongside only anchors count (warning `plan-files-u
 snapshot of another workspace (the plan is not under its root) → exit `2` `snapshot-root-mismatch`.
 
 `rescan-scope <plan> <LAST_REPORT> --snapshot <start-json> [--ratio 0.5]` compares that table with
-the start snapshot of the current audit. Output: `changed_files`, `missing_files` (hashed before,
+the start snapshot of the current audit; rows of the pipeline's own files (an older report may hold `BACKLOG.md` as `excluded`) are left out. Output: `changed_files`, `missing_files` (hashed before,
 gone now), `unverified_files` (`excluded`/`missing` rows), `reaudit` (tasks whose anchors in the
 last report or whose plan `Files` name a changed, gone or unverified file; tasks not `✅`;
 `linked_items` of open issues; tasks closed by `evidence_probe` without an anchor; tasks new in the

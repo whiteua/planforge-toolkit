@@ -25,6 +25,7 @@ Roadmap цели: {{goal_roadmap_path}}
 
 - Дефекты вне планов: `{{followups_path}}`
 - BACKLOG.md, раздел `{{backlog_section}}`: {{backlog_lines}}
+- Чек-лист после прогона: {{checklist_lines}}
 
 ## Открытые вопросы
 

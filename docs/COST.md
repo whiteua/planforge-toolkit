@@ -147,6 +147,7 @@ subagent gets only the unit's text and files, no skill instructions).
 | Date | Goal | Model | `delegated.units` | `delegated.retries` | Notes |
 |---|---|---|---|---|---|
 | 2026-10-05 | demo (2 green tasks, OS temp) | haiku | 2 | 1 | control check of spec 8: delegation works end to end; not a quality measurement |
+| 2026-10-05 | demo (2 green tasks, OS temp), rerun from the main session | haiku | 2 | 0 | repeat of the control check with the Agent tool available: both units delegated, no retry; the second subagent also wrote `docs/notes/b.md` into the project repository (its CWD), unseen by the file check scoped to the demo repository (F14) |
 
 ## How to compare
 

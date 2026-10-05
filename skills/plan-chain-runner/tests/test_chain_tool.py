@@ -1767,6 +1767,12 @@ class AuditScopeTest(unittest.TestCase):
         self.assertEqual(ct._audit_scope("---\naudit_scope: full\naudit_tasks: all\n---\n", True), ("full", None))
         self.assertEqual(ct._audit_scope("---\nlanguage: ru\n---\n", True), ("full", None))
 
+    def test_zero_padded_ids_are_normalized(self):  # F7 of plan-refactoring-02
+        review = "# R\n\n**Audit scope**: incremental\n**Audit tasks**: 03, 7.01\n"
+        self.assertEqual(ct._audit_scope(review, frontmatter=False), ("incremental", ["3", "7.1"]))
+        report = "---\naudit_scope: incremental\naudit_tasks: [02]\n---\n"
+        self.assertEqual(ct._audit_scope(report, frontmatter=True), ("incremental", ["2"]))
+
     def test_scoped_bytes(self):
         plan, size = self.PLAN, len(self.PLAN.encode("utf-8"))
         with mock.patch.object(ct, "_task_parser", return_value=self.parser):

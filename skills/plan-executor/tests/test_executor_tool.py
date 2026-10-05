@@ -2170,5 +2170,147 @@ class TestDelegationSchema(unittest.TestCase):
         self.assertIn("light", schema["properties"]["settings"]["description"])
 
 
+@unittest.skipUnless(shutil.which("git"), "git required")
+class DelegateCase(unittest.TestCase):
+    """A repository with docs/guide.md and app.py committed; app.py changed since (the run's earlier work)."""
+
+    def setUp(self):
+        self.tool = load_tool()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(os.path.realpath(tmp.name))
+        self.repo = self.base / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q")
+        self.write("docs/guide.md", "v1\n")
+        self.write("app.py", "x = 1\n")
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+        self.write("app.py", "x = 2\n")
+        self.root = os.path.realpath(str(self.repo))
+        self.snapshot = str(self.base / "delegate-task-1.json")
+
+    def git(self, *args):
+        subprocess.run(["git", *args], cwd=self.repo, capture_output=True, text=True, check=True)
+
+    def write(self, rel, text, root=None):
+        path = (root or self.repo) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def link(self, name, target):
+        try:
+            os.symlink(str(target), str(self.repo / name), target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+
+
+class TestDelegateHelpers(DelegateCase):
+    def test_root_and_no_git(self):
+        self.assertEqual(self.tool._delegate_root(str(self.repo / "docs")), self.root)
+        with self.assertRaises(ValueError) as ctx:
+            self.tool._delegate_root(str(self.base))
+        self.assertEqual((ctx.exception.code, str(ctx.exception)[:7]), (1, "no-git:"))
+
+    def test_paths_inside_and_outside_the_root(self):
+        other = self.write("x.md", "o\n", self.base / "other").parent
+        rel = lambda path: self.tool._delegate_rel(self.root, path)
+        self.assertEqual([rel("docs/guide.md"), rel("./docs/../app.py"), rel(str(self.repo / "app.py"))],
+                         ["docs/guide.md", "app.py", "app.py"])
+        self.assertEqual([rel("../other/x.md"), rel(str(other / "x.md")), rel(".")], [None, None, None])
+        self.link("out", other)
+        self.assertIsNone(rel("out/x.md"))
+
+    def test_state_lists_each_changed_file_with_its_hash(self):
+        (self.repo / "docs" / "guide.md").unlink()
+        self.write("docs/new/a.md", "n\n")
+        state = self.tool._delegate_state(self.root)
+        self.assertEqual(sorted(state), ["app.py", "docs/guide.md", "docs/new/a.md"])
+        self.assertEqual((state["app.py"][0], state["docs/guide.md"], state["docs/new/a.md"][0]),
+                         (" M", [" D", None], "??"))
+        self.assertRegex(state["docs/new/a.md"][1], r"^[0-9a-f]{40,64}$")
+        self.assertNotIn("app.py", self.tool._delegate_state(self.root, {"app.py"}))
+
+
+class TestDelegateSnapshot(DelegateCase):
+    def test_snapshot_records_root_and_entries(self):
+        out = self.tool.delegate_snapshot(str(self.repo), self.snapshot)
+        data = json.loads(Path(self.snapshot).read_text(encoding="utf-8"))
+        self.assertEqual((out["ok"], out["root"], out["entries"]), (True, self.root, 1))
+        self.assertEqual((data["version"], data["root"], sorted(data["entries"])), (1, self.root, ["app.py"]))
+        self.assertEqual(self.tool._load_delegate_snapshot(self.snapshot, self.root), data["entries"])
+
+    def test_a_snapshot_inside_the_repository_leaves_itself_out(self):
+        inside = self.repo / "delegate.json"
+        self.tool.delegate_snapshot(str(self.repo), str(inside))
+        self.assertEqual(sorted(json.loads(inside.read_text(encoding="utf-8"))["entries"]), ["app.py"])
+
+    def test_invalid_snapshots(self):
+        bad = self.base / "bad.json"
+        cases = [(self.base / "missing.json", None), (bad, "{"), (bad, '{"version": 2, "root": "x", "entries": {}}'),
+                 (bad, json.dumps({"version": 1, "root": str(self.base), "entries": {}}))]
+        for path, text in cases:
+            if text is not None:
+                bad.write_text(text, encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                self.tool._load_delegate_snapshot(str(path), self.root)
+            self.assertEqual(ctx.exception.code, 2, text)
+            self.assertTrue(str(ctx.exception).startswith("snapshot-invalid:"), str(ctx.exception))
+
+    def test_snapshot_without_git_is_no_git(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.tool.delegate_snapshot(str(self.base), self.snapshot)
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertFalse(os.path.exists(self.snapshot))
+
+
+class TestDelegateCheck(DelegateCase):
+    def setUp(self):
+        super().setUp()
+        self.tool.delegate_snapshot(str(self.repo), self.snapshot)
+
+    def check(self, *files):
+        return self.tool.delegate_check(str(self.repo), self.snapshot, list(files))
+
+    def test_an_honest_unit_passes(self):
+        self.write("docs/guide.md", "v2\n")
+        self.write("docs/new/a.md", "n\n")
+        self.write("docs/g-chain.json", "{}\n")  # another agent of the chain wrote it: not reported
+        out = self.check("docs/guide.md", "./docs/new/a.md")
+        self.assertEqual((out["verdict"], out["outside"], out["unreported"], out["phantom"]), ("pass", [], [], []))
+        self.assertEqual(out["changed"], ["docs/g-chain.json", "docs/guide.md", "docs/new/a.md"])
+
+    def test_unreported_and_phantom(self):
+        self.write("docs/guide.md", "v2\n")
+        self.write("notes.txt", "x\n")
+        out = self.check("docs/guide.md", "docs/other.md")
+        self.assertEqual((out["verdict"], out["unreported"], out["phantom"]), ("fail", ["notes.txt"], ["docs/other.md"]))
+
+    def test_paths_outside_the_repository_fail(self):
+        other = self.base / "other"
+        far = self.write("x.md", "o\n", other)
+        self.write("docs/guide.md", "v2\n")
+        out = self.check("docs/guide.md", "../other/x.md", str(far))
+        self.assertEqual((out["verdict"], out["outside"]), ("fail", ["../other/x.md", str(far)]))
+        self.link("out", other)
+        self.assertEqual(self.check("docs/guide.md", "out/x.md")["outside"], ["out/x.md"])
+
+    def test_cli_modes_and_exit_codes(self):
+        run = lambda *args: subprocess.run([sys.executable, str(TOOL_PATH), "delegate-check", *args],
+                                           capture_output=True, text=True, encoding="utf-8", check=False)
+        snapshot = str(self.base / "cli.json")
+        proc = run(str(self.repo), "--snapshot-out", snapshot)
+        self.assertEqual((proc.returncode, json.loads(proc.stdout)["entries"]), (0, 1))
+        self.write("docs/guide.md", "v2\n")
+        proc = run(str(self.repo), "--snapshot", snapshot, "--files", "docs/guide.md")
+        self.assertEqual((proc.returncode, json.loads(proc.stdout)["verdict"]), (0, "pass"))
+        proc = run(str(self.repo), "--snapshot", snapshot, "--files")
+        self.assertEqual(json.loads(proc.stdout)["unreported"], ["docs/guide.md"])
+        self.assertEqual(run(str(self.repo), "--snapshot", str(self.base / "nope.json")).returncode, 2)
+        self.assertEqual(run(str(self.base), "--snapshot-out", snapshot).returncode, 1)
+        self.assertEqual(run(str(self.repo), "--snapshot-out", snapshot, "--files", "a").returncode, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

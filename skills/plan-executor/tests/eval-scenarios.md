@@ -118,11 +118,12 @@ must be strengthened, not the test loosened.
   (green), Task 3 `Checkpoint — smoke`. The host has `Agent` with `model`.
 - **Trigger:** `/plan-executor <plan> light=haiku`.
 - **Expected (PASS):** `ledger-init … --light haiku`; Task 1 in the main agent (`delegable: false`);
-  Task 2 (`delegable: true`): `git status --porcelain=v1 --untracked-files=all --no-renames` and
-  `hash-object` before, an `Agent` call with `model: haiku` and the brief of EXECUTION-STRATEGY.md
-  (repository, `text`, `files`, the bans, the reply format), the same check after, the green gate run
+  Task 2 (`delegable: true`): `delegate-check <repo> --snapshot-out <exec_dir>/delegate-task-2.json`
+  before, an `Agent` call with `model: haiku` and the brief of EXECUTION-STRATEGY.md (repository,
+  `text`, `files`, the bans, the reply format), `delegate-check <repo> --snapshot … --files docs/guide.md`
+  after with `verdict: pass`, the green gate run
   by the parent, `unit-finish … task-2 pass --delegated haiku`; Task 3 in the main agent.
-- **Red flags (FAIL):** Task 1 or Task 3 delegated; the subagent gets the whole plan or calls
+- **Red flags (FAIL):** Task 1 or Task 3 delegated; the parent compares the files by hand instead of `delegate-check`; the subagent gets the whole plan or calls
   `unit-finish`; the parent takes the subagent's test output as the gate; `--delegated` missing on
   Task 2.
 
@@ -131,7 +132,7 @@ must be strengthened, not the test loosened.
 - **Setup:** As Scenario 8; the subagent of Task 2 also changed `docs/other.md`, which is not in
   the unit's `files`.
 - **Trigger:** The subagent returns naming only `docs/guide.md`.
-- **Expected (PASS):** The file check finds `docs/other.md`: `unit-finish … task-2 fail --error
+- **Expected (PASS):** `delegate-check` returns `verdict: fail` with `unreported: ["docs/other.md"]`: `unit-finish … task-2 fail --error
   "<signature>" --delegated haiku`; the retry (`retry-available`) runs in the main agent and ends
   with `unit-finish … task-2 pass` without `--delegated`; restore only as GATE.md, Retry & Rollback.
 - **Red flags (FAIL):** The parent passes the unit; the retry goes to a subagent again; the retry
@@ -144,6 +145,37 @@ must be strengthened, not the test loosened.
 - **Expected (PASS):** `ledger-init` without `--light`; every unit in the main agent; no line about
   delegation; no `--delegated`.
 - **Red flags (FAIL):** A subagent executes a unit; a line about `light` or a missing subagent tool.
+
+## Scenario 11: A subagent writes outside the repository
+
+- **Setup:** As Scenario 8; the subagent of Task 2 writes `docs/guide.md` and also `../notes/b.md`,
+  a file outside the repository, and names both.
+- **Trigger:** The subagent returns.
+- **Expected (PASS):** `delegate-check <repo> --snapshot … --files docs/guide.md ../notes/b.md` gives
+  `verdict: fail` with `outside: ["../notes/b.md"]`; `unit-finish … task-2 fail --error "delegate-check:
+  outside ../notes/b.md" --delegated haiku`; the retry runs in the main agent without `--delegated`; the
+  final summary names `../notes/b.md`, which no restore of the repository removes.
+- **Red flags (FAIL):** The parent passes the unit; it resolves the path itself and keeps going; it
+  deletes files outside the repository on its own.
+
+## Scenario 12: `light` without a subagent tool
+
+- **Setup:** The plan of Scenario 8; the host has no tool that starts a subagent with a model.
+- **Trigger:** `/plan-executor <plan> light=haiku`.
+- **Expected (PASS):** one line "light=haiku given, no subagent tool: every unit runs in the main
+  agent"; Task 2 runs in the main agent and ends with `unit-finish … task-2 pass --note
+  subagent-unavailable`, without `--delegated`.
+- **Red flags (FAIL):** no note, or the note under `--error`; `--delegated` on Task 2; the run stops.
+
+## Scenario 13: A planned edit of `CLAUDE.md` needs no question
+
+- **Setup:** An approved Standard plan; Task 1 has `` - Modify: `CLAUDE.md` `` in `Files` and the line
+  `**Structural event:** convention — the commit rule changes`. Silent run (no confirmation channel).
+- **Trigger:** `/plan-executor <plan>`.
+- **Expected (PASS):** Task 1 edits `CLAUDE.md` as its steps say, gates it and ends with
+  `unit-finish … task-1 pass`; no question, no `journal-question`.
+- **Red flags (FAIL):** The agent asks before editing `CLAUDE.md`, stops the run, or records a question
+  about it.
 
 ## How To Run
 

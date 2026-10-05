@@ -93,26 +93,28 @@ class TestRunDiffNoGit(RunDiffCase):
         self.assertTrue(out["errors"][0].startswith("no-git:"), out)
 
 
-class TestPipelineArtifact(unittest.TestCase):
+class TestRunArtifact(unittest.TestCase):
+    """F5 of plan-refactoring-02: run-diff and commit-run leave out only the pipeline's own files."""
+
     def setUp(self):
         self.tool = load_tool()
 
-    def test_chain_artifacts_anywhere_and_root_backlog(self):
-        for rel in ("g-spec.md", "a/b/g-spec.md", "g-impl.md", "x/g-impl-a.md", "g-impl-roadmap.md",
-                    "g-impl-review-3.md", "g-impl-report-2-final.md", "g-chain.json", "g-diffs.md",
-                    "g-followups.json", "BACKLOG.md"):
-            self.assertTrue(self.tool._is_pipeline_artifact(rel, None), rel)
+    def test_chain_names_in_the_plan_folder_backlog_and_the_journal(self):
+        for rel in ("docs/plans/g-spec.md", "docs/plans/g-impl.md", "docs/plans/g-impl-a.md",
+                    "docs/plans/g-impl-roadmap.md", "docs/plans/g-impl-review-3.md",
+                    "docs/plans/g-impl-report-2-final.md", "docs/plans/g-chain.json", "docs/plans/g-diffs.md",
+                    "docs/plans/g-followups.json", "BACKLOG.md", "specs/g-chain.json"):
+            self.assertTrue(self.tool._is_run_artifact(rel, "docs/plans", ("specs/g-chain.json",)), rel)
 
-    def test_regular_files_are_kept(self):
-        for rel in ("src/app.py", "sub/BACKLOG.md", "docs/spec.md", "README.md", "g-chain.json.bak",
-                    "docs/plans2/x.py"):
-            self.assertFalse(self.tool._is_pipeline_artifact(rel, "docs/plans"), rel)
+    def test_the_same_names_elsewhere_and_other_files_are_the_runs_work(self):
+        for rel in ("skills/plan-writing/tests/fixtures/tricky-impl.md", "a/b/g-spec.md", "docs/plans/notes.txt",
+                    "docs/plans/deep/g-impl.md", "sub/BACKLOG.md", "src/app.py"):
+            self.assertFalse(self.tool._is_run_artifact(rel, "docs/plans"), rel)
 
-    def test_plan_directory_unless_it_is_the_root(self):
-        self.assertTrue(self.tool._is_pipeline_artifact("docs/plans/notes.txt", "docs/plans"))
-        self.assertTrue(self.tool._is_pipeline_artifact("docs\\plans\\deep\\x.py", "docs\\plans"))
-        for root in (None, "", "."):
-            self.assertFalse(self.tool._is_pipeline_artifact("notes.txt", root), root)
+    def test_plan_at_the_root_or_outside_the_repository(self):
+        self.assertTrue(self.tool._is_run_artifact("g-impl-report-1.md", ""))
+        self.assertFalse(self.tool._is_run_artifact("docs/g-impl.md", ""))
+        self.assertEqual([self.tool._is_run_artifact(rel, None) for rel in ("g-impl.md", "BACKLOG.md")], [False, True])
 
 
 @unittest.skipUnless(shutil.which("git"), "git required")
@@ -346,8 +348,8 @@ class TestRunDiffMarkdown(RunDiffCase):
         files = {f["path"]: (f["status"], f["old_path"], f["added"], f["deleted"], f["binary"]) for f in result["files"]}
         self.assertEqual(files, {"blob.bin": ("A", None, None, None, True), "drop.py": ("D", None, 0, 1, False),
                                  "my dir/a b.py": ("A", None, 1, 0, False), "new.py": ("R", "old.py", 0, 0, False),
-                                 "src/app.py": ("M", None, 1, 1, False)})
-        self.assertEqual(result["excluded"], ["BACKLOG.md", "docs/plans/p1-impl-review-1.md", "notes-spec.md"])
+                                 "notes-spec.md": ("A", None, 1, 0, False), "src/app.py": ("M", None, 1, 1, False)})
+        self.assertEqual(result["excluded"], ["BACKLOG.md", "docs/plans/p1-impl-review-1.md"])
         self.assertEqual((result["lang"], result["path"]), ("en", str(self.out.resolve())))
         lines = text.splitlines()
         for line in ("# Diff report: p1-impl", "- Plan: [p1-impl.md](p1-impl.md)",
@@ -356,14 +358,24 @@ class TestRunDiffMarkdown(RunDiffCase):
                      "| [my dir/a b.py](<../../my dir/a b.py>) | A | 1 | 0 |  |",
                      "| [new.py](../../new.py) | R | 0 | 0 | renamed from `old.py` |",
                      "| [blob.bin](../../blob.bin) | A | - | - | binary file |",
+                     "| [notes-spec.md](../../notes-spec.md) | A | 1 | 0 |  |",
                      "### [src/app.py](../../src/app.py)", "+x = 2"):
             self.assertIn(line, lines)
         self.assertNotIn("### [blob.bin](../../blob.bin)", lines)
         self.assertIn("## Not included (pipeline artifacts)", lines)
-        for artifact in ("BACKLOG.md", "docs/plans/p1-impl-review-1.md", "notes-spec.md"):
+        for artifact in ("BACKLOG.md", "docs/plans/p1-impl-review-1.md"):
             self.assertIn(f"- `{artifact}`", lines)  # listed as not included, never in the table or a diff
             self.assertNotIn(f"[{artifact}]", text)
             self.assertNotIn(f"b/{artifact}", text)
+
+    def test_a_chain_name_outside_the_plan_folder_is_in_the_report(self):  # F5 of plan-refactoring-02
+        self.start()
+        self.unit("task-1", {"skills/x/tests/fixtures/tricky-impl.md": "t\n", "docs/plans/notes.txt": "n\n"})
+        result, text = self.report()
+        self.assertEqual(sorted(f["path"] for f in result["files"]),
+                         ["docs/plans/notes.txt", "skills/x/tests/fixtures/tricky-impl.md"])
+        self.assertEqual(result["excluded"], [])
+        self.assertIn("### [skills/x/tests/fixtures/tricky-impl.md](../../skills/x/tests/fixtures/tricky-impl.md)", text)
 
     def test_russian_plan_truncation_fence_and_overwrite(self):
         self.start(plan_text=RU_PLAN)

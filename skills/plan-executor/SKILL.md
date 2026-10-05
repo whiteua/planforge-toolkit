@@ -40,6 +40,8 @@ $T checkpoint-restore <repo> <sha> [--paths <file> ...] --exec-dir <exec_dir>   
 $T checkpoint-prune <exec_dir>            # after the run, with confirmation
 $T ledger-path <plan_path> --workdir <repo>   # commit mode: where this plan's ledger is; reads only
 $T commit-run  <exec_dir> --message-file <file> [--journal <journal>]   # commit mode only: the run's files + the audit's fixes, with hooks
+$T delegate-check <repo> --snapshot-out <exec_dir>/delegate-<unit>.json   # a delegated unit: the snapshot before its subagent
+$T delegate-check <repo> --snapshot <exec_dir>/delegate-<unit>.json --files <path>...   # after it: verdict pass|fail
 ```
 
 Other commands (`ledger-next`, `ledger-mark`, `ledger-status`, `parse-tasks`, …) are listed in [TOOLING.md](references/TOOLING.md); the loop does not need them.
@@ -51,7 +53,7 @@ Other commands (`ledger-next`, `ledger-mark`, `ledger-status`, `parse-tasks`, �
 
    | `reason` | Action |
    |---|---|
-   | `ready`, `retry-available` | For every `external` entry: `confirmed` → one line, no question; otherwise ask (only this task / the whole run / stop; "the whole run" only for an entry with `access` and a known environment) or STOP on `deny` ([GATE.md](references/GATE.md)). Execute exactly this unit using `text` and `files` from the result (do not re-read the whole plan), then gate it with `strategy` ([EXECUTION-STRATEGY.md](references/EXECUTION-STRATEGY.md)) and call `unit-finish`. With `strategy.delegable: true` and a `light` model, the unit may go to a subagent on that model (EXECUTION-STRATEGY.md, Delegation); the file check, the gate and `unit-finish … --delegated <model>` stay with you, and a retry always runs in the main agent. |
+   | `ready`, `retry-available` | For every `external` entry: `confirmed` → one line, no question; otherwise ask (only this task / the whole run / stop; "the whole run" only for an entry with `access` and a known environment) or STOP on `deny` ([GATE.md](references/GATE.md)). Execute exactly this unit using `text` and `files` from the result (do not re-read the whole plan), then gate it with `strategy` ([EXECUTION-STRATEGY.md](references/EXECUTION-STRATEGY.md)) and call `unit-finish`. With `strategy.delegable: true` and a `light` model, the unit may go to a subagent on that model (EXECUTION-STRATEGY.md, Delegation); the file check (`delegate-check` before and after), the gate and `unit-finish … --delegated <model>` stay with you, and a retry always runs in the main agent. |
    | `in-progress` | A previous attempt was not finished: gate the current state and call `unit-finish`. |
    | `foreign-changes` | Files changed outside the run since the last unit (`foreign_changes`: `{path, status}`); nothing is marked running. Ask the engineer: accept / restore these files / stop ([GATE.md](references/GATE.md)). Without a confirmation channel, STOP with a stop-report listing the files. |
    | `exhausted`, `stagnated`, `blocked` | STOP with a stop-report. |

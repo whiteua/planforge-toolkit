@@ -1385,6 +1385,18 @@ class RescanHelperTests(unittest.TestCase):
         self.assertEqual(module.stub_title(item), "Alpha done")
 
 
+class TaskIdNormalizationTests(unittest.TestCase):
+    """F7 of plan-refactoring-02: `Task 01` of a plan and `1` of a report are one task."""
+
+    def test_zero_padded_ids(self) -> None:
+        module = load_resolver()
+        self.assertEqual([module.normalize_plan_task_id(v) for v in ("01.02", "7", "A1", "1.10")],
+                         ["1.2", "7", "a1", "1.10"])
+        plan = "# P\n\n### Task 01: A\n\n**Files:**\n- Modify: `src/a.py`\n\n- [ ] **Step 1: a**\n"
+        self.assertEqual(module.plan_task_files(plan), {"1": ["src/a.py"]})
+        self.assertEqual(module.linked_ids("Task 01.1", ["1.1"]), ["1.1"])
+
+
 class RescanScopeTests(IncrementalFixture, unittest.TestCase):
     """rescan_scope: tasks to audit again from the last report's evidence fingerprint and the start snapshot."""
 
@@ -1464,6 +1476,70 @@ class RescanScopeCommandTests(IncrementalFixture, unittest.TestCase):
             self.assertEqual(run_tool("rescan-scope", str(plan), str(report), "--snapshot", str(plan)).returncode, 2)
             self.assertEqual(run_tool("rescan-scope", str(plan), str(report), "--snapshot", str(start), "--ratio", "0").returncode, 2)
             self.assertEqual(run_tool("rescan-scope", str(plan), str(root / "nope.md"), "--snapshot", str(start)).returncode, 2)
+
+
+class RealPathTests(IncrementalFixture, unittest.TestCase):
+    """F12 of plan-refactoring-02: paths are compared after realpath and normcase."""
+
+    def links(self, pairs) -> None:
+        try:
+            for link, target in pairs:
+                os.symlink(str(target), str(link), target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+
+    def test_a_link_to_the_root_is_inside_and_a_link_out_is_not(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps, \
+                tempfile.TemporaryDirectory() as far:
+            root, report, start = self.make(tmp, snaps)
+            write(Path(far) / "main-plan.md", INC_PLAN)
+            alias = Path(snaps) / "alias"
+            self.links([(alias, root), (root / "ext", far)])
+            process = run_tool("evidence-fingerprint", str(alias / report.name), "--snapshot", str(start),
+                               "--plan", str(alias / "main-plan.md"))
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            process = run_tool("rescan-scope", str(alias / "main-plan.md"), str(alias / report.name), "--snapshot", str(start))
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            process = run_tool("rescan-scope", str(root / "ext" / "main-plan.md"), str(report), "--snapshot", str(start))
+            self.assertEqual(process.returncode, 2, process.stdout)
+            self.assertTrue(read_json(process)["errors"][0].startswith("snapshot-root-mismatch"))
+
+    def test_ensure_inside_spells_the_path_under_the_root(self) -> None:
+        module = load_resolver()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as far:
+            root = Path(tmp)
+            write(root / "p.md", "x\n")
+            write(Path(far) / "q.md", "y\n")
+            self.links([(Path(far) / "alias", root), (root / "out", far)])
+            self.assertEqual(module.ensure_inside(str(root), str(Path(far) / "alias" / "p.md")),
+                             (os.path.join(os.path.abspath(str(root)), "p.md"), "p.md"))
+            with self.assertRaises(module.ToolError):
+                module.ensure_inside(str(root), "out/q.md")
+
+
+class Utf8InputTests(IncrementalFixture, unittest.TestCase):
+    """F12 of plan-refactoring-02: a plan, report or snapshot that is not UTF-8 is a JSON error with exit 2."""
+
+    def test_not_utf8_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, start = self.make(tmp, snaps)
+            plan = root / "main-plan.md"
+            broken = Path(snaps) / "broken.json"
+            broken.write_bytes('{"root": "Задача", "files": {}}'.encode("cp1251"))
+            process = run_tool("rescan-scope", str(plan), str(report), "--snapshot", str(broken))
+            self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+            self.assertTrue(read_json(process)["errors"][0].startswith("invalid fingerprint snapshot"))
+            plan.write_bytes("# План\n\n### Task 1: Альфа\n".encode("cp1251"))
+            for args in (("rescan-scope", str(plan), str(report), "--snapshot", str(start)),
+                         ("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan", str(plan))):
+                process = run_tool(*args)
+                self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+                self.assertTrue(read_json(process)["errors"][0].startswith("not-utf8:"), process.stdout)
+            write(plan, INC_PLAN)
+            report.write_bytes("# Отчёт\n".encode("cp1251"))
+            process = run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan", str(plan))
+            self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+            self.assertTrue(read_json(process)["errors"][0].startswith("not-utf8:"), process.stdout)
 
 
 class CarryStageLinesTests(unittest.TestCase):

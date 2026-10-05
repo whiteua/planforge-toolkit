@@ -947,6 +947,98 @@ def checkpoint_prune(workdir, run_id):
     return {"pruned": refs}
 
 
+# delegate-check (F14 of plan-refactoring-02): what a delegated unit's subagent changed against what it named.
+DELEGATE_SNAPSHOT_VERSION = 1
+
+
+def _delegate_root(repo):
+    """Real path of the repository root of `repo`; no-git (exit 1) outside a git working tree."""
+    if checkpoint_detect(repo)["vcs"] != "git":
+        raise ToolError(f"no-git: {repo} is not a git working tree; delegate-check needs git", 1)
+    return os.path.realpath(_git(repo, "rev-parse", "--show-toplevel").strip())
+
+
+def _delegate_rel(root, path):
+    """`path` (relative to `root`, or absolute) as a root-relative POSIX path after realpath and normcase; None when
+    it leaves the root: `..`, an absolute path elsewhere, a link out of it, the root itself."""
+    raw = str(path)
+    real = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(root, raw))
+    base = os.path.normcase(root)
+    try:
+        inside = os.path.commonpath([os.path.normcase(real), base]) == base
+    except ValueError:  # another drive on Windows
+        return None
+    rel = os.path.relpath(real, root).replace(os.sep, "/") if inside else None
+    return None if rel in (None, ".") else rel
+
+
+def _delegate_state(root, skip=()):
+    """{path: [status, blob hash or None]} of every path `git status --porcelain=v1 --untracked-files=all
+    --no-renames` lists (untracked files one by one); a path that is not a file has no hash. `skip`: paths left out."""
+    out = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+    entries = {item[3:]: item[:2] for item in out.split("\0") if len(item) > 3 and item[3:] not in skip}
+    files = [rel for rel in sorted(entries) if os.path.isfile(os.path.join(root, rel))]
+    hashes = {}
+    if files:  # one hash-object for all paths: the same filters as git add, no command-line limit
+        result = subprocess.run(["git", "hash-object", "--stdin-paths"], cwd=root, input="\n".join(files) + "\n",
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        if result.returncode != 0:
+            raise ToolError(f"hash-object-failed: {result.stderr.strip()}", 1)
+        hashes = dict(zip(files, result.stdout.split()))
+    return {rel: [status, hashes.get(rel)] for rel, status in entries.items()}
+
+
+def delegate_snapshot(repo, out_path):
+    """`delegate-check <repo> --snapshot-out F`: the state before the subagent, written to F. F itself is left out
+    when it lies in the repository."""
+    root = _delegate_root(repo)
+    own = _delegate_rel(root, os.path.abspath(out_path))
+    state = _delegate_state(root, {own} if own else ())
+    data = {"version": DELEGATE_SNAPSHOT_VERSION, "root": root, "entries": state}
+    Path(out_path).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return {"ok": True, "snapshot": str(Path(out_path).resolve()), "root": root, "entries": len(state)}
+
+
+def _load_delegate_snapshot(path, root):
+    """The entries of a delegate-check snapshot of `root`; snapshot-invalid (exit 2) for a file that cannot be read,
+    is not such a snapshot, or was taken in another repository."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise ToolError(f"snapshot-invalid: {path}: {exc}", 2) from exc
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if (not isinstance(entries, dict) or data.get("version") != DELEGATE_SNAPSHOT_VERSION
+            or not isinstance(data.get("root"), str)):
+        raise ToolError(f"snapshot-invalid: {path}: not a delegate-check snapshot", 2)
+    if os.path.normcase(os.path.realpath(data["root"])) != os.path.normcase(root):
+        raise ToolError(f"snapshot-invalid: {path}: taken in {data['root']}, not in {root}", 2)
+    return entries
+
+
+def delegate_check(repo, snapshot_path, files):
+    """`delegate-check <repo> --snapshot F --files P…`: the verdict of a delegated attempt. `changed`: paths whose
+    status or hash differs from the snapshot; `outside`: named paths that leave the root (_delegate_rel);
+    `unreported`: changed and not named, except the pipeline's files by name (_is_chain_file), which other agents
+    of a chain may write meanwhile; `phantom`: named and not changed. `fail` when any of the three is not empty."""
+    root = _delegate_root(repo)
+    before = _load_delegate_snapshot(snapshot_path, root)
+    own = _delegate_rel(root, os.path.abspath(snapshot_path))
+    after = _delegate_state(root, {own} if own else ())
+    changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
+    outside, named = [], {}
+    for raw in files:
+        rel = _delegate_rel(root, raw)
+        if rel is None:
+            outside.append(str(raw))
+        else:
+            named.setdefault(os.path.normcase(rel), rel)
+    keys = {os.path.normcase(rel) for rel in changed}
+    unreported = [rel for rel in changed if os.path.normcase(rel) not in named and not _is_chain_file(rel)]
+    phantom = sorted(rel for key, rel in named.items() if key not in keys)
+    return {"ok": True, "verdict": "fail" if outside or unreported or phantom else "pass", "outside": outside,
+            "unreported": unreported, "phantom": phantom, "changed": changed}
+
+
 def recommend_gate(weight):
     return {"gate_tier": _normalize_weight(weight), "no_tests": "escalate"}
 
@@ -1380,25 +1472,6 @@ def run_diff(exec_dir):
     }
 
 
-# Files the pipeline writes itself never enter a run's diff report or commit (spec C).
-_PIPELINE_ARTIFACT_RE = re.compile(
-    r"(?:.*-spec\.md|.*-impl.*\.md|.*-review-.*\.md|.*-report-.*\.md|.*-roadmap\.md"
-    r"|.*-chain\.json|.*-diffs\.md|.*-followups\.json)")
-
-
-def _is_pipeline_artifact(rel, plan_dir_rel):
-    """True for the plan directory (unless it is the repository root), the chain's artifacts in
-    any directory (matched on the file name) and BACKLOG.md at the root. `rel` and `plan_dir_rel`
-    are relative to the repository root."""
-    rel = str(rel).replace("\\", "/").strip("/")
-    plan_dir = str(plan_dir_rel or "").replace("\\", "/").strip("/")
-    if rel in _FOREIGN_IGNORED:
-        return True
-    if plan_dir not in ("", ".") and (rel == plan_dir or rel.startswith(plan_dir + "/")):
-        return True
-    return bool(_PIPELINE_ARTIFACT_RE.fullmatch(rel.rsplit("/", 1)[-1]))
-
-
 # The user's git config must not change the report: no colour, no external diff or textconv driver,
 # the a/ and b/ prefixes whatever diff.noprefix or diff.mnemonicPrefix say.
 _DIFF_PLAIN = ("--no-color", "--no-ext-diff", "--no-textconv")
@@ -1607,7 +1680,7 @@ def run_diff_markdown(exec_dir, out_path, journal=None):
     baseline, last = info["baseline"], info["last"]
     root = os.path.realpath(_diff_git(led["workdir"], "rev-parse", "--show-toplevel").strip())
     plan = os.path.realpath(led["plan_path"])
-    plan_dir_rel = os.path.relpath(os.path.dirname(plan), root) if _inside(plan, root) else ""
+    chain_dir, own = _plan_dir(led, root), _own_journal_rels(led, root)
     entries = {entry["path"]: dict(entry, fixed=False, target=last, posix=_posix_only(entry["path"]),
                                    command=f"git diff {baseline} {last} -- {_top_literal(entry['path'])}")
                for entry in _diff_entries(root, baseline, last)}
@@ -1628,7 +1701,7 @@ def run_diff_markdown(exec_dir, out_path, journal=None):
                                           command=f"git diff {baseline} -- {_top_literal(entry['path'])}")
         # add -A skips ignored files, so no tree holds them: named, never dropped silently.
         ignored = sorted(rel for rel in _git_ignored(root, fix_files) if rel not in entries)
-    excluded = sorted(path for path in entries if _is_pipeline_artifact(path, plan_dir_rel))
+    excluded = sorted(path for path in entries if _is_run_artifact(path, chain_dir, own))
     kept = [entries[path] for path in sorted(entries) if path not in excluded]
     report_dir = os.path.dirname(os.path.realpath(out_path))
     for entry in kept:
@@ -1806,7 +1879,8 @@ def cmd_ledger_path(args):
 # Files of the pipeline itself: an exact name in the run's plan folder (any folder when no ledger tells
 # the folder), plus BACKLOG.md at the root. The skills write them between units, so they are never a foreign
 # change and a rollback never deletes or rewrites them. Any other file stays watched, in the plan's folder
-# too (diffs and commits use _is_pipeline_artifact), and so does a name like api/openapi-spec.md elsewhere.
+# too (diffs and commits leave out these names only in the plan folder: _is_run_artifact), and so does a name like
+# api/openapi-spec.md elsewhere.
 _CHAIN_FILE_RE = re.compile(
     r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
     r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
@@ -1821,6 +1895,17 @@ def _is_chain_file(rel, plan_dir=None, own=()):
         return True
     folder, _, name = rel.rpartition("/")
     return bool(_CHAIN_FILE_RE.fullmatch(name)) and (plan_dir is None or folder == plan_dir)
+
+
+def _is_run_artifact(rel, plan_dir, own=()):
+    """The pipeline's own files that run-diff and commit-run leave out (F5 of plan-refactoring-02): BACKLOG.md at the
+    root, the run's journal and its lock (`own`, _own_journal_rels) and a _CHAIN_FILE_RE name in the plan's folder
+    (`plan_dir`, _plan_dir). A file with such a name elsewhere is the run's work, e.g. a test fixture named like a
+    plan. With plan_dir None (a plan outside the repository) no name is left out."""
+    rel = str(rel).replace("\\", "/")
+    if plan_dir is None:
+        return rel in _FOREIGN_IGNORED or rel in own
+    return _is_chain_file(rel, plan_dir, own)
 
 
 def _plan_dir(led, top=None):
@@ -2062,11 +2147,12 @@ def commit_run(exec_dir, message_file, journal=None):
         raise ToolError("run-incomplete: a unit is still running: " + ", ".join(unit["id"] for unit in running)
                         + "; finish it (unit-finish) or roll it back before the commit", 1, units=running)
     run_files = _changed_paths(top, baseline, last) if baseline and last else set()
-    plan = os.path.realpath(led["plan_path"])
-    plan_dir = os.path.relpath(os.path.dirname(plan), top) if _inside(plan, top) else ""
+    chain_dir = _plan_dir(led, top)  # e.g. api/openapi-spec.md is a project file, not the pipeline's (F3)
+    own = _own_journal_rels(led, top)
     current = _worktree_tree(top, journal=_run_journal(led))
     pool = run_files | fix_files
-    candidates = {rel for rel in pool if not _is_pipeline_artifact(rel, plan_dir)}
+    # Only the pipeline's own files stay out; the same names elsewhere are the run's work (F5 of plan-refactoring-02).
+    candidates = {rel for rel in pool if not _is_run_artifact(rel, chain_dir, own)}
     # A file whose working copy equals HEAD is committed already (by an earlier call or by the user).
     files = sorted(candidates & _changed_paths(top, _head_sha(top), current))
     failed = [unit["id"] for unit in led["units"] if unit["status"] == "failed"]
@@ -2091,17 +2177,11 @@ def commit_run(exec_dir, message_file, journal=None):
             raise ToolError(f"head-moved: HEAD {head or '(unborn)'} does not descend from {led['baseline_head']}, "
                             "the HEAD the run started from; switch back or commit by hand", 1,
                             baseline_head=led["baseline_head"], head=head) from None
-    excluded = sorted(pool - candidates)  # run files that are the pipeline's artifacts: never committed
-    # Dropped by the broad rules only (plan folder, name patterns), not as the pipeline's own files:
-    # they may be real project files, so the agent names them to the user. A *-chain.json other than
-    # the run's journal and its lock is a project file too (Task 53), e.g. config/supply-chain.json.
-    own = _run_journal(led)
-    own = os.path.realpath(own) if own else None
-    own = os.path.relpath(own, top).replace(os.sep, "/") if own and _inside(own, top) else None
-    chain_dir = _plan_dir(led, top)  # e.g. api/openapi-spec.md is a project file, not the pipeline's (F3)
+    excluded = sorted(pool - candidates)  # the pipeline's own files among the run's files: never committed
+    # A *-chain.json in the plan's folder other than the run's journal and its lock may be a project file (Task 53),
+    # e.g. another goal's journal: it is left out by its name, so the agent names it to the user.
     info = {"excluded": excluded, "excluded_outside_chain": [
-        rel for rel in excluded if not _is_chain_file(rel, chain_dir)
-        or (rel.endswith(("-chain.json", "-chain.json.lock")) and rel not in (own, f"{own}.lock"))]}
+        rel for rel in excluded if rel.endswith(("-chain.json", "-chain.json.lock")) and rel not in own]}
     if incomplete:
         info["incomplete"] = incomplete
     _commit_conflicts(led, top, files, fix_files, current)
@@ -2351,6 +2431,14 @@ def cmd_render_progress(args):
     return render_progress(args.exec_dir)
 
 
+def cmd_delegate_check(args):
+    if args.snapshot_out:
+        if args.files is not None:
+            raise ToolError("delegate-check-usage: --files goes with --snapshot, not with --snapshot-out", 2)
+        return delegate_snapshot(args.repo, args.snapshot_out)
+    return delegate_check(args.repo, args.snapshot, args.files or [])
+
+
 def _register(command, handler, configure):
     COMMANDS[command] = (handler, configure)
 
@@ -2473,6 +2561,14 @@ def _configure_commit_run(parser):
     parser.add_argument("--journal", help="chain journal (default: the ledger's journal)")
 
 
+def _configure_delegate_check(parser):
+    parser.add_argument("repo")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--snapshot-out", metavar="FILE", help="before the subagent: write the snapshot to FILE")
+    mode.add_argument("--snapshot", metavar="FILE", help="after the subagent: compare the working tree with FILE")
+    parser.add_argument("--files", nargs="*", metavar="PATH", help="with --snapshot: every path the subagent named")
+
+
 _register("accept-changes", cmd_accept_changes, _configure_accept_changes)
 _register("checkpoint-create", cmd_checkpoint_create, _configure_checkpoint_create)
 _register("checkpoint-detect", cmd_checkpoint_detect, _configure_checkpoint_detect)
@@ -2496,6 +2592,7 @@ _register("unit-begin", cmd_unit_begin, _configure_unit_begin)
 _register("unit-finish", cmd_unit_finish, _configure_unit_finish)
 _register("ledger-path", cmd_ledger_path, _configure_ledger_path)
 _register("commit-run", cmd_commit_run, _configure_commit_run)
+_register("delegate-check", cmd_delegate_check, _configure_delegate_check)
 
 
 def build_parser():

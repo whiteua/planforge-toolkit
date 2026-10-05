@@ -129,7 +129,7 @@ comparison uses `bytes_written` and the output tokens.
 
 `/plan-executor <plan> light=<model>` (or `runner.models.execution.light` of a chain) hands the units
 `unit-begin` marks `delegable` (green, in the main agent, not a checkpoint, no `**External:**`) to a
-subagent on that model; the parent checks the files, runs the gate and records `unit-finish
+subagent on that model; the parent checks the files with `delegate-check`, runs the gate and records `unit-finish
 --delegated`. `run-stats` reports per plan `quality.delegated`: `units` (distinct units with a
 delegated `unit-finish` event) and `retries` (delegated attempts that failed; each is retried in the
 main agent). Without a journal (`--plan`) it is `null`.

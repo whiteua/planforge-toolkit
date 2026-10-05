@@ -34,7 +34,7 @@ Subcommands:
       task-coverage (sum of part tasks == original-plan tasks), original-plan hash,
       task bodies (task_bodies: every plan task body in exactly one part, by the shared parser's
       sha1; skipped by --skip-task-bodies, e.g. after a full-cycle verification edited the parts),
-      task lines (every '**External:**' and '**Size:**' line of the original, outside
+      task lines (every '**External:**', '**Size:**' and '**Structural event:**' line of the original, outside
       code fences, appears verbatim in some part).
       Print JSON with detailed results. Exit 0 on success, 1 on failure.
 
@@ -893,7 +893,8 @@ def render_split(plan_path: str, payload: Dict[str, object], lang: str) -> Dict[
     """split-write without writing: checks the plan and every boundary first, then renders the roadmap and
     the parts. A boundary error raises SplitterError (exit 1) with all errors in details["errors"]."""
     text = _read_plan(plan_path)
-    parsed = _brainstorm_required().parse_plan_tasks(text)
+    module = _brainstorm_required()
+    parsed = module.parse_plan_tasks(text)
     tasks = parsed["tasks"]
     if not tasks:
         raise SplitterError(f"no-tasks: {plan_path}", 1)
@@ -903,6 +904,10 @@ def render_split(plan_path: str, payload: Dict[str, object], lang: str) -> Dict[
     if broken:
         raise SplitterError("plan-task-headings: " + "; ".join(broken), 1)
     parts = _parts_shape(payload)
+    # parts.json may write an id as the plan does (`01`): compared as the shared parser writes it (F7).
+    normalize = getattr(module, "normalize_task_id", lambda task_id: task_id)
+    for part in parts:
+        part["tasks"] = [normalize(task_id) for task_id in part["tasks"]]
     errors, warnings = check_parts(tasks, parts)
     if errors:
         raise SplitterError(errors[0], 1, errors=errors, warnings=warnings)
@@ -981,12 +986,13 @@ def count_tasks_in_original(text: str) -> int:
     return sum(1 for line in lines if re.match(r"^\d+\.\s+\S", line))
 
 
-# Task lines that are task properties, not prose: copied into the parts character for character.
-TASK_LINE_RE = re.compile(r"^\s*\*\*(?:External|Size):\*\*\s*\S")
+# Task lines that are task properties, not prose: copied into the parts character for character
+# (`**Structural event:**`: spec 1 of plan-refactoring-02, checked by plan_tool.py plan-check).
+TASK_LINE_RE = re.compile(r"^\s*\*\*(?:External|Size|Structural event):\*\*\s*\S")
 
 
 def task_property_lines(text: str) -> List[str]:
-    """`**External:**` and `**Size:**` task lines outside code fences, without indentation."""
+    """`**External:**`, `**Size:**` and `**Structural event:**` task lines outside code fences, without indentation."""
     return [line.strip() for line in _lines_outside_fences(text) if TASK_LINE_RE.match(line)]
 
 
@@ -1106,7 +1112,7 @@ def cmd_validate_all(directory: str, base_name: str, skip_task_bodies: bool = Fa
     else:
         coverage["note"] = f"Original plan not found at {original_path}; skipping coverage check"
 
-    # 6. Task lines (**External:**, **Size:**): each one of the original is copied verbatim into some part
+    # 6. Task lines (**External:**, **Size:**, **Structural event:**): each one of the original is copied verbatim into some part
     task_lines: Dict[str, object] = {}
     if os.path.isfile(original_path):
         part_lines: Set[str] = set()

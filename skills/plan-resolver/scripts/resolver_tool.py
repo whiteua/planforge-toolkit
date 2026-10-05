@@ -172,15 +172,20 @@ def posix_rel(path: str, root: str) -> str:
 
 
 def ensure_inside(root: str, raw_path: str) -> Tuple[str, str]:
+    """(absolute path, root-relative POSIX path) of `raw_path`; ToolError when it is outside the root. Inside is
+    decided by path_inside (realpath + normcase, F12 of plan-refactoring-02); a path that reaches the root through
+    a link is spelled under the root, so callers compare it with the root's other paths."""
     root_abs = os.path.abspath(root)
-    candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root_abs, raw_path)
-    candidate_abs = os.path.abspath(candidate)
-    try:
-        common = os.path.commonpath([root_abs, candidate_abs])
-    except ValueError as exc:
-        raise ToolError(f"path is outside workspace: {raw_path}") from exc
-    if common != root_abs:
+    candidate_abs = os.path.abspath(raw_path if os.path.isabs(raw_path) else os.path.join(root_abs, raw_path))
+    if not path_inside(root_abs, candidate_abs):
         raise ToolError(f"path is outside workspace: {raw_path}")
+    try:
+        lexical = os.path.commonpath([os.path.normcase(root_abs), os.path.normcase(candidate_abs)])
+    except ValueError:
+        lexical = ""
+    if lexical != os.path.normcase(root_abs):
+        real = os.path.relpath(os.path.realpath(candidate_abs), os.path.realpath(root_abs))
+        candidate_abs = os.path.join(root_abs, real)
     return candidate_abs, posix_rel(candidate_abs, root_abs)
 
 
@@ -1171,9 +1176,12 @@ def put_evidence_section(text: str, section: str) -> str:
 
 
 def path_inside(root: str, path: str) -> bool:
+    """`path` lies under `root` after realpath and normcase (F12 of plan-refactoring-02): a link to the root is
+    inside, a link out of it is not."""
+    base = os.path.normcase(os.path.realpath(root))
     try:
-        return os.path.commonpath([root, os.path.abspath(path)]) == root
-    except ValueError:
+        return os.path.commonpath([base, os.path.normcase(os.path.realpath(path))]) == base
+    except ValueError:  # another drive on Windows
         return False
 
 
@@ -1433,8 +1441,16 @@ def _leading_id(match: "re.Match[str]") -> str:
     return groups.get("id") or groups.get("part") or ""
 
 
+NUMERIC_TASK_ID_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
+
+
 def normalize_plan_task_id(task_id: str) -> str:
-    return task_id.lower()
+    """Lower case; a dotted numeric id without leading zeros (`01.02` → `1.2`): the rule of
+    brainstorm_tool.normalize_task_id (F7 of plan-refactoring-02), so `Task 01` of a plan and `1` of a report meet."""
+    text = task_id.lower()
+    if NUMERIC_TASK_ID_RE.match(text):
+        return ".".join(str(int(part)) for part in text.split("."))
+    return text
 
 @functools.lru_cache(maxsize=None)
 def _load_brainstorm_tool():
@@ -1860,7 +1876,7 @@ def load_audit_snapshot(path: str, plan: str) -> Dict[str, object]:
     under its root (a snapshot of another workspace)."""
     try:
         snapshot = load_snapshot(path)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ToolError(f"invalid fingerprint snapshot: {path} ({exc})") from exc
     root = os.path.abspath(str(snapshot.get("root") or ""))
     if not snapshot.get("root") or not path_inside(root, plan):
@@ -1877,8 +1893,15 @@ def cmd_evidence_fingerprint(args: argparse.Namespace) -> int:
     with open(args.report, "rb") as handle:
         raw_bytes = handle.read()
     crlf = b"\r\n" in raw_bytes
-    text = raw_bytes.decode("utf-8").replace("\r\n", "\n")
-    table, warnings = evidence_table(text, read_text(args.plan), snapshot)
+    try:
+        text = raw_bytes.decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError as exc:
+        raise ToolError(f"not-utf8: {args.report}: {exc}") from exc
+    try:
+        plan_text = read_text(args.plan)
+    except UnicodeDecodeError as exc:
+        raise ToolError(f"not-utf8: {args.plan}: {exc}") from exc
+    table, warnings = evidence_table(text, plan_text, snapshot)
     ru = report_language(text, parse_header(text)) == "ru"
     updated = put_evidence_section(text, render_evidence_section(table, ru))
     with open(args.report, "w", encoding="utf-8", newline="\r\n" if crlf else "\n") as handle:
@@ -2025,7 +2048,11 @@ def cmd_rescan_scope(args: argparse.Namespace) -> int:
         print_json({"valid": False, "errors": [f"--ratio must be in (0, 1]: {args.ratio}"]})
         return 2
     snapshot = load_audit_snapshot(args.snapshot, args.plan)
-    print_json(rescan_scope(args.plan, args.last_report, snapshot, args.ratio))
+    try:
+        result = rescan_scope(args.plan, args.last_report, snapshot, args.ratio)
+    except UnicodeDecodeError as exc:
+        raise ToolError(f"not-utf8: the plan or the last report is not UTF-8 ({exc})") from exc
+    print_json(result)
     return 0
 
 

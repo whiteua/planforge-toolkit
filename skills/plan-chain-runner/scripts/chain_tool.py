@@ -1331,9 +1331,19 @@ def _frontmatter(text: str) -> str:
     return text[3:end] if end >= 0 else ""
 
 
+def _task_key(task_id: str) -> str:
+    """brainstorm_tool.normalize_task_id (`01.02` → `1.2`, F7 of plan-refactoring-02) when plan-brainstorming
+    provides it, else the id as written: the ids then meet the parser's ids in _scoped_bytes."""
+    try:
+        normalize = getattr(_brainstorm(), "normalize_task_id", None)
+    except InputError:
+        normalize = None
+    return normalize(task_id) if normalize else task_id
+
+
 def _audit_scope(text: str, frontmatter: bool) -> Tuple[str, Optional[List[str]]]:
     """(scope, task ids) of a review (markdown headers) or a report (frontmatter): ("full", None) when
-    the file has no scope or names `all`, else ("incremental", ids as written)."""
+    the file has no scope or names `all`, else ("incremental", ids normalized by _task_key)."""
     source = _frontmatter(text) if frontmatter else text
     scope_re, tasks_re = (_STATS_FM_SCOPE_RE, _STATS_FM_TASKS_RE) if frontmatter else (_STATS_SCOPE_RE, _STATS_TASKS_RE)
     scope, tasks = scope_re.search(source), tasks_re.search(source)
@@ -1342,7 +1352,7 @@ def _audit_scope(text: str, frontmatter: bool) -> Tuple[str, Optional[List[str]]
     raw = tasks.group(1).strip().strip("[]") if tasks else ""
     if raw.lower() == "all":
         return "full", None
-    return "incremental", [item.strip().strip("'\"") for item in raw.split(",") if item.strip()]
+    return "incremental", [_task_key(item.strip().strip("'\"")) for item in raw.split(",") if item.strip()]
 
 
 def _task_parser() -> Any:

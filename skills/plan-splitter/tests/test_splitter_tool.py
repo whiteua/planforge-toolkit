@@ -600,5 +600,33 @@ class TestTaskBodies(_SplitDir):
         self.assertEqual(caught.exception.code, 2)
 
 
+class TestTaskLines(_SplitDir):
+    """**External:**, **Size:** and **Structural event:** lines reach the parts verbatim (spec 1 of plan-refactoring-02)."""
+
+    LINE = "**Structural event:** convention — the rule moves to CLAUDE.md"
+
+    def test_structural_event_line_is_copied_and_checked(self):
+        self.edit("plan01-impl.md", "- Modify: `README.md`\n", "- Modify: `CLAUDE.md`\n\n" + self.LINE + "\n")
+        self.assertEqual(self.split(_parts((["1", "1.1"], [], "A"), (["2"], ["a"], "B")))[0], 0)
+        code, out = _run_tool("validate-all", self.dir, "plan01-impl")
+        self.assertEqual((code, out["task_lines"]), (0, {"original": 1, "missing": []}))
+        self.edit("plan01-impl-a.md", self.LINE, "**Structural event:** convention — changed")
+        code, out = _run_tool("validate-all", self.dir, "plan01-impl", "--skip-task-bodies")
+        self.assertEqual(code, 1)
+        self.assertIn("Task line not copied verbatim into any part: " + self.LINE, out["errors"])
+        fenced = "```\n" + self.LINE + "\n```\n" + self.LINE + "\n"
+        self.assertEqual(_load_module().task_property_lines(fenced), [self.LINE])
+
+
+class TestPaddedTaskIds(_SplitDir):
+    def test_parts_json_ids_meet_the_plan_ids_in_any_padding(self):  # F7 of plan-refactoring-02
+        mod = _load_module()
+        plan = os.path.join(self.dir, "pad-impl.md")
+        with open(plan, "w", encoding="utf-8") as fh:
+            fh.write("# P\n\n**Goal:** g\n\n### Task 01: A\n\n- [ ] **Step 1:** x\n\n### Task 02: B\n\n- [ ] **Step 1:** y\n")
+        result = mod.render_split(plan, {"parts": _parts((["01"], [], "A"), (["2"], ["a"], "B"))}, "en")
+        self.assertEqual(result["parts"], [{"id": "a", "tasks": 1}, {"id": "b", "tasks": 1}])
+
+
 if __name__ == "__main__":
     unittest.main()

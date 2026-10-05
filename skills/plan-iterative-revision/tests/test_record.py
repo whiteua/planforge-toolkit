@@ -401,6 +401,11 @@ class RecordTaskDigest(IncrementalBase):
         self.assertIn("**Audit scope**: incremental\n**Audit tasks**: 2, 3\n", text)
         self.assertEqual(len(nri.parse_task_digest(text)["tasks"]), 4)
 
+    def test_zero_padded_tasks_argument(self):  # F7 of plan-refactoring-02
+        self.ok([issue("Fix A")])
+        out = self.incremental([issue("Fix B", location_in_plan="Task 02")], "02, 3")
+        self.assertIn("**Audit tasks**: 2, 3\n", self.text(out))
+
     def test_plan_without_tasks_gets_no_table(self):
         self.plan.write_text("# Demo plan\n\nSome English plan text.\n", encoding="utf-8")
         text = self.text(self.ok([issue("Fix A")]))
@@ -473,6 +478,25 @@ class RecordDroppedContracts(IncrementalBase):
         text = self.text(out)
         self.assertIn("- **Carried from**: demo-review-1.md#", text)
         self.assertIn("Problem for Fix A", text)
+
+    def test_contract_of_an_audited_task_is_not_carried(self):  # F9 of plan-refactoring-02
+        self.ok([issue("Fix A", "minor", location_in_plan="Task 2, Step 1")])
+        self.plan.write_text(task_plan(edits={3: "fixed"}), encoding="utf-8")
+        out = self.incremental([issue("Fix C", location_in_plan="Task 3")], "2,3")
+        self.assertEqual([it["fingerprint"] for it in out["issues"]], [nri.make_fingerprint("logic", "Fix C")])
+        self.assertFalse(any(w.startswith("contracts-dropped") for w in out["warnings"]), out["warnings"])
+
+    def test_a_broken_old_contract_is_a_json_error(self):  # F8 of plan-refactoring-02
+        out = self.ok([issue("Fix A", location_in_plan="Task 2")])
+        review = Path(out["review_path"])
+        review.write_text(review.read_text(encoding="utf-8").replace("- **Required fix (contract)**:",
+                                                                     "- **Required fix (lost)**:"), encoding="utf-8")
+        self.plan.write_text(task_plan(edits={3: "fixed"}), encoding="utf-8")
+        proc = self.record([issue("Fix C", location_in_plan="Task 3")], "--scope", "incremental", "--tasks", "3")
+        self.assertEqual(proc.returncode, 64, proc.stdout + proc.stderr)
+        self.assertTrue(json.loads(proc.stdout)["error"].startswith("contracts-carry-failed:"), proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(self.reviews(), ["demo-review-1.md"])
 
     def test_carry_of_an_old_review_contract(self):
         item = nri.carry_of({"fingerprint": "aaaa1111", "severity": "minor", "required_fix": "Fix X",

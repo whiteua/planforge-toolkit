@@ -206,6 +206,16 @@ class SpecCheckTest(unittest.TestCase):
         self.assertEqual(result["warnings"], [])
         self.assertEqual(result["tier"], "Quick")
 
+    def test_claude_md_in_components_warns(self):  # spec 1 of plan-refactoring-02
+        text = VALID_SPEC.replace("- `sql-structure.ts`: detects OFFSET without FETCH.\n",
+                                  "- `sql-structure.ts`: detects OFFSET without FETCH.\n- `CLAUDE.md`: the new rule.\n")
+        result = self.check(text)
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(any(w.startswith("claude-md-in-components:") for w in result["warnings"]), result["warnings"])
+        self.assertFalse(any(w.startswith("claude-md-in-components") for w in self.check(VALID_SPEC)["warnings"]))
+        elsewhere = VALID_SPEC.replace("Validate row limits in the SQL analyzer.", "CLAUDE.md stays as it is.")
+        self.assertFalse(any(w.startswith("claude-md-in-components") for w in self.check(elsewhere)["warnings"]))
+
     def test_missing_heading(self):
         result = self.check(VALID_SPEC.replace("## Data Flow\n(none) - single synchronous check.\n\n", ""))
         self.assertIn("missing heading: ## Data Flow", result["errors"])
@@ -952,6 +962,15 @@ class PlanTasksTest(unittest.TestCase):
     def test_plan_without_tasks(self):
         self.assertEqual(ft.parse_plan_tasks("# Plan\n\n1. step\n"), {"tasks": [], "malformed": [], "duplicates": []})
 
+    def test_ids_and_refs_are_normalized(self):  # F7 of plan-refactoring-02
+        self.assertEqual([ft.normalize_task_id(v) for v in ("01.02", "007", "1.10", " 3 ", "A1", "x.01")],
+                         ["1.2", "7", "1.10", "3", "A1", "x.01"])
+        plan = "### Task 01: A\nbody\n\n### Task 02: B\n\n**Preconditions:**\n- Task 1 is done, Task 01.0 too\n"
+        parsed = ft.parse_plan_tasks(plan)
+        self.assertEqual([(t["id"], t["refs"]) for t in parsed["tasks"]], [("1", []), ("2", ["1", "1.0"])])
+        duplicated = ft.parse_plan_tasks("### Task 1: A\nx\n\n### Task 01: B\ny\n")
+        self.assertEqual(duplicated["duplicates"], [{"id": "1", "lines": [1, 4]}])
+
 
 NESTED_FENCE_PLAN = "\n".join([
     "### Task 1: Outer",
@@ -1274,6 +1293,12 @@ class SpecSetHelpersTest(unittest.TestCase):
                          [("a/b.py", "path"), ("run_x", "symbol"), ("c.py", "path")])
         self.assertIsNone(ft._components_cells(["## Components", "- `a.py`: A"]))
 
+    def test_components_end_at_the_next_section(self):  # F16 of plan-refactoring-02
+        lines = ["## Components  ", "| Unit | Role |", "|---|---|", "| `a.py` | A |", "### Executor", "| `b.py` | B |",
+                 "## Notes", "| Unit | Role |", "|---|---|", "| `c.py` | C |"]
+        cells = ft._components_cells(lines)
+        self.assertEqual([name for cell in cells for name, _ in ft._touch_names(cell)], ["a.py", "b.py"])
+
     def test_mentions_and_numbered_references(self):
         names = ["g-1-spec.md", "g-2-spec.md", "g-3-spec.md", "gg-3-spec.md"]
         text = "Спеку 1 и spec 3; после g-2-spec.md, не gg-1-spec.md."
@@ -1302,6 +1327,13 @@ class SpecSetCheckTest(GoalDirCase):
         names = self.specs([(1, _goal_spec()), (2, _goal_spec(arch="После g-1-spec.md."))])
         out = ft.spec_set_check(self.dir)
         self.assertEqual((out["undeclared"], out["self_edges"]), ([], [{"spec": names[1], "mentions": [names[0]]}]))
+
+    def test_shared_documents_and_test_rows_are_not_touchpoints(self):  # F15 of plan-refactoring-02
+        rows = ("| `skills/x/tool.py` | A |\n| `CLAUDE.md`, `README.md`, `skills/x/USAGE.md`, `docs/HELPER-CLIS.md` | B |\n"
+                "| Тесты: `skills/x/tests/test_tool.py` | C |\n| Docs: `docs/guide/deep.md` | D |")
+        names = self.specs([(1, _goal_spec(rows=rows)), (2, _goal_spec(rows=rows))])
+        out = ft.spec_set_check(self.dir)
+        self.assertEqual(out["touchpoints"], [{"name": "skills/x/tool.py", "kind": "path", "specs": names}])
 
     def test_single_spec_no_journal_and_no_table(self):
         self.specs([(1, _goal_spec())])
@@ -1437,7 +1469,7 @@ class RoadmapRenderTest(unittest.TestCase):
         self.assertIn("# Roadmap: Цель G\n\n## Overview\n\nТри спеки.\n", text)
         self.assertIn("| 2 | g-2-spec.md | Вторая \\| с чертой | — | A | Deep | ~4 |", text)
         self.assertIn("| 3 | g-3-spec.md | Третья | 2, 1 | B | Deep | ~4 |", text)
-        self.assertIn('    subgraph A\n        s1["1. Первая"]\n        s2["2. Вторая | с чертой"]\n    end', text)
+        self.assertIn('    subgraph g_A["A"]\n        s1["1. Первая"]\n        s2["2. Вторая | с чертой"]\n    end', text)
         self.assertIn("    s2 --> s3\n    s1 --> s3\n```", text)
         self.assertIn("- A: 1, 2 — можно вести одновременно\n- B: 3 — одна спека", text)
         self.assertIn("| `run_status` | 1, 3 | 1 → 3 | 3 сохраняет поле |", text)
@@ -1452,8 +1484,14 @@ class RoadmapRenderTest(unittest.TestCase):
         self.assertIn("- A: 1 — one spec", text)
         self.assertIn("## Shared touchpoints\n\nnone\n", text)
         self.assertIn("## Sources\n\n—\n\nInstruction: —\n", text)
-        self.assertIn('graph LR\n    subgraph A\n        s1["1. Первая"]\n    end\n```', text)
+        self.assertIn('graph LR\n    subgraph g_A["A"]\n        s1["1. Первая"]\n    end\n```', text)
         self.assertIn("## Shared touchpoints\n\nнет\n", self.render(_graph(shared=[])))
+
+    def test_shared_name_with_a_bar_and_a_backtick(self):  # F17 of plan-refactoring-02
+        shared = [{"name": "a | b`c", "specs": ["g-1-spec.md", "g-3-spec.md"], "order": ["g-1-spec.md", "g-3-spec.md"],
+                   "note": "x"}]
+        self.assertIn("| `` a \\| b`c `` | 1, 3 | 1 → 3 | x |", self.render(_graph(shared=shared)))
+        self.assertIn("| `run_status` | 1, 3 | 1 → 3 | 3 сохраняет поле |", self.render(_graph()))
 
 
 class SpecFactsTest(GoalDirCase):
@@ -1563,6 +1601,17 @@ class RoadmapWriteErrorsTest(RoadmapCase):
         self.assertTrue(out["errors"][0].startswith("graph-invalid: "))
 
 
+class RoadmapGroupsTest(RoadmapCase):
+    def test_group_names_that_are_mermaid_words_or_node_ids(self):  # F18 of plan-refactoring-02
+        specs = [dict(spec, group=group) for spec, group in zip(_graph()["specs"], ("end", "end", "s2"))]
+        self.assertEqual(self.write(_graph(specs=specs))[0], 0)
+        self.assertIn('    subgraph g_end["end"]\n', self.text())
+        self.assertIn('    subgraph g_s2["s2"]\n', self.text())
+        self.assertEqual(ft.roadmap_check(self.roadmap)[0]["errors"], [])
+        _put(self.dir, "g-roadmap.md", self.text().replace('subgraph g_end["end"]', "subgraph end"))
+        self.assertEqual(ft.roadmap_check(self.roadmap)[0]["errors"], [])  # the older form is accepted
+
+
 class RoadmapBlocksTest(unittest.TestCase):
     def test_blocks_sections_and_tables(self):
         text = ("> Goal: g\n\n# Roadmap: T\n\n## Order\n\n| a | b \\| c |\n|---|---|\n| 1 | 2 |\n\n## Graph\n\n"
@@ -1599,6 +1648,11 @@ class RoadmapParseOrderTest(unittest.TestCase):
         errors = []
         ft._parse_order(_order_blocks("| 2 | g-1-spec.md | A | — | A | Deep | ~4 |\n| 3 | x |\n"), errors, [])
         self.assertEqual(errors, ["order-row: 3 | x", "order-numbering: # must run 1, 2, … in table order"])
+
+    def test_only_ascii_digits_number_a_row(self):  # F19 of plan-refactoring-02
+        errors = []
+        specs = ft._parse_order(_order_blocks("| ¹ | g-1-spec.md | A | — | A | Deep | ~4 |\n"), errors, [])
+        self.assertEqual(([s["n"] for s in specs], errors), ([None], ["order-numbering: # must run 1, 2, … in table order"]))
 
 
 class OrderGraphErrorsTest(unittest.TestCase):
@@ -1648,6 +1702,12 @@ class ParseSharedTest(unittest.TestCase):
              "order": ["g-1-spec.md", "g-3-spec.md"], "note": "note"},
             {"name": "run_status", "kind": "symbol", "specs": ["g-2-spec.md", "g-3-spec.md"], "order": [], "note": None}], []))
         self.assertEqual(self.parse("нет\n"), ([], []))
+
+    def test_code_span_names(self):  # F17 of plan-refactoring-02
+        body = ("| File or symbol | Specs | Delivery order | Note |\n|---|---|---|---|\n"
+                "| `` a \\| b`c `` | 1, 3 | 1 → 3 | x |\n")
+        self.assertEqual(self.parse(body)[0][0]["name"], "a | b`c")
+        self.assertEqual([ft._code_span_text(cell) for cell in ("`x`", "`` ` ``", "plain")], ["x", "`", "plain"])
 
     def test_errors(self):
         head = "| File or symbol | Specs | Delivery order | Note |\n|---|---|---|---|\n"

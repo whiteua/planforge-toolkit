@@ -52,6 +52,7 @@ The input spec **must** have:
 - Each step: **one action, 2–5 minutes**
 - Exceeds limit → split into sub-tasks (Task N.1, N.2, ...)
 - Cannot be split → `**Size:** <N> lines — <reason>` in the task; without it `plan-check` warns above 100 lines of code and fails above 150
+- Creates or modifies `CLAUDE.md` → `**Structural event:** <skill|script|contract|convention|artifact> — <reason>` in the task; without it `plan-check` warns `claude-md-edit`, another key is an error
 
 ## Tier Effect on Tasks
 
@@ -83,7 +84,7 @@ Language: the plan body follows the spec's language; the parsed markers (`### Ta
 
 | Command | Output |
 |---|---|
-| `python scripts/plan_tool.py skeleton <plan> [--tasks 1,7.1] [--code none\|signatures]` | The plan without code bodies: the header whole; per task its heading, `**Files:**`, `**Preconditions:**`/`**Postconditions:**`/`**Done when:**`/`**Constraints:**`/`**If stuck:**`, `**External:**`, `**Size:**`, step headings and `Run:`/`Expected:` lines; headings between tasks stay. Each code block becomes `[code <lang>, <N> lines: <signatures>]` (lines starting with `def`, `async def`, `class`, `function`, `export`, `func`, `interface`, `type`, `const`; at most five, then `…`); `--code none` and `markdown`/`text`/`json`/`yaml`/unlabelled blocks give only the language and the line count. `--tasks` keeps the header and the named tasks in plan order. |
+| `python scripts/plan_tool.py skeleton <plan> [--tasks 1,7.1] [--code none\|signatures]` | The plan without code bodies: the header whole; per task its heading, `**Files:**`, `**Preconditions:**`/`**Postconditions:**`/`**Done when:**`/`**Constraints:**`/`**If stuck:**`, `**External:**`, `**Size:**`, `**Structural event:**`, step headings and `Run:`/`Expected:` lines; headings between tasks stay. Each code block becomes `[code <lang>, <N> lines: <signatures>]` (lines starting with `def`, `async def`, `class`, `function`, `export`, `func`, `interface`, `type`, `const`; at most five, then `…`); `--code none` and `markdown`/`text`/`json`/`yaml`/unlabelled blocks give only the language and the line count. `--tasks` keeps the header and the named tasks in plan order. |
 | `python scripts/plan_tool.py task <plan> <id>` | One task byte for byte (its lines `line_start..line_end` from `plan-tasks`). |
 
 Unlike every other command these two print text, not JSON: stdout is plan text, warnings (`no-tasks`, `unclosed-fence`) go to stderr, and an error is one JSON line on stderr with exit `2` (`plan-unreadable`, `task-not-found: <id>`, `plan-brainstorming not installed alongside`, an unknown `--code`). Nothing is stored: the skeleton is generated on demand, so it never goes stale.

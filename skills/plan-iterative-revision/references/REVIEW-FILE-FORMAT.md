@@ -89,7 +89,7 @@ Review files are immutable history once written.
 - `Audit scope`/`Audit tasks`: `full`/`all` for a full audit (always without plan-brainstorming
   alongside), `incremental` with the `--tasks` ids of `record` (`none` for an empty list). plan-chain-runner's
   `run-stats` reads both to count what the audit read.
-- `## Task digest`: every `### Task N:` of the audited plan, its id as written and the first 8 hex of the
+- `## Task digest`: every `### Task N:` of the audited plan, its id as the shared parser writes it (normalised: `01` = `1`) and the first 8 hex of the
   SHA-1 of its body (`brainstorm_tool.parse_plan_tasks`). The next `digest` compares it with the plan to
   scope the next audit. There is no table without plan-brainstorming, for a plan without tasks or with
   repeated task ids.

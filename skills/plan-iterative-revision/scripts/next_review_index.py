@@ -140,6 +140,7 @@ FULL_SCOPE_RATIO = 0.5
 TASK_DIGEST_HEADING = "## Task digest"
 TASK_DIGEST_ROW_RE = re.compile(r"^\|\s*(?P<id>[^|\s]+)\s*\|\s*(?P<hash>[0-9a-f]{8})\s*\|$", re.IGNORECASE)
 TASK_REF_RE = re.compile(r"\b(?:Task|Задача)\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
+NUMERIC_TASK_ID_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
 CARRIED_BY_RECORD = "not applicable — carried by record"
 
 
@@ -724,11 +725,22 @@ def cmd_resolve_config(args: List[str]) -> int:
     return 2 if "error" in result else 0
 
 
+def normalize_task_id(task_id: str) -> str:
+    """`01.02` → `1.2`, `007` → `7`; any other id as written (F7 of plan-refactoring-02). The rule of
+    brainstorm_tool.normalize_task_id, kept here because reviews are read without plan-brainstorming too;
+    plan-writing/tests holds the two equal."""
+    text = str(task_id).strip()
+    if NUMERIC_TASK_ID_RE.match(text):
+        return ".".join(str(int(part)) for part in text.split("."))
+    return text
+
+
 def contract_tasks(location: str) -> List[str]:
     """Task ids named in a contract's `Location in plan` (`Task N`, `Task N.M`, `Задача N`, `### Task N:`,
     at the start or inside the line, several per line), in order, once each."""
     found: List[str] = []
     for task_id in TASK_REF_RE.findall(location or ""):
+        task_id = normalize_task_id(task_id)
         if task_id not in found:
             found.append(task_id)
     return found
@@ -754,10 +766,11 @@ def parse_task_digest(review_text: str) -> Optional[Dict[str, object]]:
         if cells == ["Task", "Hash"] or all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
             continue
         match = TASK_DIGEST_ROW_RE.match(stripped)
-        if not match or match.group("id") in tasks:
+        task_id = normalize_task_id(match.group("id")) if match else None
+        if task_id is None or task_id in tasks:
             malformed.append(stripped)
             continue
-        tasks[match.group("id")] = match.group("hash").lower()
+        tasks[task_id] = match.group("hash").lower()
     if not tasks and not malformed:
         malformed.append("(no rows)")
     return {"tasks": tasks, "malformed": malformed}
@@ -1690,11 +1703,14 @@ def revision_journal_event(
 
 
 def dropped_contracts(
-    directory: str, basename: str, run_start: int, plan_index: List[Dict[str, object]], issues: List[Dict[str, str]]
+    directory: str, basename: str, run_start: int, plan_index: List[Dict[str, object]], issues: List[Dict[str, str]],
+    audited: Sequence[str] = (),
 ) -> List[Dict[str, str]]:
     """Contracts of the latest review in the run that an incremental audit left out although every task
-    they name is unchanged (its sha1 equals the review's `## Task digest` row): the fix cannot have
-    landed. Contracts of changed tasks and contracts without a task id are not returned."""
+    they name is unchanged (its sha1 equals the review's `## Task digest` row) and none of them was in the
+    audit's `--tasks` (`audited`): the fix cannot have landed and the audit did not look. A contract whose task
+    the audit had in scope was closed by its decision (F9 of plan-refactoring-02). Contracts of changed tasks
+    and contracts without a task id are not returned."""
     latest = read_text(collect_review_files(directory, basename, run_start)[-1][1])
     table = parse_task_digest(latest)
     if table is None or table["malformed"]:
@@ -1702,10 +1718,12 @@ def dropped_contracts(
     hashes: Dict[str, str] = dict(table["tasks"])  # type: ignore[arg-type]
     unchanged = {str(task["id"]) for task in plan_index if hashes.get(str(task["id"])) == task["sha1"]}
     present = {issue["fingerprint"] for issue in issues}
+    checked = set(audited)
     dropped: Dict[str, Dict[str, str]] = {}
     for contract in parse_review_issues(latest):
         fingerprint, ids = contract["fingerprint"], contract_tasks(contract["location_in_plan"])
-        if fingerprint and fingerprint not in present and ids and all(task_id in unchanged for task_id in ids):
+        if (fingerprint and fingerprint not in present and ids and all(task_id in unchanged for task_id in ids)
+                and not any(task_id in checked for task_id in ids)):
             dropped.setdefault(fingerprint, contract)
     return list(dropped.values())
 
@@ -1789,7 +1807,7 @@ def parse_record_args(args: List[str]) -> Dict[str, object]:
             raise RecordError("--tasks <ids> is required with --scope incremental")
         if opts["mode"] == "audit-only":
             raise RecordError("--mode audit-only is always a full audit; drop --scope incremental")
-        ids = [item.strip() for item in str(opts["tasks"]).split(",") if item.strip()]
+        ids = [normalize_task_id(item) for item in str(opts["tasks"]).split(",") if item.strip()]
         opts["tasks"] = list(dict.fromkeys(ids))
     else:
         opts["tasks"] = None  # a full audit names no tasks: --tasks is ignored
@@ -1834,11 +1852,16 @@ def cmd_record(args: List[str]) -> int:
         if unknown:
             print_json({"error": f"--tasks names tasks the plan does not have: {', '.join(unknown)}"})
             return 64
-        dropped = dropped_contracts(directory, basename, run_start, plan_index, issues) if plan_index else []
-        if dropped:
-            raw = list(payload.get("issues", [])) + [carry_of(contract) for contract in dropped]
-            issues = normalize_input_issues(directory, basename, raw)
-            input_warnings.append("contracts-dropped: [" + ", ".join(c["fingerprint"] for c in dropped) + "]")
+        try:  # an old review whose contract cannot be carried back is a contract error, not a crash (F8)
+            dropped = dropped_contracts(directory, basename, run_start, plan_index, issues,
+                                        opts["tasks"]) if plan_index else []  # type: ignore[arg-type]
+            if dropped:
+                raw = list(payload.get("issues", [])) + [carry_of(contract) for contract in dropped]
+                issues = normalize_input_issues(directory, basename, raw)
+                input_warnings.append("contracts-dropped: [" + ", ".join(c["fingerprint"] for c in dropped) + "]")
+        except (OSError, ValueError, KeyError, RecordError) as exc:
+            print_json({"error": f"contracts-carry-failed: {exc}"})
+            return 64
     decision = decide(
         history,
         issues,

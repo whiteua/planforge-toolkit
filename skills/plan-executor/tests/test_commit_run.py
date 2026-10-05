@@ -310,12 +310,13 @@ class TestCommitRun(CommitCase):
                       {"new.py": "z = 1\n", "docs/plan01-impl.md": PLAN + "\n", "notes-review-1.md": "r\n"})
         self.write("notes.txt", "the user's file, not the run's\n")
         result = self.commit()
-        self.assertEqual((result["ok"], result["empty"], result["files"]), (True, False, ["app.py", "new.py"]))
-        self.assertEqual(result["excluded"], ["BACKLOG.md", "docs/plan01-impl.md", "notes-review-1.md"])
-        self.assertEqual(result["excluded_outside_chain"], ["notes-review-1.md"])  # outside the plan folder (F3)
+        self.assertEqual((result["ok"], result["empty"], result["files"]),
+                         (True, False, ["app.py", "new.py", "notes-review-1.md"]))
+        self.assertEqual(result["excluded"], ["BACKLOG.md", "docs/plan01-impl.md"])
+        self.assertEqual(result["excluded_outside_chain"], [])  # a chain name outside the plan folder is committed (F5)
         self.assertEqual(result["sha"], self.git("rev-parse", "HEAD"))
         self.assertEqual(result["subject"], "feat(plan01): add the feature")
-        self.assertEqual(self.files_of(), ["app.py", "new.py"])
+        self.assertEqual(self.files_of(), ["app.py", "new.py", "notes-review-1.md"])
         self.assertEqual(self.git("rev-parse", "HEAD~1"), base)
         self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
 
@@ -341,23 +342,28 @@ class TestCommitRun(CommitCase):
         self.assertEqual(("tools.py" in tracked, "util.py" in tracked), (True, False))
         self.assertEqual(self.git("status", "--porcelain", "--", "tools.py", "util.py"), "")
 
-    def test_a_project_chain_json_is_named_with_the_left_out_files(self):
+    def test_a_chain_json_outside_the_plan_folder_is_committed(self):  # F5 of plan-refactoring-02
         self.commit_all()
         (self.repo / "config").mkdir()
-        self.run_plan({"app.py": "x = 2\n", "config/supply-chain.json": "{}\n"})
+        self.run_plan({"app.py": "x = 2\n", "config/supply-chain.json": "{}\n", "docs/other-chain.json": "{}\n"})
         result = self.commit()
-        self.assertEqual(result["files"], ["app.py"])
-        self.assertEqual(result["excluded"], ["config/supply-chain.json"])
-        self.assertEqual(result["excluded_outside_chain"], ["config/supply-chain.json"])  # not the run's journal
+        self.assertEqual(result["files"], ["app.py", "config/supply-chain.json"])
+        self.assertEqual(result["excluded"], ["docs/other-chain.json"])
+        self.assertEqual(result["excluded_outside_chain"], ["docs/other-chain.json"])  # not the run's journal
 
-    def test_project_files_dropped_by_the_broad_rules_are_named(self):
+    def test_a_project_file_in_the_plan_folder_is_committed(self):  # F5 of plan-refactoring-02
         self.commit_all()
         self.run_plan({"app.py": "x = 2\n", "docs/api.md": "# API\n", "docs/plan01-impl-review-1.md": "r\n"})
         result = self.commit()
-        self.assertEqual(result["files"], ["app.py"])
-        self.assertEqual(result["excluded"], ["docs/api.md", "docs/plan01-impl-review-1.md"])
-        self.assertEqual(result["excluded_outside_chain"], ["docs/api.md"])  # a project file in the plan's folder
-        self.assertEqual(self.git("status", "--porcelain", "--", "docs/api.md"), "?? docs/api.md")
+        self.assertEqual(result["files"], ["app.py", "docs/api.md"])
+        self.assertEqual((result["excluded"], result["excluded_outside_chain"]), (["docs/plan01-impl-review-1.md"], []))
+        self.assertEqual(self.git("status", "--porcelain", "--", "docs/api.md"), "")
+
+    def test_a_fixture_named_like_a_plan_is_committed(self):  # F5 of plan-refactoring-02 (commit c1bc241)
+        self.commit_all()
+        (self.repo / "tests" / "fixtures").mkdir(parents=True)
+        self.run_plan({"tests/fixtures/tricky-impl.md": "### Task 1: x\n"})
+        self.assertEqual(self.commit()["files"], ["tests/fixtures/tricky-impl.md"])
 
     def test_no_git(self):
         shutil.rmtree(self.repo / ".git")
@@ -617,8 +623,9 @@ class TestCommitRunCli(CommitCase):
 
 
 class TestProjectFilesNamedLikeChainFiles(CommitCase):
-    """F3: a chain-file name outside the run's plan folder is a project file: foreign changes and
-    excluded_outside_chain see it; the same name in the plan folder stays the pipeline's."""
+    """F3: a chain-file name outside the run's plan folder is a project file: foreign changes see it, and
+    the commit takes it as the run's work (F5 of plan-refactoring-02); the same name in the plan folder stays the
+    pipeline's."""
 
     def setUp(self):
         super().setUp()
@@ -637,12 +644,11 @@ class TestProjectFilesNamedLikeChainFiles(CommitCase):
         self.assertEqual(begun["reason"], "foreign-changes")
         self.assertEqual(begun["foreign_changes"], [{"path": "api/openapi-spec.md", "status": "modified"}])
 
-    def test_commit_names_it_with_the_left_out_files(self):
+    def test_commit_takes_it_as_the_runs_work(self):  # F5 of plan-refactoring-02
         self.run_plan({"app.py": "x = 2\n", "api/openapi-spec.md": "v2\n"})
         result = self.commit()
-        self.assertEqual(result["files"], ["app.py"])
-        self.assertEqual(result["excluded"], ["api/openapi-spec.md"])
-        self.assertEqual(result["excluded_outside_chain"], ["api/openapi-spec.md"])
+        self.assertEqual((result["files"], result["excluded"], result["excluded_outside_chain"]),
+                         (["api/openapi-spec.md", "app.py"], [], []))
 
 
 class TestRollbackOfProjectFilesNamedLikeChainFiles(RepoCase):

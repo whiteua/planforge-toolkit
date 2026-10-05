@@ -229,6 +229,28 @@ class PlanCheckTest(unittest.TestCase):
     def test_malformed_size_line(self):
         self.assertError(self._with_big_task(10, "**Size:** big"), "malformed size line")
 
+    STRUCTURAL = "**Structural event:** convention — a new rule for the pipeline skills\n\n"
+
+    def _claude_md_task(self, line=""):
+        return VALID.replace("**Files:**\n- Modify: `README.md`\n\n", "**Files:**\n- Modify: `CLAUDE.md`\n\n" + line)
+
+    def test_claude_md_edit_needs_a_structural_event(self):  # spec 1 of plan-refactoring-02
+        warned = self.check(self._claude_md_task())
+        self.assertTrue(warned["ok"], warned["errors"])
+        self.assertTrue(any(w.startswith("Task 1.1: claude-md-edit:") for w in warned["warnings"]), warned["warnings"])
+        marked = self.check(self._claude_md_task(self.STRUCTURAL))
+        self.assertEqual((marked["errors"], marked["warnings"]), ([], []))
+        created = self.check(VALID.replace("- Modify: `README.md`", "- Create: `sub/CLAUDE.md`"))
+        self.assertTrue(any("claude-md-edit" in w for w in created["warnings"]), created["warnings"])
+
+    def test_structural_event_key_and_reason_are_checked(self):
+        self.assertError(self._claude_md_task("**Structural event:** feature — x\n\n"), "malformed structural event line")
+        self.assertError(self._claude_md_task("**Structural event:** convention\n\n"), "malformed structural event line")
+
+    def test_skeleton_keeps_the_structural_event(self):
+        text, _ = pt._render_skeleton(self._claude_md_task(self.STRUCTURAL))
+        self.assertIn("**Structural event:** convention — a new rule for the pipeline skills", text)
+
     def test_size_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             spec_name = self.check(VALID)["spec"]
@@ -837,6 +859,42 @@ class SplitWriteContractTest(unittest.TestCase):
             code, out = _run(SPLITTER, "validate-all", tmp, "settings01-impl")
             self.assertEqual((code, out["task_lines"]), (0, {"original": 2, "missing": []}))
 
+    def test_all_three_task_lines_reach_the_parts(self):  # spec 1 of plan-refactoring-02
+        size = "**Size:** 120 lines — the smoke rows are one table"
+        structural = "**Structural event:** convention — the count rule is shared"
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copyfile(SETTINGS_SPEC, os.path.join(tmp, "settings01-spec.md"))
+            with open(SETTINGS_PLAN, encoding="utf-8") as fh:
+                text = fh.read()
+            text = text.replace("load two rows and run the smoke test\n",
+                                "load two rows and run the smoke test\n\n" + size + "\n")
+            text = text.replace("- Test: `tests/test_counts.py`\n",
+                                "- Test: `tests/test_counts.py`\n- Modify: `CLAUDE.md`\n\n" + structural + "\n")
+            source = os.path.join(tmp, "source.md")
+            with open(source, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            plan, _ = self.split(tmp, source, "settings01-impl.md", [("a", ["1"], [], "A"), ("b", ["2"], ["a"], "B")])
+            code, out = _run(TOOL, "plan-check", plan)
+            self.assertEqual((code, out["errors"]), (0, []))
+            self.assertFalse(any("claude-md-edit" in w for w in out["warnings"]), out["warnings"])
+            code, out = _run(SPLITTER, "validate-all", tmp, "settings01-impl")
+            self.assertEqual((code, out["task_lines"]), (0, {"original": 4, "missing": []}))
+
+
+@unittest.skipUnless(all(os.path.isfile(p) for p in (BRAINSTORM, RESOLVER, REVISION)),
+                     "pipeline skills not installed alongside")
+class TaskIdContractTest(unittest.TestCase):
+    """F7 of plan-refactoring-02: one normalization rule of task ids in every script that compares them."""
+
+    def test_task_ids_are_normalized_alike(self):
+        brainstorm = _load_by_path("brainstorm_tool", BRAINSTORM)
+        resolver = _load_by_path("resolver_tool", RESOLVER)
+        revision = _load_by_path("next_review_index", REVISION)
+        for value in ("01.02", "007", "1.10", "12", "a1", "x.01"):
+            expected = brainstorm.normalize_task_id(value)
+            self.assertEqual(revision.normalize_task_id(value), expected, value)
+            self.assertEqual(resolver.normalize_plan_task_id(value), expected.lower(), value)
+
 
 class SkeletonHelperTest(unittest.TestCase):
     def test_code_blocks_and_unclosed_fence(self):
@@ -906,6 +964,13 @@ class TaskTextTest(unittest.TestCase):
             with self.assertRaises(pt.InputError) as ctx:
                 pt._task_text(VALID, "1")
         self.assertEqual(str(ctx.exception), "plan-brainstorming not installed alongside")
+
+    def test_zero_padded_ids(self):  # F7 of plan-refactoring-02
+        lines = VALID.splitlines(keepends=True)
+        self.assertEqual(pt._task_text(VALID, "01.1"), "".join(lines[55:73]))
+        text, _ = pt._render_skeleton(VALID, ["01.01"])
+        self.assertIn("### Task 1.1: Document the flag", text)
+        self.assertNotIn("### Task 1: Parse", text)
 
     def test_no_tasks_and_unclosed_fence(self):
         text, warnings = pt._render_skeleton("# Notes\n\nplain text\n")

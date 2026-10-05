@@ -73,7 +73,7 @@ The script copies, never the model:
    heading to the line before the next task, byte for byte;
 3. completion criteria from `criteria`, else from each task's done-state.
 
-So `**External:**` and `**Size:**` lines stay in their tasks as they are. `validate-all` checks the
+So `**External:**`, `**Size:**` and `**Structural event:**` lines stay in their tasks as they are. `validate-all` checks the
 task bodies (`task_bodies`, by the shared parser's `sha1`) and these lines. `split-write` checks the
 whole `parts.json` before writing anything: each plan task in exactly one part, ids `a, b, …` in
 order, known and acyclic dependencies, no part in the parallel group of its dependency, no

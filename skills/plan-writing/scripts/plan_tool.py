@@ -76,6 +76,11 @@ MAX_CODE_LINES_ERROR = 150
 # Task line:  **Size:** 140 lines — why the task cannot be split
 SIZE_PREFIX_RE = re.compile(r"^\*\*Size:\*\*")
 SIZE_RE = re.compile(r"^\*\*Size:\*\*\s*(\d+)\s+lines\s*[—-]\s*\S")
+# Task line:  **Structural event:** contract — why the task edits CLAUDE.md. The keys are the structural events of
+# CLAUDE.md's "Stability of this file" rule (spec 1 of plan-refactoring-02); splitter_tool.TASK_LINE_RE copies the line.
+STRUCTURAL_KEYS = ("skill", "script", "contract", "convention", "artifact")
+STRUCTURAL_PREFIX_RE = re.compile(r"^\*\*Structural event:\*\*")
+STRUCTURAL_RE = re.compile(r"^\*\*Structural event:\*\*\s*(?:" + "|".join(STRUCTURAL_KEYS) + r")\s*[—-]\s*\S")
 # Same Cyrillic range and threshold as brainstorm_tool.py, executor_tool.py, splitter_tool.py
 # and resolver_tool.py.
 CYRILLIC_RE = re.compile("[Ѐ-ӿ]")
@@ -87,7 +92,7 @@ SMALL_PLAN_TASKS = 15
 # Plan skeleton (`skeleton`): the lines a task keeps outside code blocks. `block` starts a block kept up
 # to the next blank line (Files, Preconditions, …); `line` keeps one line (step headings, Run:, Expected:).
 SKELETON_KEEP_RE = re.compile(
-    r"^\s*(?:(?P<block>\*\*(?:Files|Preconditions|Postconditions|Done when|Constraints|If stuck|External|Size):\*\*"
+    r"^\s*(?:(?P<block>\*\*(?:Files|Preconditions|Postconditions|Done when|Constraints|If stuck|External|Size|Structural event):\*\*"
     r"|Done when:)|(?P<line>- \[[ xX]\] \*\*Step\b|(?:\*\*)?(?:Run|Expected)(?:\*\*)?:))"
 )
 # Signature lines of a code block, kept in its `[code <lang>, <N> lines: …]` line.
@@ -191,6 +196,13 @@ def _parse_tasks(text: str) -> List[Dict[str, Any]]:
     return parse(text)["tasks"]
 
 
+def _task_key(task_id: str) -> str:
+    """The id as the shared parser writes it (brainstorm_tool.normalize_task_id: `01.1` → `1.1`; F7 of
+    plan-refactoring-02), so `task` and `skeleton --tasks` take any zero padding."""
+    normalize = getattr(_load_brainstorm_tool(), "normalize_task_id", None)
+    return normalize(task_id) if normalize else task_id
+
+
 def _code_blocks(lines: List[str]) -> Tuple[Dict[int, Tuple[int, str]], List[str]]:
     """{opening fence line: (closing fence line, language)}, 1-based, by the fence toggle of parse_plan_tasks.
     An unclosed block runs to the end of the plan (closing line len(lines) + 1) with the warning `unclosed-fence`."""
@@ -251,9 +263,10 @@ def _render_skeleton(text: str, tasks: Optional[List[str]] = None,
     """The plan without code bodies: the header (lines before the first task) whole; per task its heading,
     the Files/Preconditions/Postconditions/Done when/Constraints/If stuck blocks up to a blank line,
     External, Size, step headings, Run:/Expected: and one `[code …]` line per code block; headings
-    between tasks stay. `tasks` (ids as written) keeps the header and those tasks in plan order.
+    between tasks stay. `tasks` (ids in any zero padding: `01.1` = `1.1`) keeps the header and those tasks in plan order.
     Returns (text, warnings); an unknown id is exit 2 `task-not-found: <id>`."""
     all_tasks = _parse_tasks(text)
+    tasks = None if tasks is None else [_task_key(task_id) for task_id in tasks]
     lines = text.splitlines()
     blocks, warnings = _code_blocks(lines)
     if not all_tasks:
@@ -290,6 +303,7 @@ def _render_skeleton(text: str, tasks: Optional[List[str]] = None,
 
 def _task_text(text: str, task_id: str) -> str:
     """Lines line_start..line_end of the first task `task_id`, line endings as in the file."""
+    task_id = _task_key(task_id)
     found = next((task for task in _parse_tasks(text) if task["id"] == task_id), None)
     if found is None:
         raise InputError(f"{TASK_NOT_FOUND}: {task_id}")
@@ -541,6 +555,7 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
             if name not in declared and re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", body_text):
                 errors.append(f"{label}: uses environment `{name}` without a '**External:** `{name}` — …' line")
 
+        edits_claude_md = False
         for n, line, fenced in body:
             if fenced:
                 continue
@@ -553,6 +568,8 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
                 continue
             kind = file_match.group("kind")
             rel = path_match.group("path").strip()
+            if kind in ("Create", "Modify") and rel.replace("\\", "/").rsplit("/", 1)[-1] == "CLAUDE.md":
+                edits_claude_md = True
             if kind == "Create":
                 created.add(rel)
             if root is None:
@@ -609,6 +626,19 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
             )
         elif code_lines > MAX_CODE_LINES and not sized:
             warnings.append(f"{label}: {code_lines} lines of code in steps; check the 100-lines-of-new-code limit")
+        # CLAUDE.md changes only on a structural event, and the task names it (spec 1 of plan-refactoring-02).
+        structural = False
+        for n, line, fenced in body:
+            if fenced or not STRUCTURAL_PREFIX_RE.match(line):
+                continue
+            if STRUCTURAL_RE.match(line):
+                structural = True
+            else:
+                errors.append(f"line {n}: malformed structural event line, expected '**Structural event:** "
+                              f"{'|'.join(STRUCTURAL_KEYS)} — <reason>': {line.strip()}")
+        if edits_claude_md and not structural:
+            warnings.append(f"{label}: claude-md-edit: the task edits CLAUDE.md without a '**Structural event:** "
+                            f"<key> — <reason>' line ({', '.join(STRUCTURAL_KEYS)})")
 
     # Dialogue language: the plan text outside code fences.
     lang = detect_lang_text("\n".join(line for _, line, fenced in lines if not fenced))
@@ -706,7 +736,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_skel = sub.add_parser("skeleton", help="print the plan without code bodies (text, not JSON)")
     p_skel.add_argument("plan")
-    p_skel.add_argument("--tasks", help="comma-separated task ids as written (default: every task)")
+    p_skel.add_argument("--tasks", help="comma-separated task ids, any zero padding (default: every task)")
     p_skel.add_argument("--code", choices=("none", "signatures"), default="signatures",
                         help="code block lines: language and line count, plus signatures (default)")
     p_skel.set_defaults(func=cmd_skeleton, text_output=True)

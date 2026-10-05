@@ -58,9 +58,12 @@ that as a regression.
 
 An incremental audit checks every active contract too (its task is in scope through `focus`) and
 carries only the ones still open; a contract left out counts as applied, as in a full audit. When every
-task a left-out contract names is unchanged, the fix cannot have landed: `record` carries it back by
-itself, with its earlier severity and fields, and warns `contracts-dropped: [<fingerprints>]`. Treat
-that warning as a missed check and mention it in the summary.
+task a left-out contract names is unchanged and none of them was in the audit's `--tasks`, the fix
+cannot have landed and the audit did not look: `record` carries it back by itself, with its earlier
+severity and fields, and warns `contracts-dropped: [<fingerprints>]`. Treat that warning as a missed
+check and mention it in the summary. A contract whose task was in `--tasks` and that you left out is
+closed by your decision. An old review whose contract cannot be carried back (a field is missing) makes
+`record` exit `64` with `contracts-carry-failed: …`: fix that review's contract or run a full audit.
 
 ## Step 2: Lenses
 

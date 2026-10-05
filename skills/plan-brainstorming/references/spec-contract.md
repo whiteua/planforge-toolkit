@@ -120,6 +120,28 @@ steps and the audit checks of `plan-iterative-revision` and `plan-resolver`. The
 the investigation in `plan-brainstorming`: it happens before the spec exists, so every check on
 an external system there still needs the user's explicit permission.
 
+## CLAUDE.md and structural events
+
+A repository's `CLAUDE.md` changes only on a structural event (its "Stability of this file" rule).
+Components name `CLAUDE.md` only for such an event and name the event; commands, flags, fields and
+error codes go to the skill's `USAGE.md` and `docs/HELPER-CLIS.md`. `spec-check` warns
+`claude-md-in-components` when Components names `CLAUDE.md`; the warning never blocks.
+
+A plan task whose `Files` block creates or modifies `CLAUDE.md` carries, after that block, next to
+`**External:**` and `**Size:**`, the line `**Structural event:** <key> — <reason>`:
+
+| Key | Event |
+|---|---|
+| `skill` | a skill is added or removed |
+| `script` | a script is added, renamed or moved |
+| `contract` | a cross-skill contract changes (a format parsed by another skill, the chain journal) |
+| `convention` | a convention changes |
+| `artifact` | a new artifact must never be committed |
+
+`plan-check` fails on another key or a line without the reason and warns `claude-md-edit` when such a
+task has no line; `plan-splitter` copies the line into the part verbatim and `validate-all` checks it;
+`plan-executor` makes the edit without a question.
+
 ## Artifacts and naming
 
 | Artifact | Path | Owner |
@@ -187,7 +209,7 @@ prose is in the language of the first spec (or `--lang`).
 ## Order
 | # | Spec | Title | Depends on | Group | Tier | Estimate |
 ## Graph
-(a mermaid block: graph LR, one subgraph per group, one node per spec, one edge per dependency)
+(a mermaid block: graph LR, one subgraph g_<group>["<group>"] per group, one node per spec, one edge per dependency)
 ## Parallelism
 ## Shared touchpoints
 | File or symbol | Specs | Delivery order | Note |   (or the one line none / нет)
@@ -211,10 +233,14 @@ Instruction: followed by a text block with the instruction verbatim, or Instruct
 - `Tier` and `Estimate` (`~N`) come from `spec-check`; `?` when it fails, `—` without `volume`;
   `roadmap-check` accepts both, an empty `Estimate` is a warning.
 - Mermaid nodes are `s<N>` (file number) or `n<#>` with the label `"<#>. <title>"`; the edges
-  `dependency --> spec` must equal the table.
+  `dependency --> spec` must equal the table. A group is `subgraph g_<group>["<group>"]`, so a group
+  named `end` or `s2` collides neither with a Mermaid word nor with a node; `roadmap-check` also
+  accepts the older `subgraph <group>`.
+- A `File or symbol` cell of Shared touchpoints is one code span longer than any backtick run in the
+  name, padded with spaces when the name holds a backtick, with `|` escaped as `\|`.
 - A spec is never in the group of one of its dependencies; a delivery order follows `#`.
 - `roadmap-check` errors: the header lines, the eight sections in order, the Order table (header,
-  `#` = 1..N, the `> Specs:` count), unknown dependency, cycle, `order-violation`,
+  `#` = 1..N in ASCII digits, else `order-numbering`, the `> Specs:` count), unknown dependency, cycle, `order-violation`,
   `group-conflict`, Mermaid nodes and edges, Shared touchpoints rows (`unknown-shared-spec`,
   `shared-order-conflict`), a missing `### <#>. <file>` section, a spec file missing next to the
   roadmap.

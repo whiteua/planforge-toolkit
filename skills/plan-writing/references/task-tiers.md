@@ -24,6 +24,10 @@ Size is not a tier element: every tier keeps the limit from `SKILL.md` §4
 `**Size:** <N> lines — <reason>` after `Files`; without it `plan-check` warns
 above 100 lines of code and fails above 150.
 
+A task that creates or modifies `CLAUDE.md` carries `**Structural event:** <key> — <reason>`
+after `Files` in every tier (`skill`, `script`, `contract`, `convention`, `artifact`; `SKILL.md`
+§4); without it `plan-check` warns `claude-md-edit`.
+
 ## Tier → task format
 
 | Element | Quick | Standard | Deep |

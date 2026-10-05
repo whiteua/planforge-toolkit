@@ -117,6 +117,17 @@ class TaskDigestTable(unittest.TestCase):
         with mock.patch.object(nri, "_load_brainstorm_tool", return_value=None):
             self.assertEqual(nri.plan_task_index(task_plan(n=1)), (None, "task-parser-unavailable"))
 
+    def test_zero_padded_ids_and_their_references(self):  # F7 of plan-refactoring-02
+        plan = ("# P\n\n### Task 01: A\n\n- [ ] **Step 1: a**\n\n### Task 2: B\n\n**Preconditions:**\n"
+                "- Task 1 is done\n\n- [ ] **Step 1: b**\n")
+        tasks, reason = nri.plan_task_index(plan)
+        self.assertEqual(([task["id"] for task in tasks], reason), (["1", "2"], None))
+        self.assertEqual(nri.dependents_closure(["1"], tasks), ["2"])
+        self.assertEqual(nri.contract_tasks("Task 01, Step 2; Задача 3.01"), ["1", "3.1"])
+        self.assertEqual([nri.normalize_task_id(v) for v in ("01.02", "007", "A1")], ["1.2", "7", "A1"])
+        table = "## Task digest\n\n| Task | Hash |\n|---|---|\n| 01 | 9f3c2a1b |\n| 1 | 0e77ad21 |\n"
+        self.assertEqual(nri.parse_task_digest(table), {"tasks": {"1": "9f3c2a1b"}, "malformed": ["| 1 | 0e77ad21 |"]})
+
 
 def plan_issue(fix: str, location: str) -> dict:
     return {"severity": "major", "category": "logic", "title": f"Title {fix}", "location_in_plan": location,

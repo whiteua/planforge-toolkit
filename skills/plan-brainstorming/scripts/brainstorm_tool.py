@@ -153,6 +153,7 @@ PLAN_CODE_PATH_RE = re.compile(r"`([^`\s]+?\.[A-Za-z0-9]+)(?::(\d+(?:-\d+)?))?`"
 PLAN_MD_LINK_RE = re.compile(r"\[([^\]]+\.[A-Za-z0-9]+)\]\(([^)]+)\)")
 PLAN_PRECONDITIONS_RE = re.compile(r"^\*\*Preconditions:\*\*")
 PLAN_TASK_REF_RE = re.compile(r"\b(?:Task|Задача)\s+(\d+(?:\.\d+)*)\b")
+PLAN_NUMERIC_ID_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
 PLAN_FIELD_RE = re.compile(r"^\*\*(?P<name>Spec|Tier|Chain|Backlog):\*\*\s*(?P<value>.*?)\s*$")
 PLAN_ENVIRONMENTS_RE = re.compile(r"^\*\*Environments:\*\*\s*$")
 PLAN_ENV_ITEM_RE = re.compile(r"^\s*[-*]\s+`")
@@ -529,6 +530,16 @@ def _plan_task_files(lines: List[str]) -> List[Dict[str, Any]]:
     return files
 
 
+def normalize_task_id(task_id: str) -> str:
+    """A task id for comparison (F7 of plan-refactoring-02): every number of a dotted numeric id without leading
+    zeros (`01.02` → `1.2`, `007` → `7`); any other id as written, without surrounding spaces. Copies of this rule:
+    next_review_index.normalize_task_id, resolver_tool.normalize_plan_task_id (plan-writing/tests holds them equal)."""
+    text = str(task_id).strip()
+    if PLAN_NUMERIC_ID_RE.match(text):
+        return ".".join(str(int(part)) for part in text.split("."))
+    return text
+
+
 def _plan_task_refs(lines: List[str]) -> List[str]:
     """Task ids named in the **Preconditions:** block (Task N, Task N.M, Задача N), in order, once each."""
     refs: List[str] = []
@@ -540,7 +551,10 @@ def _plan_task_refs(lines: List[str]) -> List[str]:
         elif in_block and (stripped.startswith("**") or stripped.startswith("- [ ]") or PLAN_HEADING_RE.match(stripped)):
             in_block = False
         if in_block:
-            refs.extend(ref for ref in PLAN_TASK_REF_RE.findall(stripped) if ref not in refs)
+            for ref in PLAN_TASK_REF_RE.findall(stripped):
+                ref = normalize_task_id(ref)
+                if ref not in refs:
+                    refs.append(ref)
     return refs
 
 
@@ -550,7 +564,8 @@ def parse_plan_tasks(text: str) -> Dict[str, Any]:
     A task ends before the next task heading or the next heading of its level or higher. Lines are
     1-based and inclusive (`lines[line_start-1:line_end]`). `sha1` (8 hex) and `size_bytes` cover the task's
     text joined with newlines, without trailing blank lines. Task-like headings without `<id>:` go to
-    `malformed`, repeated ids to `duplicates`; ids stay as written (consumers normalise them)."""
+    `malformed`, repeated ids to `duplicates`; ids and refs are normalised (normalize_task_id), so `Task 1` and
+    `Task 01` repeat one id."""
     lines = text.splitlines()
     scanned = _fence_scan(text)
     unfenced = [(number, raw.rstrip()) for number, raw, kind in scanned if kind == "text"]
@@ -578,7 +593,7 @@ def parse_plan_tasks(text: str) -> Dict[str, Any]:
         inner = range(number + 1, end + 1)
         plain = [lines[n - 1] for n in inner if n in visible]
         tasks.append({
-            "id": match.group("id"),
+            "id": normalize_task_id(match.group("id")),
             "title": match.group("title"),
             "level": level,
             "line_start": number,
@@ -723,6 +738,14 @@ def _spec_volume(text: str, bodies: Dict[str, str], tier: Optional[str]) -> Dict
     }
 
 
+# CLAUDE.md changes only on a structural event (its "Stability of this file" rule): a spec that names it in Components
+# gets a warning, never an error (spec 1 of plan-refactoring-02).
+CLAUDE_MD_RE = re.compile(r"(?<![\w.-])CLAUDE\.md\b")
+CLAUDE_MD_IN_COMPONENTS = ("claude-md-in-components: Components names CLAUDE.md; it changes only on a structural event "
+                           "(skill, script, contract, convention, artifact): name the event, and put commands, flags "
+                           "and fields into the skill's USAGE.md and docs/HELPER-CLIS.md")
+
+
 def check_spec(text: str) -> Dict[str, Any]:
     """Check spec text against the spec contract. Code fences are ignored."""
     errors: List[str] = []
@@ -801,6 +824,8 @@ def check_spec(text: str) -> Dict[str, Any]:
     components_body = bodies.get("## Components", "")
     if components_body and not components_body.startswith(NONE_TEXT) and volume["components"] == 0:
         warnings.append(VOLUME_UNKNOWN)
+    if CLAUDE_MD_RE.search(components_body):
+        warnings.append(CLAUDE_MD_IN_COMPONENTS)
     return {
         "ok": not errors,
         "tier": tier,
@@ -2817,14 +2842,17 @@ def _set_specs(directory: str, given: Optional[List[str]], warnings: List[str],
 
 def _components_cells(lines: List[str]) -> Optional[List[str]]:
     """First cells of the rows of the '## Components' table (header and separator left out); None when
-    the section has no table."""
+    the section has no table. The section ends at the next '#' or '##' heading, whatever its text, and a heading
+    is compared without trailing spaces (F16 of plan-refactoring-02): a table under another section is not
+    Components; '###' subheadings stay inside it."""
     rows: List[str] = []
     inside = False
     for line in lines:
-        if line in SPEC_HEADINGS:
-            inside = line == "## Components"
-        elif inside and line.startswith("|"):
-            rows.append(line)
+        stripped = line.rstrip()
+        if re.match(r"^#{1,2}\s", stripped):
+            inside = stripped == "## Components"
+        elif inside and stripped.startswith("|"):
+            rows.append(stripped)
     if not rows:
         return None
     cells: List[str] = []
@@ -2833,6 +2861,18 @@ def _components_cells(lines: List[str]) -> Optional[List[str]]:
         if not (_is_table_separator(line) or _is_table_separator(following)):
             cells.append(re.split(r"(?<!\\)\|", line.strip().strip("|"))[0])
     return cells
+
+
+# Names every spec may give without sharing work (F15 of plan-refactoring-02): the shared documents and the
+# Components rows of tests and documentation are not touchpoints.
+SHARED_DOC_NAMES = ("CLAUDE.md", "README.md", "USAGE.md")
+SHARED_DOC_PATH_RE = re.compile(r"^docs/[^/]+\.md$")
+SHARED_ROW_RE = re.compile(r"^\s*(?:Тесты|Документация|Tests|Docs)\b", re.IGNORECASE)
+
+
+def _shared_doc(name: str, kind: str) -> bool:
+    """True for a path to CLAUDE.md, README.md or USAGE.md in any folder, or to a .md file right in docs/."""
+    return kind == "path" and (name.rsplit("/", 1)[-1] in SHARED_DOC_NAMES or bool(SHARED_DOC_PATH_RE.match(name)))
 
 
 def _touch_names(cell: str) -> List[Tuple[str, str]]:
@@ -2886,7 +2926,9 @@ def spec_set_check(directory: str, given: Optional[List[str]] = None, goal: Opti
         cells = _components_cells(lines)
         if cells is None:
             warnings.append(f"no-components-table: {name}")
-        for key in dict.fromkeys(key for cell in cells or [] for key in _touch_names(cell)):
+        points = (key for cell in cells or [] if not SHARED_ROW_RE.match(cell)
+                  for key in _touch_names(cell) if not _shared_doc(*key))
+        for key in dict.fromkeys(points):
             touch.setdefault(key, []).append(name)
         text = "\n".join(lines)
         for path in dict.fromkeys(m.group("path") for m in NUMBERED_REF_RE.finditer(text)):
@@ -3058,6 +3100,24 @@ def _cell(text: Optional[str]) -> str:
     return _one_line(text).replace("|", "\\|")
 
 
+def _code_span(text: str) -> str:
+    """Inline code for `text`: a backtick run longer than any inside it, padded with spaces when it holds one
+    (F17 of plan-refactoring-02)."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    tick, pad = "`" * (longest + 1), " " if longest else ""
+    return f"{tick}{pad}{text}{pad}{tick}"
+
+
+def _code_span_text(cell: str) -> str:
+    """The text of a cell that is one code span (`x`, `` a`b ``); one space is stripped from each side when both
+    are there. Any other cell loses only its outer backticks, as before."""
+    match = re.fullmatch(r"(`+)(.*?)\1", cell)
+    if not match:
+        return cell.strip("`")
+    text = match.group(2)
+    return text[1:-1] if len(text) > 2 and text.startswith(" ") and text.endswith(" ") and text.strip() else text
+
+
 def _fence(text: str, info: str) -> str:
     """`text` in a code fence one backtick longer than any backtick run inside it (at least three)."""
     ticks = "`" * max(3, max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
@@ -3102,12 +3162,13 @@ def _render_roadmap(lang: str, goal: str, graph: Dict[str, Any], order: List[str
         groups.setdefault(spec[name]["group"], []).append(name)
     mermaid = ["graph LR"]
     for group, members in groups.items():
-        mermaid += [f"    subgraph {group}"] + [
+        # A group id of its own: `end` is a Mermaid word and `s2` may be a node id (F18 of plan-refactoring-02).
+        mermaid += [f'    subgraph g_{group}["{group}"]'] + [
             f'        {nodes[name]}["{position[name]}. {_one_line(spec[name]["title"]).replace(chr(34), "#quot;")}"]'
             for name in members] + ["    end"]
     mermaid += [f"    {nodes[dep]} --> {nodes[name]}" for name in order for dep in spec[name]["depends"]]
     shared = ["| " + " | ".join(ROADMAP_SHARED_HEADER) + " |", "|" + "---|" * len(ROADMAP_SHARED_HEADER)]
-    shared += [f"| `{_one_line(item['name'])}` | {named(item['specs'])} | {named(item['order'], ' → ')} | "
+    shared += [f"| {_code_span(_cell(item['name']))} | {named(item['specs'])} | {named(item['order'], ' → ')} | "
                f"{_cell(item['note'])} |" for item in graph["shared"]]
     sections = [f"### {position[name]}. {name}\n\n- {labels['goal']}: {facts[name]['goal']}\n"
                 f"- {labels['depends']}: {named(spec[name]['depends'])}\n"
@@ -3284,7 +3345,7 @@ def _parse_order(blocks: List[Block], errors: List[str], warnings: List[str]) ->
         match = re.fullmatch(r"~(\d+)", estimate)
         if not match and estimate not in (DASH, "?"):
             warnings.append(f"no-estimate: {name}")
-        specs.append({"n": int(number) if number.isdigit() else None, "file": name, "title": title,
+        specs.append({"n": int(number) if re.fullmatch(r"[0-9]+", number) else None, "file": name, "title": title,
                       "depends": depends, "group": group, "tier": None if tier in ("", DASH, "?") else tier,
                       "estimate": int(match.group(1)) if match else None, "notes": None, "handoff": None})
     if not specs:
@@ -3347,7 +3408,7 @@ def _parse_shared(blocks: List[Block], files: List[str], errors: List[str]) -> L
         if len(cells) != len(ROADMAP_SHARED_HEADER):
             errors.append("shared-row: " + " | ".join(cells))
             continue
-        name = cells[0].strip("`")
+        name = _code_span_text(cells[0])
         specs = [] if cells[1] == DASH else [by_ref.get(token.strip(), token.strip()) for token in cells[1].split(",")]
         order = [] if cells[2] == DASH else [by_ref.get(token.strip(), token.strip()) for token in cells[2].split("→")]
         kind = "path" if "/" in name or re.search(r"\.[A-Za-z0-9]+$", name) else "symbol"

@@ -82,7 +82,7 @@ parse the same ids.
    `brainstorm_tool.py`, Chain journal).
 9. A verified part is "done" only when `TOOL verify-status` exits 0. `missing` → one re-dispatch,
    then stop; `inconsistent` → stop immediately; never downgrade to a warning.
-10. Task texts are copied by `split-write` byte for byte, so every `**External:**` and `**Size:**`
+10. Task texts are copied by `split-write` byte for byte, so every `**External:**`, `**Size:**` and `**Structural event:**`
     line stays in its task (references/STAGE-FORMAT.md §6); `validate-all` fails when a task body
     (`task_bodies`) or one of these lines is missing. The model never writes task text into a part.
 

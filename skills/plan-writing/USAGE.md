@@ -33,7 +33,7 @@ You start it yourself after `plan-brainstorming` has approved the spec (its clos
 2. **Tier Read** — inherits the tier from the spec's `> Tier:` line (Standard if missing)
 3. **Scope Check** — a spec with several independent subsystems stops for your choice of how to split it; a spec whose volume estimate (`spec-check` `volume`) or planned task count is over 40 tasks asks once whether to continue with one plan or return to `plan-brainstorming` (a run without you continues)
 4. **File Structure** — maps out which files will be created/modified
-5. **Task Generation** — tasks with TDD steps, exact code, file paths; no commit steps
+5. **Task Generation** — tasks with TDD steps, exact code, file paths; no commit steps. The file is written task by task: the header, then the marker `> Writing: in progress (spec sha256 <12 hex>)` (`writing_marker` of `plan-path`) as its last line, each finished task before it, the marker deleted after the last task. A cut-off writer started again continues after the last task in the file; when the spec changed since, the plan is written anew
 6. **Check and Self-Review** — `scripts/plan_tool.py plan-check` for the format contract (it also returns `size_class` and warns `plan-oversized` over the budget; `--max-tasks`, `--max-bytes` override it), then spec coverage, consistency and task size (Deep: plus a reviewer subagent); the chain journal `<goal>-chain.json` next to the spec records the `writing` stage (running at the start, done with the plan), and a question asked in a run without you stops the skill and stays open in the journal
 7. **Execution Handoff** — offers the next step (audit via `plan-iterative-revision`, split via `plan-splitter`, or execute via `plan-executor`) with the task count, plan size and `size_class` (`small` ≤ 15 tasks, `large` over 40 tasks or 150000 bytes, else `medium`); with `split=auto` the splitter's gate decides on the split; a `large` plan gets the advice to split the goal in `plan-brainstorming`; with an explicit `Chain` in the settings, `split=always|never` and `resolver=` are stated, not asked; waits for your explicit choice
 
@@ -99,6 +99,8 @@ Unlike every other command these two print text, not JSON: stdout is plan text, 
 | "No tier line" message | Legacy spec without `> Tier:` | Not an error — defaults to Standard |
 | "needs the access type (read) or (write)" / "is not allowed: write=deny" | `External` line without the access type, or access the settings deny | Add `(read)`/`(write)`; a denied access means the plan must change or the user must change the spec |
 | "settings are unavailable" | The plan has `External` lines, the spec at `**Spec:**` is missing and the header has no settings | Restore the spec path in `**Spec:**` |
+| `plan-incomplete` | The plan still carries the marker `> Writing: in progress`: the writer was cut off | Run `/plan-writing <spec>` again: it continues after the last written task |
+| `marker-spec-mismatch` | The marker's fingerprint is not the spec's: the spec changed after the writer was cut off | Run `/plan-writing <spec>` again: it writes the plan anew |
 
 ## Pipeline Position
 

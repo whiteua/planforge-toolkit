@@ -960,7 +960,8 @@ class PlanTasksTest(unittest.TestCase):
                          [("1", 1, 2), ("1.1", 3, 4)])
 
     def test_plan_without_tasks(self):
-        self.assertEqual(ft.parse_plan_tasks("# Plan\n\n1. step\n"), {"tasks": [], "malformed": [], "duplicates": []})
+        self.assertEqual(ft.parse_plan_tasks("# Plan\n\n1. step\n"),
+                         {"tasks": [], "malformed": [], "duplicates": [], "incomplete": False, "marker_spec_sha": None})
 
     def test_ids_and_refs_are_normalized(self):  # F7 of plan-refactoring-02
         self.assertEqual([ft.normalize_task_id(v) for v in ("01.02", "007", "1.10", " 3 ", "A1", "x.01")],
@@ -970,6 +971,23 @@ class PlanTasksTest(unittest.TestCase):
         self.assertEqual([(t["id"], t["refs"]) for t in parsed["tasks"]], [("1", []), ("2", ["1", "1.0"])])
         duplicated = ft.parse_plan_tasks("### Task 1: A\nx\n\n### Task 01: B\ny\n")
         self.assertEqual(duplicated["duplicates"], [{"id": "1", "lines": [1, 4]}])
+
+    def test_writing_marker(self):  # spec 3 of plan-refactoring-02
+        marker = "> Writing: in progress (spec sha256 0123456789ab)"
+        plan = "# P\n\n### Task 1: A\nbody\n\n### Task 2: B\nmore\n\n" + marker + "\n"
+        parsed = ft.parse_plan_tasks(plan)
+        self.assertEqual((parsed["incomplete"], parsed["marker_spec_sha"]), (True, "0123456789ab"))
+        self.assertEqual([(t["id"], t["line_start"], t["line_end"]) for t in parsed["tasks"]], [("1", 3, 5), ("2", 6, 8)])
+        self.assertEqual(parsed["tasks"][1]["size_bytes"], len("### Task 2: B\nmore\n"))
+        self.assertEqual(ft.writing_marker(plan), {"line": 9, "spec_sha": "0123456789ab"})
+        middle = ft.parse_plan_tasks("### Task 1: A\nbody\n> Writing: in progress\n### Task 2: B\n")
+        self.assertEqual((middle["incomplete"], middle["marker_spec_sha"]), (True, None))
+        self.assertEqual([(t["id"], t["line_start"], t["line_end"]) for t in middle["tasks"]], [("1", 1, 2)])
+        broken = ft.parse_plan_tasks("### Task 1: A\n\n> Writing: in progress (spec sha256 XYZ)\n")
+        self.assertEqual((broken["incomplete"], broken["marker_spec_sha"]), (True, None))
+        fenced = ft.parse_plan_tasks("### Task 1: A\n\n" + FENCE + "text\n" + marker + "\n" + FENCE + "\n")
+        self.assertEqual((fenced["incomplete"], fenced["marker_spec_sha"]), (False, None))
+        self.assertIsNone(ft.writing_marker("# P\n"))
 
 
 NESTED_FENCE_PLAN = "\n".join([

@@ -1607,6 +1607,32 @@ class CodeBusyReadingStagesTest(_T2Case):
         self.assertEqual((steps, waiting), ([("a-impl.md", "revision", False)], [("b-impl.md", "code-busy: a-impl")]))
 
 
+class WritingResumeTest(_T2Case):
+    """Spec 3 of plan-refactoring-02: a running writing whose plan carries the writing marker comes back with resume."""
+    PLAN = "# P\n\n**Spec:** a-spec.md\n\n### Task 1: A\n\nbody\n\n"
+
+    def write_plan(self, marker):
+        with open(os.path.join(self.tmp, "a-impl.md"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(self.PLAN + ("> Writing: in progress (spec sha256 0123456789ab)\n" if marker else ""))
+
+    def test_running_writing_with_the_marker_resumes(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")])
+        self.write_plan(marker=True)
+        result = ct.run_next(path, 1)
+        self.assertEqual([(a["stage"], a.get("resume")) for a in result["actions"]], [("writing", True)])
+        self.assertNotIn("running", result["actions"][0])
+
+    def test_no_resume_without_the_marker_or_a_running_writing(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")])
+        self.write_plan(marker=False)
+        self.assertNotIn("resume", ct.run_next(path, 1)["actions"][0])
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="failed")])
+        self.write_plan(marker=True)
+        self.assertNotIn("resume", ct.run_next(path, 1)["actions"][0])
+        path = self.journal(["a-spec.md"])
+        self.assertNotIn("resume", ct.run_next(path, 1)["actions"][0])
+
+
 class LedgerUnitsTest(HomeCase):
     """Spec 2 of plan-refactoring-02: run-checklist reads the units of a ledger and keeps its texts per language."""
 
@@ -2006,6 +2032,35 @@ class ReadsModelTest(_StatsCase):
             (size, mode), _, warnings = self.reads("audit", ("x-impl-report-1.md", "---\naudit_scope: incremental\naudit_tasks: [9]\n---\n"))
         self.assertEqual((size, mode, warnings), (plan, "full", ["scope-unresolved: x-impl-report-1.md"]))
 
+    def test_incremental_audit_reads_changed_and_task_evidence(self):  # F11 of plan-refactoring-02
+        plan_text = ("# P\n\n**Spec:** x-spec.md\n\n**Tier:** Standard\n\n### Task 1: One\n\n**Files:**\n"
+                     "- Modify: `big1.py`\n\n" + "filler line\n" * 300 +
+                     "\n### Task 2: Two\n\n**Files:**\n- Modify: `small.py`\n\nbody\n")
+        os.makedirs(os.path.join(self.tmp, ".git"), exist_ok=True)
+        for name, size in (("big1.py", 2000), ("big2.py", 2000), ("small.py", 100)):
+            with open(os.path.join(self.tmp, name), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("x" * (size - 1) + "\n")
+
+        def table(*rows):
+            return "## Evidence fingerprint\n\n| File | SHA-256 |\n|---|---|\n" + "".join(f"| `{p}` | {h} |\n" for p, h in rows)
+
+        full = "# Report\n\n" + table(("big1.py", "1" * 64), ("big2.py", "2" * 64), ("small.py", "3" * 64))
+        incremental = ("---\naudit_scope: incremental\naudit_tasks: [2]\n---\n# Report\n\n"
+                       + table(("big1.py", "1" * 64), ("big2.py", "4" * 64), ("small.py", "3" * 64)))
+
+        def audit(second):
+            folder = self.folder(("x-impl.md", plan_text), ("x-impl-report-1.md", full), ("x-impl-report-2.md", second))
+            stats = ct._artifact_stats(os.path.join(folder, "x-impl.md"), [])
+            with mock.patch.object(ct, "_skeleton_available", return_value=False):
+                return ct._reads_model("audit", stats, folder, plan_text, [])
+
+        plan, earlier = len(plan_text.encode("utf-8")), len(full.encode("utf-8"))
+        header = len(plan_text[:plan_text.index("### Task 1")])
+        task2 = len(plan_text[plan_text.index("### Task 2"):])
+        self.assertEqual(audit(incremental), (plan + header + task2 + 2000 + 100 + earlier, "mixed"))
+        self.assertEqual(audit(full), (plan * 2 + earlier, "full"))
+        self.assertLess(header + task2 + 2000 + 100, plan)  # the incremental pass is cheaper than a full one
+
 
 class CostEstimateTest(_StatsCase):
     def stats(self, *extra):
@@ -2166,6 +2221,24 @@ class RunStatsTest(_T2Case):
         self.assertTrue(out["ok"])
         self.assertTrue(out["warnings"][0].startswith("plan-missing: "))
         self.assertTrue(out["plans"][0]["plan_missing"])
+
+    def test_plans_outside_the_run_and_journal_totals(self):  # F1 of plan-refactoring-02
+        self.plan_folder()
+        self.plan_folder(name="b-impl.md")
+        plans = [_t2_plan("a-spec.md", done=("writing",)), _t2_plan("b-spec.md", done=("writing",))]
+        path = self.journal(["a-spec.md", "b-spec.md"], plans=plans)
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["runner"]["specs"] = ["a-spec.md"]  # b is a plan of an earlier run of the goal
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        out = ct.run_stats(path, None)
+        self.assertEqual([(p["plan"], p["outside_run"]) for p in out["plans"]],
+                         [("a-impl.md", False), ("b-impl.md", True)])
+        self.assertEqual((out["totals"]["tasks"], out["journal_totals"]["tasks"]), (2, 4))
+        self.assertEqual(out["journal_totals"]["plan_bytes"], 2 * out["totals"]["plan_bytes"])
+        self.assertEqual(ct.run_status(path)["cost"]["bytes_total"], out["totals"]["bytes_written"])
+        self.assertIsNone(ct.run_stats(None, os.path.join(self.tmp, "a-impl.md"))["journal_totals"])
 
 
 class RunStatsCliTest(RunStatsTest):

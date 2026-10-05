@@ -58,8 +58,9 @@ stdlib only. If `python` is unavailable, stop and tell the user.
 3. Never modify code, never run the project's tests/builds/linters/migrations, never create
    plan copies, branches or commits.
 4. There is no substitute for the review file: not memory, not chat, not edits to the plan.
-   If `bootstrap` reports `valid: false`, stop before auditing and tell the user which directory
-   is not writable.
+   If `bootstrap` reports `valid: false`, stop before auditing and tell the user its `errors`: the
+   directory that is not writable, or `plan-incomplete` (the plan still carries plan-writing's
+   marker `> Writing: in progress`: `/plan-writing <spec>` finishes it).
 5. Gate decisions come only from `record`. Never continue after `action: "stop"` and never stop
    on your own while it says `implement` (except when the user interrupts).
 6. Wrap each phase in the diff guard when `git_root` is not null.

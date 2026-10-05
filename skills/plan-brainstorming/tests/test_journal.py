@@ -1005,6 +1005,14 @@ class StageEvidenceTest(unittest.TestCase):
             evidence = j2._stage_evidence(os.path.join(tmp, "g-chain.json"), entry, "diffs", [])
             self.assertEqual(evidence[0], {"diffs": "y-diffs.md"})
 
+    def test_a_plan_with_the_writing_marker_is_no_evidence(self):  # spec 3 of plan-refactoring-02
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = os.path.join(tmp, "g-chain.json")
+            _j2_write(os.path.join(tmp, "docs", "x-impl.md"),
+                      "# P\n\n### Task 1: A\n\n> Writing: in progress (spec sha256 0123456789ab)\n")
+            entry = {"id": "x-impl", "plan": "docs/x-impl.md", "stages": {}}
+            self.assertIsNone(j2._stage_evidence(journal, entry, "writing", []))
+
 
 class JournalReconcileTest(unittest.TestCase):
     def test_artifacts_finish_pending_and_running_stages_only(self):
@@ -1052,6 +1060,17 @@ class JournalReconcileTest(unittest.TestCase):
         self.assertEqual((old["changes"], old["running"]), ([], [{"plan": "a-impl", "stage": "audit"}]))
         self.assertEqual([(c["stage"], c["from"], c["to"]) for c in fresh["changes"]], [("audit", "running", "done")])
         self.assertEqual((audit["status"], audit["artifacts"]["status"]), ("done", "open"))
+
+    def test_a_plan_with_the_writing_marker_does_not_finish_writing(self):  # spec 3 of plan-refactoring-02
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = _j2_write(os.path.join(tmp, "a-impl.md"),
+                             "# P\n\n### Task 1: A\n\n> Writing: in progress (spec sha256 0123456789ab)\n")
+            path = _j2_journal(tmp, plans={"a-impl": {"writing": "pending"}})
+            first = j2.journal_reconcile(path)
+            _j2_write(plan, "# P\n\n### Task 1: A\n")
+            second = j2.journal_reconcile(path)
+        self.assertEqual(first["changes"], [])
+        self.assertEqual([(c["stage"], c["from"], c["to"]) for c in second["changes"]], [("writing", "pending", "done")])
 
 
 def _j2_git(cwd, *args):

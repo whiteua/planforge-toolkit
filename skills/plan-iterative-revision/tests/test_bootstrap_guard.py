@@ -80,6 +80,21 @@ def write_spec_and_plan(d: Path, header: str = "") -> Path:
     return plan
 
 
+class BootstrapIncompletePlan(unittest.TestCase):
+    def test_a_plan_with_the_writing_marker_is_not_valid(self):  # spec 3 of plan-refactoring-02
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d) / "a-impl.md"
+            plan.write_text("# P\n\n### Task 1: A\n\n> Writing: in progress (spec sha256 0123456789ab)\n",
+                            encoding="utf-8")
+            p = run("bootstrap", str(plan))
+            out = json.loads(p.stdout)
+            self.assertEqual(p.returncode, 1, p.stdout)
+            self.assertFalse(out["valid"])
+            self.assertTrue(any(e.startswith("plan-incomplete: ") for e in out["errors"]), out["errors"])
+            plan.write_text("# P\n\n### Task 1: A\n", encoding="utf-8")
+            self.assertEqual(run("bootstrap", str(plan)).returncode, 0)
+
+
 class BootstrapSettings(unittest.TestCase):
     def test_settings_from_spec(self):
         with tempfile.TemporaryDirectory() as d:

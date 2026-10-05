@@ -114,6 +114,7 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 | `unknown-dependency` | Roadmap depends on a missing stage | Fix the roadmap table |
 | `dirty-worktree` | Uncommitted changes at start (the pipeline's own files and `BACKLOG.md` do not count) | Commit/stash, or allow them into the baseline |
 | `plan-drift` | Plan edited between sessions | New `exec_dir`, or accept the change |
+| `plan-incomplete` | The plan still carries plan-writing's marker `> Writing: in progress` | Finish the plan: `/plan-writing <spec>` |
 | `settings-drift` | Spec (or plan header) settings edited between sessions | New `exec_dir`, or accept the changed settings |
 | `settings-unavailable` | The spec named by `**Spec:**` is missing and the plan has External tasks | Restore the spec or fix the `**Spec:**` path |
 | `exec-dir-inside-workdir` | Ledger directory inside the repo | Move `exec_dir` outside or git-ignore it |

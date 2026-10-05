@@ -1896,6 +1896,19 @@ class TestSettingsSpecNotInUtf8(PlanTestCase):
         self.assertFalse((Path(self.exec_dir) / "state.json").exists())
 
 
+class TestIncompletePlan(PlanTestCase):
+    """Spec 3 of plan-refactoring-02: ledger-init refuses a plan plan-writing has not finished."""
+
+    def test_writing_marker_is_refused(self):
+        plan = self.plan("# P\n\n### Task 1: A\n\n- [ ] **Step 1:** x\n\n"
+                         "> Writing: in progress (spec sha256 0123456789ab)\n")
+        with self.assertRaises(ValueError) as ctx:
+            self.init(plan)
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertTrue(str(ctx.exception).startswith("plan-incomplete: "), str(ctx.exception))
+        self.assertFalse((Path(self.exec_dir) / "state.json").exists())
+
+
 class TestSharedTaskParser(PlanTestCase):
     """Contract plans take their units from brainstorm_tool.parse_plan_tasks; others keep the local parse."""
 

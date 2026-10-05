@@ -69,7 +69,7 @@ allowed for the whole run (`read=run`) lets the audit check that environment, re
 ## What Happens
 
 ```
-bootstrap (numbering, language, config, write check)
+bootstrap (numbering, language, config, write check; a plan still carrying plan-writing's marker is plan-incomplete)
   → Phase A: audit plan + code → issues JSON
   → record: gates + write review-N.md (with the hash of every task)
   → Phase B: apply review-N to the plan

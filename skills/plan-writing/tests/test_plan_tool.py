@@ -63,6 +63,18 @@ class PlanPathTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out["impl_path"], "a/plan02-impl.md")
 
+    def test_writing_marker_of_the_spec(self):  # spec 3 of plan-refactoring-02
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = os.path.join(tmp, "x-spec.md")
+            with open(spec, "wb") as fh:
+                fh.write(b"# Goal\n")
+            code, out = _run(TOOL, "plan-path", spec)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["writing_marker"],
+                         "> Writing: in progress (spec sha256 " + hashlib.sha256(b"# Goal\n").hexdigest()[:12] + ")")
+        self.assertIsNone(_run(TOOL, "plan-path", "a/none-spec.md")[1]["writing_marker"])
+
 
 class PlanCheckTest(unittest.TestCase):
     def check(self, text, root=None):
@@ -284,6 +296,36 @@ class PlanCheckTest(unittest.TestCase):
             self.assertEqual(_run(TOOL, "plan-check", os.path.join(tmp, "missing.md"))[0], 2)
         proc = subprocess.run([sys.executable, TOOL], capture_output=True)
         self.assertEqual(proc.returncode, 2)
+
+    MARKER = "> Writing: in progress (spec sha256 0123456789ab)\n"
+
+    def test_writing_marker_is_the_first_error(self):  # spec 3 of plan-refactoring-02
+        at_end = VALID.rstrip("\n") + "\n\n" + self.MARKER
+        middle = VALID.replace("### Task 2: Checkpoint", self.MARKER + "\n### Task 2: Checkpoint")
+        for text in (at_end, middle):
+            result = self.check(text)
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["errors"][0].startswith("plan-incomplete: "), result["errors"])
+            with mock.patch.object(pt, "_load_brainstorm_tool", return_value=None):
+                self.assertTrue(self.check(text)["errors"][0].startswith("plan-incomplete: "))
+        fenced = VALID.rstrip("\n") + "\n\n```text\n" + self.MARKER + "```\n"
+        self.assertFalse(any(e.startswith("plan-incomplete") for e in self.check(fenced)["errors"]))
+
+    def test_marker_spec_mismatch(self):  # spec 3 of plan-refactoring-02
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "plan01-spec.md"), "wb") as fh:
+                fh.write(b"> Tier: Standard\n\n# Goal\n\nG.\n")
+            own = hashlib.sha256(b"> Tier: Standard\n\n# Goal\n\nG.\n").hexdigest()[:12]
+            plan = os.path.join(tmp, "plan01-impl.md")
+            for marker, mismatch in ((f"> Writing: in progress (spec sha256 {own})\n", False),
+                                     (self.MARKER, True), ("> Writing: in progress\n", True)):
+                text = VALID.rstrip("\n") + "\n\n" + marker
+                with open(plan, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(text)  # check_plan reads the settings through the plan file
+                result = pt.check_plan(text, None, plan)
+                self.assertTrue(result["errors"][0].startswith("plan-incomplete: "), result["errors"])
+                self.assertEqual(any(w.startswith("marker-spec-mismatch: ") for w in result["warnings"]), mismatch, marker)
 
 
 class SizeBudgetTest(unittest.TestCase):
@@ -625,6 +667,13 @@ class BrainstormContractTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(out["task_count"], 3)
         self.assertTrue(any("settings-source-missing" in w for w in out["warnings"]), out["warnings"])
+
+    def test_writing_marker_is_one_format(self):  # spec 3 of plan-refactoring-02
+        bt = pt._load_brainstorm_tool()
+        self.assertEqual(pt.WRITING_MARKER_RE.pattern, bt.WRITING_MARKER_RE.pattern)
+        self.assertEqual(pt.WRITING_MARKER_SHA_RE.pattern, bt.WRITING_MARKER_SHA_RE.pattern)
+        line = pt.WRITING_MARKER_FORMAT.format(sha="0123456789ab")
+        self.assertEqual(bt.writing_marker("# P\n\n" + line + "\n"), {"line": 3, "spec_sha": "0123456789ab"})
 
 
 @unittest.skipUnless(os.path.isfile(BRAINSTORM), "plan-brainstorming not installed alongside")

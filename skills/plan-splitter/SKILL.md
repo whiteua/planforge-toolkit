@@ -93,7 +93,7 @@ parse the same ids.
    LANG = TOOL detect-lang PLAN
    S = brainstorm_tool.py settings PLAN   # Inputs, "Chain settings"
    P = TOOL preflight DIR BASE     # writable? existing split artifacts?
-   if not P.writable: stop and report
+   if not P.writable or P.error: stop and report   # plan-incomplete: plan-writing has not finished the plan
    journal start: stage split → running (Chain journal below)
 
 2. GATE DECISION (references/GATE-DECISION.md)

@@ -1244,6 +1244,16 @@ def journal_for(plan: str) -> Optional[str]:
     return found["journal"] if found.get("exists") else None
 
 
+def plan_incomplete(plan: str) -> Optional[str]:
+    """`plan-incomplete: …` when the plan still carries plan-writing's writing marker (brainstorm_tool.parse_plan_tasks
+    `incomplete`, spec 3 of plan-refactoring-02), else None; without plan-brainstorming nothing is checked."""
+    parser = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parser is None or not parser(read_text(plan)).get("incomplete"):
+        return None
+    return (f"plan-incomplete: {plan}: the plan carries plan-writing's writing marker '> Writing: in progress'; "
+            "finish it with plan-writing first")
+
+
 def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
     if not os.path.isfile(plan):
         print_json({"valid": False, "error": f"plan not found: {plan}"})
@@ -1264,6 +1274,9 @@ def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
     probe_error = probe_writable(directory, basename)
     if probe_error:
         errors.append(probe_error)
+    incomplete = plan_incomplete(plan)
+    if incomplete:
+        errors.append(incomplete)
     warnings: List[str] = []
     warnings.extend(settings_warnings)
     if not plan.lower().endswith(".md"):

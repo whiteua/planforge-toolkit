@@ -2329,8 +2329,17 @@ def _resolve_settings(plan_path):
         raise ToolError(str(exc), 2) from exc
 
 
+def _refuse_incomplete(plan_path):
+    """ledger-init does not run a plan plan-writing has not finished: brainstorm_tool.parse_plan_tasks reports its
+    writing marker as `incomplete` (spec 3 of plan-refactoring-02). Without plan-brainstorming nothing is checked."""
+    parse = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parse is not None and parse(_read_text(plan_path)).get("incomplete"):
+        raise ToolError(f"plan-incomplete: {plan_path}: the plan carries plan-writing's writing marker "
+                        "'> Writing: in progress'; finish it with plan-writing first", 1)
+
+
 def cmd_ledger_init(args):
-    light = getattr(args, "light", None)
+    light =getattr(args, "light", None)
     if light is not None and not light.strip():
         raise ToolError("light-invalid: --light needs a model name", 2)
     detected = detect_input(args.plan_path, force_whole=args.whole)
@@ -2346,6 +2355,7 @@ def cmd_ledger_init(args):
         units, staged_warnings = _staged_units(source_file, rows)
     else:
         source_file = args.plan_path
+        _refuse_incomplete(args.plan_path)
         source_sha256 = _sha256_file(source_file)
         units = parse_tasks(args.plan_path)
         if not units.get("units") and args.whole:

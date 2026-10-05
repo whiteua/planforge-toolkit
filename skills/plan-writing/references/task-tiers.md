@@ -81,3 +81,10 @@ If the spec has no `Tier:` line, or an unrecognized value, `plan-writing`
 defaults to **Standard**, announces the assumption, and writes
 `**Tier:** Standard` into the plan header. The spec's recorded `Tier:` line is
 the single source of truth when present.
+
+## Writing marker
+
+Every tier writes the plan the same way (`SKILL.md` §4, Writing order): the header, then the marker
+`> Writing: in progress (spec sha256 <12 hex>)` as the file's last line, each finished task inserted whole
+before it, and the marker deleted after the last task. A finished plan of any tier has no marker; while it
+has one, `plan-check` fails with `plan-incomplete`.

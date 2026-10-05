@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Deterministic helper for the plan-writing skill.
 
-- plan-path: derives the implementation plan path from a spec path.
+- plan-path: derives the implementation plan path from a spec path, and `writing_marker`: the line
+  `> Writing: in progress (spec sha256 <12 hex>)` plan-writing keeps last in a plan it is writing.
 - plan-check: verifies a written plan against the plan format contract
   that plan-executor and plan-resolver parse (header fields, task headings,
   unique ids, Files / steps / done-state per tier, no commit steps, no
@@ -27,6 +28,7 @@ goes to stderr, stdout stays empty).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -81,6 +83,13 @@ SIZE_RE = re.compile(r"^\*\*Size:\*\*\s*(\d+)\s+lines\s*[—-]\s*\S")
 STRUCTURAL_KEYS = ("skill", "script", "contract", "convention", "artifact")
 STRUCTURAL_PREFIX_RE = re.compile(r"^\*\*Structural event:\*\*")
 STRUCTURAL_RE = re.compile(r"^\*\*Structural event:\*\*\s*(?:" + "|".join(STRUCTURAL_KEYS) + r")\s*[—-]\s*\S")
+# plan-writing's writing marker (spec 3 of plan-refactoring-02): the last line of a plan still being written. Copies of
+# brainstorm_tool.WRITING_MARKER_RE and WRITING_MARKER_SHA_RE (a contract test holds them equal), so plan-check
+# sees the marker without plan-brainstorming too. plan-path writes WRITING_MARKER_FORMAT for the spec.
+WRITING_MARKER_RE = re.compile(r"^> Writing: in progress\b(?P<rest>.*)$")
+WRITING_MARKER_SHA_RE = re.compile(r"^\s*\(spec sha256 (?P<sha>[0-9a-f]{12})\)\s*$")
+WRITING_MARKER_FORMAT = "> Writing: in progress (spec sha256 {sha})"
+SPEC_LINK_RE = re.compile(r"\]\((?P<target>[^)\s]+)\)")
 # Same Cyrillic range and threshold as brainstorm_tool.py, executor_tool.py, splitter_tool.py
 # and resolver_tool.py.
 CYRILLIC_RE = re.compile("[Ѐ-ӿ]")
@@ -396,6 +405,20 @@ def detect_lang_text(text: str) -> str:
     return "ru" if cyrillic / len(letters) > LANG_THRESHOLD else "en"
 
 
+def _spec_fingerprint(plan_path: Optional[str], spec: Optional[str]) -> Optional[str]:
+    """First 12 hex of the SHA-256 of the spec the plan's **Spec:** names (relative to the plan; a markdown link or
+    backticks are unwrapped): the fingerprint of the writing marker. None when it cannot be read."""
+    if not plan_path or not spec:
+        return None
+    link = SPEC_LINK_RE.search(spec)
+    target = (link.group("target") if link else spec).strip().strip("`").strip()
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(plan_path)), target), "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()[:12]
+    except OSError:
+        return None
+
+
 def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] = None,
                budget: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     errors: List[str] = []
@@ -640,8 +663,24 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
             warnings.append(f"{label}: claude-md-edit: the task edits CLAUDE.md without a '**Structural event:** "
                             f"<key> — <reason>' line ({', '.join(STRUCTURAL_KEYS)})")
 
+    # Writing marker (spec 3 of plan-refactoring-02): a plan plan-writing has not finished is not a plan. The error
+    # goes first; the fingerprint is compared only when the plan's path (and so its spec) is known.
+    marker = next(((n, WRITING_MARKER_RE.match(line)) for n, line, fenced in lines
+                   if not fenced and WRITING_MARKER_RE.match(line)), None)
+    if marker is not None:
+        number, match = marker
+        errors.insert(0, f"plan-incomplete: line {number}: the plan carries plan-writing's writing marker "
+                         "'> Writing: in progress'; plan-writing has not finished it")
+        if plan_path is not None:
+            found = WRITING_MARKER_SHA_RE.match(match.group("rest"))
+            expected = _spec_fingerprint(plan_path, spec)
+            if found is None or found.group("sha") != expected:
+                warnings.append(f"marker-spec-mismatch: the marker names spec sha256 "
+                                f"{found.group('sha') if found else 'none'}, the spec at '**Spec:**' has "
+                                f"{expected or 'none (unreadable)'}")
+
     # Dialogue language: the plan text outside code fences.
-    lang = detect_lang_text("\n".join(line for _, line, fenced in lines if not fenced))
+    lang =detect_lang_text("\n".join(line for _, line, fenced in lines if not fenced))
     # External lines need settings: without the spec and without header settings nothing
     # says which environments the user permitted. Same source as the executor (Task 43):
     # resolve_settings could not read its source and found no environments.
@@ -682,7 +721,15 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
 
 
 def cmd_plan_path(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
-    return 0, dict(plan_path(args.spec), ok=True)
+    """The plan path, and `writing_marker`: the line plan-writing keeps last in the plan while it writes it (spec 3
+    of plan-refactoring-02), with the spec's fingerprint; null when the spec cannot be read."""
+    result = dict(plan_path(args.spec), ok=True)
+    try:
+        with open(args.spec, "rb") as fh:
+            result["writing_marker"] = WRITING_MARKER_FORMAT.format(sha=hashlib.sha256(fh.read()).hexdigest()[:12])
+    except OSError:
+        result["writing_marker"] = None
+    return 0, result
 
 
 def _positive_int(value: Optional[str], name: str) -> Optional[int]:

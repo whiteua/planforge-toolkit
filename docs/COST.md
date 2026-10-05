@@ -27,7 +27,8 @@ the tasks named in `**Audit tasks**`; split reads the plan and its parts, or onl
 reads the parts of a roadmap run, else the plan; audit reads the plan (the skeleton, `plan × (1 −
 code_share)`, once plan-writing's `skeleton` exists) and the earlier reports on every full pass, and
 for a report with `audit_scope: incremental` the header plus the tasks of `audit_tasks` plus the
-evidence files of its fingerprint table; diffs and commit read nothing. Where a scope cannot be
+evidence files whose row in its fingerprint table differs from the previous report's (a row the
+previous report lacks counts) and the files of the tasks of `audit_tasks`; diffs and commit read nothing. Where a scope cannot be
 resolved (no task list, an unknown id) the pass counts as full with `scope-unresolved`. The cache is
 not modelled: it does not carry between agents, and inside one agent it is not observable from the
 artifacts.
@@ -58,6 +59,11 @@ python skills/plan-chain-runner/scripts/chain_tool.py run-stats <journal> --base
 write; do not point it inside a working copy while a chain runs (the executor would see a foreign
 change). `run-status` carries the same totals as `cost`, and the runner's summary prints them as
 the "Volume" line.
+
+`run-stats <journal>` has a row for every plan of the journal: a plan outside the run (`runner.specs`),
+e.g. one of an earlier run of the goal, carries `outside_run: true`. `totals` stays the run's total (the
+summary's "Volume" line, `run-status` `cost`, `--baseline`), and `journal_totals` sums every plan of the
+journal (`null` with `--plan`).
 
 ## Baseline (2026-10-04, before the refactoring)
 
@@ -148,6 +154,21 @@ subagent gets only the unit's text and files, no skill instructions).
 |---|---|---|---|---|---|
 | 2026-10-05 | demo (2 green tasks, OS temp) | haiku | 2 | 1 | control check of spec 8: delegation works end to end; not a quality measurement |
 | 2026-10-05 | demo (2 green tasks, OS temp), rerun from the main session | haiku | 2 | 0 | repeat of the control check with the Agent tool available: both units delegated, no retry; the second subagent also wrote `docs/notes/b.md` into the project repository (its CWD), unseen by the file check scoped to the demo repository (F14) |
+
+## Writer continuation
+
+plan-writing writes the plan task by task under the marker `> Writing: in progress (spec sha256 <12 hex>)`,
+and the runner relaunches a cut-off writer with the same brief (LOOP.md, 4). The saving is measured per
+interrupted plan from the host's token counts of the `writing` stage (`basis: host`; LOOP.md, 3, item 6 adds
+every writer agent to the stage's `cost_tokens`):
+
+1. `T_cut`, the cut-off writer: `cost_tokens` of `writing` after it returned.
+2. `T_cont`, the continuing writer: the growth of `cost_tokens` after it returned; its report names the task
+   after which it continued, `k` of the finished plan's `n` tasks (`task_count` of `plan-check`).
+3. `T_full`, a writer that starts over: not run; estimate it as `T_cont × n / (n − k)`, or take the full writer
+   of a plan of the same spec size and tier from an earlier run.
+4. The saving is `T_full − T_cont`: `T_cut` is spent either way. A plan written by one agent saves nothing; add
+   rows only from runs that really cut a writer off.
 
 ## How to compare
 

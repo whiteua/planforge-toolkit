@@ -84,6 +84,7 @@ re-dispatched once; `inconsistent` stops the run. Parts with warnings are listed
 | `plan-brainstorming not installed alongside` (exit 2) | The shared task parser is missing | Install `plan-brainstorming` next to this skill |
 | "Cannot write to directory" | Directory not writable | Check permissions |
 | Existing split artifacts | A previous split exists | Choose overwrite / another base / abort |
+| `plan-incomplete` from `preflight` (exit 1) | The plan still carries plan-writing's marker `> Writing: in progress` | Finish the plan: `/plan-writing <spec>` |
 | Part too large (> 15 tasks) | Coarse split | Re-run the splitter on that part |
 | `invalid stage id` | Roadmap row id is not letters | Use `a`, `b`, … in the Stage column |
 

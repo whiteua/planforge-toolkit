@@ -173,6 +173,8 @@ Every message you see (questions, answer options, summaries) and the spec body f
 
 `scripts/plan_tool.py skeleton <plan>` prints the plan without code bodies (the header, task headings, `Files`, conditions, step headings, `Run:`/`Expected:`, one `[code <lang>, <N> lines: <signatures>]` line per code block) and `scripts/plan_tool.py task <plan> <id>` one task byte for byte. plan-resolver reads them on its first and closing full passes; both print text, not JSON.
 
+**Writing order.** The skill writes the plan file task by task: the header, then the marker `> Writing: in progress (spec sha256 <12 hex>)` as the last line, each finished task before it, and the marker removed after the last task. A writer cut off by the host is started again (by you or by `plan-chain-runner`, whose `run-next` returns the stage with `resume: true`) and continues after the last written task; if the spec changed in between, the plan is written anew. While the marker is there, `plan-check`, the splitter, the executor and the revision refuse the plan with `plan-incomplete`.
+
 Each task in the plan specifies:
 - Files to touch
 - Exact steps (2–5 min each)
@@ -374,7 +376,7 @@ Roles: `writing`, `revision`, `split`, `execution`, `audit`, `commit`. An alias 
 
 **Output:** the chain's usual artifacts plus the `runner` section of `<goal>-chain.json` (profile, specs, graph, models, start commit, sessions, and with a goal roadmap `roadmap` and `roadmap_sha256`). Apart from the optional start commit and the chain journal (`runner` section, skipped events, questions, answers), the runner writes nothing in the repository.
 
-**Cost:** `chain_tool.py run-stats <journal>` (or `--plan <plan.md>` without a journal) reports per plan and stage the files written, their size and code share, the minutes, the model, the host's token count when the runner recorded it or an estimate of input, output and effective tokens derived from what the stage read and wrote, plus quality (audit status and issues, reviews, unit retries); `--baseline <json>` compares with an earlier result per task and per KB of plan. The summary's "Volume" line is this number. Model, baseline and checkpoints: [docs/COST.md](COST.md).
+**Cost:** `chain_tool.py run-stats <journal>` (or `--plan <plan.md>` without a journal) reports per plan and stage the files written, their size and code share, the minutes, the model, the host's token count when the runner recorded it or an estimate of input, output and effective tokens derived from what the stage read and wrote, plus quality (audit status and issues, reviews, unit retries); `--baseline <json>` compares with an earlier result per task and per KB of plan. With a journal every plan of the journal is a row; `totals` is the run's and `journal_totals` the journal's. The summary's "Volume" line is the run's number. Model, baseline and checkpoints: [docs/COST.md](COST.md).
 
 **Prerequisites:** all six pipeline skills installed side by side (the runner loads `plan-brainstorming`'s `brainstorm_tool.py` by path and launches the others by name); Python ≥ 3.8 in PATH.
 

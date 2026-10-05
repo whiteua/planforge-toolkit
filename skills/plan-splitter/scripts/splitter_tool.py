@@ -8,6 +8,8 @@ Subcommands:
       (roadmap, part files, review/completion files, verify JSONs). Returns JSON:
       {"writable": bool, "existing": ["<file>", ...], "warning": "<text>"|null}.
       Existing files are a WARNING, not an error: the agent decides what to do.
+      A plan <dir>/<base_name>.md that still carries plan-writing's writing marker is exit 1 with
+      "error": "plan-incomplete: ..." (the plan is not split).
 
   part-id <N>
       Print the part id for ordinal N (1 -> a, 26 -> z, 27 -> aa).
@@ -304,6 +306,20 @@ def cmd_preflight(directory: str, base_name: str) -> None:
     except OSError as e:
         result["error"] = f"Cannot write to {directory}: {e}"
         print_json(result, 1)
+
+    # A plan plan-writing has not finished is not split (spec 3 of plan-refactoring-02): the shared parser reports
+    # its writing marker as `incomplete`. Without plan-brainstorming or a readable plan nothing is checked.
+    plan = os.path.join(directory, base_name + ".md")
+    parse = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parse is not None and os.path.isfile(plan):
+        try:
+            incomplete = bool(parse(read_text(plan)).get("incomplete"))
+        except (OSError, UnicodeDecodeError):
+            incomplete = False
+        if incomplete:
+            result["error"] = (f"plan-incomplete: {plan}: the plan carries plan-writing's writing marker "
+                               "'> Writing: in progress'; finish it with plan-writing first")
+            print_json(result, 1)
 
     # Scan for existing split artifacts of this base.
     existing: List[str] = []

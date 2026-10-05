@@ -158,6 +158,19 @@ class TestPartIds(unittest.TestCase):
             self.assertEqual(data["existing"], ["plan-a-review-1.md", "plan-a.md", "plan-b-completion.md",
                                                 "plan-roadmap.md", "plan-verify-ledger.json"])
 
+    def test_preflight_refuses_a_plan_still_being_written(self):  # spec 3 of plan-refactoring-02
+        with tempfile.TemporaryDirectory() as d:
+            plan = os.path.join(d, "plan-impl.md")
+            with open(plan, "w", encoding="utf-8") as f:
+                f.write("# P\n\n### Task 1: A\n\n> Writing: in progress (spec sha256 0123456789ab)\n")
+            proc = subprocess.run([sys.executable, TOOL, "preflight", d, "plan-impl"], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 1, proc.stdout)
+            self.assertTrue(json.loads(proc.stdout)["error"].startswith("plan-incomplete: "), proc.stdout)
+            with open(plan, "w", encoding="utf-8") as f:
+                f.write("# P\n\n### Task 1: A\n")
+            proc = subprocess.run([sys.executable, TOOL, "preflight", d, "plan-impl"], capture_output=True, text=True)
+            self.assertEqual((proc.returncode, json.loads(proc.stdout).get("error")), (0, None))
+
     def test_json_output_is_ascii_safe(self):
         proc = subprocess.run([sys.executable, TOOL, "detect-lang", TOOL], capture_output=True, text=True,
                               encoding="ascii", errors="strict")

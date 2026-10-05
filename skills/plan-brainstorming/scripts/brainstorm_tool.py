@@ -10,7 +10,8 @@
   or part by the single reading rule (spec; plan header only for old specs).
 - plan-tasks: tasks of a plan by the plan format contract (`### Task N: <title>`): id, title,
   line range, Files, Preconditions refs, size and SHA-1 of the body; malformed and duplicate
-  headings. The one task parser of plan_tool, executor_tool, resolver_tool, splitter_tool and
+  headings; `incomplete` and `marker_spec_sha` for a plan plan-writing is still writing (its marker
+  `> Writing: in progress`). The one task parser of plan_tool, executor_tool, resolver_tool, splitter_tool and
   chain_tool (parse_plan_tasks, loaded by path).
 - detect-lang: dialogue language of a goal file or findings JSON
   (`ru` when more than 5% of the letters are Cyrillic, otherwise `en`).
@@ -540,6 +541,29 @@ def normalize_task_id(task_id: str) -> str:
     return text
 
 
+# The writing marker of plan-writing (spec 3 of plan-refactoring-02): the last line of a plan that is still being
+# written, `> Writing: in progress (spec sha256 <first 12 hex of the spec's SHA-256>)`. Outside code fences anywhere
+# it makes the plan incomplete; a missing or broken fingerprint reads as None, which matches no spec.
+# plan_tool.WRITING_MARKER_RE and WRITING_MARKER_SHA_RE copy these two (plan-writing/tests holds them equal).
+WRITING_MARKER_RE = re.compile(r"^> Writing: in progress\b(?P<rest>.*)$")
+WRITING_MARKER_SHA_RE = re.compile(r"^\s*\(spec sha256 (?P<sha>[0-9a-f]{12})\)\s*$")
+
+
+def _writing_marker_in(unfenced: List[Tuple[int, str]]) -> Optional[Dict[str, Any]]:
+    """The first writing marker among (line number, line) pairs outside code fences."""
+    for number, line in unfenced:
+        match = WRITING_MARKER_RE.match(line)
+        if match:
+            sha = WRITING_MARKER_SHA_RE.match(match.group("rest"))
+            return {"line": number, "spec_sha": sha.group("sha") if sha else None}
+    return None
+
+
+def writing_marker(text: str) -> Optional[Dict[str, Any]]:
+    """{"line", "spec_sha"} of the plan's first writing marker outside code fences, None when it has none."""
+    return _writing_marker_in(_unfenced_lines(text))
+
+
 def _plan_task_refs(lines: List[str]) -> List[str]:
     """Task ids named in the **Preconditions:** block (Task N, Task N.M, Задача N), in order, once each."""
     refs: List[str] = []
@@ -565,11 +589,16 @@ def parse_plan_tasks(text: str) -> Dict[str, Any]:
     1-based and inclusive (`lines[line_start-1:line_end]`). `sha1` (8 hex) and `size_bytes` cover the task's
     text joined with newlines, without trailing blank lines. Task-like headings without `<id>:` go to
     `malformed`, repeated ids to `duplicates`; ids and refs are normalised (normalize_task_id), so `Task 1` and
-    `Task 01` repeat one id."""
+    `Task 01` repeat one id.
+    `incomplete` is True when plan-writing's writing marker stands outside code fences (writing_marker): the tasks
+    before it are returned as usual, the last one ending on the line before the marker, and `marker_spec_sha` is the
+    marker's spec fingerprint (None without a valid one)."""
     lines = text.splitlines()
     scanned = _fence_scan(text)
     unfenced = [(number, raw.rstrip()) for number, raw, kind in scanned if kind == "text"]
     visible = {number for number, _ in unfenced}
+    marker = _writing_marker_in(unfenced)
+    limit = marker["line"] if marker else len(lines) + 1
     code = {number for number, _, kind in scanned if kind == "code"}
     headings: List[Tuple[int, int, str]] = []
     for number, line in unfenced:
@@ -579,13 +608,15 @@ def parse_plan_tasks(text: str) -> Dict[str, Any]:
     tasks: List[Dict[str, Any]] = []
     malformed: List[Dict[str, Any]] = []
     for position, (number, level, line) in enumerate(headings):
+        if number > limit:
+            break  # tasks after the writing marker are not the plan's yet
         match = PLAN_TASK_HEADING_RE.match(line)
         if not match:
             if PLAN_TASKISH_RE.match(line):
                 malformed.append({"line": number, "text": line})
             continue
-        end = next((later - 1 for later, later_level, later_line in headings[position + 1:]
-                    if later_level <= level or PLAN_TASK_HEADING_RE.match(later_line)), len(lines))
+        end = min(next((later - 1 for later, later_level, later_line in headings[position + 1:]
+                        if later_level <= level or PLAN_TASK_HEADING_RE.match(later_line)), len(lines)), limit - 1)
         block = lines[number - 1:end]
         while block and not block[-1].strip():
             block.pop()
@@ -610,7 +641,8 @@ def parse_plan_tasks(text: str) -> Dict[str, Any]:
     for task in tasks:
         positions.setdefault(task["id"], []).append(task["line_start"])
     duplicates = [{"id": task_id, "lines": found} for task_id, found in positions.items() if len(found) > 1]
-    return {"tasks": tasks, "malformed": malformed, "duplicates": duplicates}
+    return {"tasks": tasks, "malformed": malformed, "duplicates": duplicates,
+            "incomplete": marker is not None, "marker_spec_sha": marker["spec_sha"] if marker else None}
 
 
 def parse_plan_header(text: str) -> Dict[str, Any]:
@@ -2455,6 +2487,15 @@ def _commit_evidence(entry: Dict[str, Any], plan_dir: str) -> Optional[Tuple[Dic
     return {}, f"commits found in git: {len(shas)}"
 
 
+def _plan_incomplete(plan_path: str) -> bool:
+    """The plan file carries plan-writing's writing marker (spec 3 of plan-refactoring-02): it is still being
+    written. An unreadable file counts as written, as before."""
+    try:
+        return writing_marker(_read_source(plan_path)) is not None
+    except InputError:
+        return False
+
+
 def _stage_evidence(journal: str, entry: Dict[str, Any], stage: str,
                     warnings: List[str]) -> Optional[Tuple[Dict[str, str], str]]:
     """(artifacts, why) when the stage's own artifacts show it finished, else None."""
@@ -2463,7 +2504,9 @@ def _stage_evidence(journal: str, entry: Dict[str, Any], stage: str,
     if not os.path.isdir(plan_dir):
         return None
     if stage == "writing":
-        return ({"plan": entry["plan"]}, f"plan exists: {entry['plan']}") if os.path.isfile(plan_path) else None
+        if not os.path.isfile(plan_path) or _plan_incomplete(plan_path):
+            return None
+        return {"plan": entry["plan"]}, f"plan exists: {entry['plan']}"
     base = stem[:-len("-impl")] if stem.endswith("-impl") else stem
     files = {"revision": ("completion", f"{stem}-completion.md"), "split": ("roadmap", f"{stem}-roadmap.md"),
              "diffs": ("diffs", f"{base}-diffs.md")}

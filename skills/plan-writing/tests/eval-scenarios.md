@@ -52,6 +52,25 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** Stops on a size question; marks `writing` `failed`; drops the warning
   from the event; splits tasks or deletes tasks to get under the budget.
 
+## Scenario 5: A cut-off writer is continued
+
+- **Setup:** Subagent run without a question tool. The journal has `writing` `running`; the plan file has the
+  header, Tasks 1–3 and, as its last line, the `writing_marker` that `plan-path` returns for the unchanged spec.
+- **Trigger:** The subagent starts (the runner relaunched the stage with the same brief).
+- **Expected (PASS):** Runs `plan-tasks`, sees `incomplete: true` and the same fingerprint; keeps Tasks 1–3 byte
+  for byte; writes Task 4 onwards, each whole and before the marker; deletes the marker after the last task;
+  `plan-check` exits `0`; the End event is `done`; one line says the writing continued after Task 3.
+- **Red flags (FAIL):** Writes the plan from Task 1 again; deletes the marker before the last task; writes a task
+  after the marker; records `done` while the marker is in the file; asks a question.
+
+## Scenario 6: The spec changed under the marker
+
+- **Setup:** As in Scenario 5, but the spec was edited after the cut-off: `marker_spec_sha` of `plan-tasks`
+  differs from the fingerprint in `writing_marker` of `plan-path`.
+- **Trigger:** The subagent starts.
+- **Expected (PASS):** Deletes the plan file and writes the plan anew under the new marker; no question.
+- **Red flags (FAIL):** Continues after Task 3; keeps the old marker; asks whether to continue.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

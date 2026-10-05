@@ -1126,6 +1126,14 @@ def _cascade(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return found
 
 
+def _writing_resumes(state: Dict[str, Any]) -> bool:
+    """The plan file of the plan carries plan-writing's writing marker (brainstorm_tool.writing_marker; spec 3 of
+    plan-refactoring-02): its writer was cut off, and a new one continues after the last task written (LOOP.md, 4)."""
+    marker = getattr(_brainstorm(), "writing_marker", None)
+    text = _text_metrics_text(os.path.join(state.get("root") or "", state["entry"]["plan"]))
+    return marker is not None and bool(text) and marker(text) is not None
+
+
 def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[str, Any]],
                 waiting: List[Dict[str, Any]], asks: Dict[str, Dict[str, Any]],
                 flying: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
@@ -1136,7 +1144,8 @@ def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[
     (taken before the loop, so a revision earlier in runner order does not start next to it). The revision
     and split of the other plans wait for the holder too (CODE_READING_STAGES).
     Rule 9 cascade questions do not hold their plan: they become `answer` steps. A plan whose agent
-    is in flight (`flying`: plan id -> stage) gets no step; an agent in a code stage holds them."""
+    is in flight (`flying`: plan id -> stage) gets no step; an agent in a code stage holds them.
+    A running writing whose plan file carries the writing marker gets resume: true (spec 3 of plan-refactoring-02)."""
     flying = flying or {}
     by_spec = {state["spec"]: state for state in states}
     holder = next((state for state in states if flying.get(state["entry"]["id"]) in CODE_STAGES), None)
@@ -1172,6 +1181,8 @@ def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[
             waiting.append(dict(where, reason=step["why"]))
         else:
             step["running"] = _record(state, stage).get("status") == "running"
+            if stage == "writing" and step["running"] and step["kind"] == "run" and _writing_resumes(state):
+                step["resume"] = True  # relaunched with the same brief until done, failed or stopped (LOOP.md, 4)
             steps.append(step)
     return steps
 
@@ -1412,30 +1423,60 @@ COST_FORMULA: Dict[str, Any] = {
               "split": "plan + parts; split_method=script: ~300 bytes per task (plan-tasks); skipped: nothing",
               "execution": "parts with a roadmap, else plan",
               "audit": "(plan + earlier reports) per report; a full pass with plan-writing's skeleton: plan × (1 − code_share); "
-                       "incremental report (audit_scope/audit_tasks): plan header + the named tasks + evidence files",
+                       "incremental report (audit_scope/audit_tasks): plan header + the named tasks + the evidence "
+                       "files changed since the previous report + the evidence files of the named tasks",
               "diffs": "none", "commit": "none"}}
 _STATS_TASK_LIST_BYTES = 300  # one line of `plan-tasks` per task (id, title, files, refs)
 _STATS_EVIDENCE_HEAD_RE = re.compile(r"^## (?:Evidence fingerprint|Отпечаток улик)\s*$", re.MULTILINE)
 
 
-def _evidence_bytes(report_text: str, folder: str) -> int:
-    """Size of the files named in the report's evidence-fingerprint table, resolved against the nearest
-    ancestor of `folder` that holds `.git` (else `folder`); files that are gone count 0."""
+def _evidence_rows(report_text: str) -> Dict[str, str]:
+    """{file: value} of the report's evidence-fingerprint table (`## Evidence fingerprint`); empty without one."""
     match = _STATS_EVIDENCE_HEAD_RE.search(report_text)
+    rows: Dict[str, str] = {}
     if not match:
-        return 0
-    root = folder
-    while not os.path.exists(os.path.join(root, ".git")) and os.path.dirname(root) != root:
-        root = os.path.dirname(root)
-    root = root if os.path.exists(os.path.join(root, ".git")) else folder
-    total = 0
+        return rows
     for line in report_text[match.end():].splitlines():
         if line.startswith("## "):
             break
         cells = [cell.strip().strip("`") for cell in line.strip().strip("|").split("|")]
         if len(cells) >= 2 and cells[0] and cells[0] not in ("File", "Файл") and not set(cells[0]) <= set("-: "):
-            path = os.path.join(root, cells[0])
-            total += os.path.getsize(path) if os.path.isfile(path) else 0
+            rows[cells[0].replace("\\", "/")] = cells[1]
+    return rows
+
+
+def _task_files(plan_text: str, ids: Optional[List[str]]) -> set:
+    """Files of the `**Files:**` blocks of the tasks `ids` by parse_plan_tasks, with forward slashes; empty without
+    the parser, without ids or on any parser error."""
+    parser = _task_parser()
+    if parser is None or not ids:
+        return set()
+    try:
+        return {str(item["path"]).replace("\\", "/") for task in parser(plan_text)["tasks"]
+                if str(task["id"]) in ids for item in task.get("files") or []}
+    except Exception:  # the parser's own errors or another answer shape: no task evidence
+        return set()
+
+
+def _evidence_bytes(report_text: str, folder: str, previous_text: str = "", task_files: Any = ()) -> int:
+    """Size of the evidence files an incremental pass reads (F11 of plan-refactoring-02): the rows of the report's
+    evidence-fingerprint table whose value differs from the previous report's (a row it lacks counts), plus the rows
+    of the files of the re-audited tasks (`task_files`). Paths resolve against the nearest ancestor of `folder` that
+    holds `.git` (else `folder`); files that are gone count 0."""
+    rows = _evidence_rows(report_text)
+    if not rows:
+        return 0
+    before = _evidence_rows(previous_text)
+    root = folder
+    while not os.path.exists(os.path.join(root, ".git")) and os.path.dirname(root) != root:
+        root = os.path.dirname(root)
+    root = root if os.path.exists(os.path.join(root, ".git")) else folder
+    total = 0
+    for name, value in rows.items():
+        if before.get(name) == value and name not in task_files:
+            continue
+        path = os.path.join(root, name)
+        total += os.path.getsize(path) if os.path.isfile(path) else 0
     return total
 
 
@@ -1475,7 +1516,7 @@ def _reads_model(stage: str, stats: Dict[str, Any], folder: str, plan_text: str,
         parts = sum(f["bytes"] for f in stats["stages"]["split"]["files"] if f["name"] in stats["parts"])
         return (parts, "parts") if stats["parts"] else (plan, "plan")
     if stage == "audit":
-        total, earlier, modes, skeleton = 0, 0, set(), _skeleton_available()
+        total, earlier, modes, skeleton, previous = 0, 0, set(), _skeleton_available(), ""
         for item in files:
             text = _text_metrics_text(os.path.join(folder, item["name"]))
             scope, ids = _audit_scope(text, frontmatter=True)
@@ -1483,8 +1524,8 @@ def _reads_model(stage: str, stats: Dict[str, Any], folder: str, plan_text: str,
                 size, mode = (round(plan * (1 - (stats["code_share"] or 0))), "skeleton") if skeleton else (plan, "full")
             else:
                 size, mode = _scoped_bytes(plan_text, plan, ids, item["name"], warnings)
-                size += _evidence_bytes(text, folder) if mode == "incremental" else 0
-            total, earlier, modes = total + size + earlier, earlier + item["bytes"], modes | {mode}
+                size += _evidence_bytes(text, folder, previous, _task_files(plan_text, ids)) if mode == "incremental" else 0
+            total, earlier, modes, previous = total + size + earlier, earlier + item["bytes"], modes | {mode}, text
         return total, _mode_name(modes)
     return 0, "none"
 
@@ -1745,23 +1786,9 @@ def _plan_stats(plan_path: str, journal_layer: Optional[Dict[str, Any]], warning
             "stages": estimate["stages"], "quality": quality, "totals": totals, "delta": None}
 
 
-def run_stats(journal: Optional[str], plan: Optional[str], baseline: Optional[str] = None) -> Dict[str, Any]:
-    """Sizes, durations, token estimate or recorded cost, and quality per stage of a run: from the journal
-    (all its plans) or from one plan's folder (--plan); --baseline adds deltas. Reads only."""
-    if bool(journal) == bool(plan):
-        raise InputError("bad-arguments: give a journal or --plan <plan.md>, not both")
-    warnings: List[str] = []
-    out: Dict[str, Any] = {"ok": True, "mode": "journal" if journal else "plan", "formula": COST_FORMULA}
-    if journal:
-        data, runner = _runner_journal(journal)
-        out["goal"] = data.get("goal")
-        folder = os.path.dirname(os.path.abspath(journal))
-        plans = [_plan_stats(os.path.join(folder, state["entry"].get("plan") or _derived_plan(state["spec"])),
-                             _journal_stats(data, runner, state), warnings) for state in _plan_states(journal, data, runner)]
-    else:
-        if not os.path.isfile(plan):
-            raise InputError(f"plan-not-found: {plan}")
-        plans = [_plan_stats(plan, None, warnings)]
+def _stats_totals(plans: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Totals of run-stats over `plans`: per stage the summed bytes, effective tokens and minutes with their basis
+    (`mixed` when the plans differ), then the sums over the stages."""
     stages: Dict[str, Dict[str, Any]] = {}
     for item in plans:
         for stage, record in item["stages"].items():
@@ -1776,15 +1803,43 @@ def run_stats(journal: Optional[str], plan: Optional[str], baseline: Optional[st
     for agg in stages.values():
         bases = agg.pop("bases")
         agg["basis"] = bases.pop() if len(bases) == 1 else "mixed" if bases else "estimate"
+    return {"tasks": sum(p["tasks"] for p in plans), "plan_bytes": sum(p["plan_bytes"] for p in plans),
+            "bytes_read_est": sum(s["bytes_read_est"] for s in stages.values()),
+            "bytes_written": sum(s["bytes_written"] for s in stages.values()),
+            "effective_tokens_est": sum(s["effective_tokens_est"] for s in stages.values()),
+            "minutes": (round(sum(s["minutes"] for s in stages.values() if s["minutes"] is not None), 1)
+                        if any(s["minutes"] is not None for s in stages.values()) else None),
+            "basis": "host" if any(p["totals"]["basis"] == "host" for p in plans) else "estimate",
+            "stages": stages}
+
+
+def run_stats(journal: Optional[str], plan: Optional[str], baseline: Optional[str] = None) -> Dict[str, Any]:
+    """Sizes, durations, token estimate or recorded cost, and quality per stage of a run: from the journal or from
+    one plan's folder (--plan); --baseline adds deltas. With a journal every plan of the journal is a row (F1 of
+    plan-refactoring-02): the run's plans (runner.specs) first, then the plans of earlier runs with `outside_run:
+    true`; `totals` sums the run's plans, `journal_totals` all of them (null with --plan). Reads only."""
+    if bool(journal) == bool(plan):
+        raise InputError("bad-arguments: give a journal or --plan <plan.md>, not both")
+    warnings: List[str] = []
+    out: Dict[str, Any] = {"ok": True, "mode": "journal" if journal else "plan", "formula": COST_FORMULA}
+    if journal:
+        data, runner = _runner_journal(journal)
+        out["goal"] = data.get("goal")
+        folder = os.path.dirname(os.path.abspath(journal))
+        states = _plan_states(journal, data, runner)
+        run_ids = {state["entry"]["id"] for state in states}
+        # _plan_states stays the run's own (run-next, run-checklist); the journal's other plans are added here.
+        outside = [{"spec": entry.get("spec"), "entry": entry} for entry in data["plans"] if entry.get("id") not in run_ids]
+        plans = [dict(_plan_stats(os.path.join(folder, state["entry"].get("plan") or _derived_plan(state["spec"])),
+                                  _journal_stats(data, runner, state), warnings), outside_run=outside_run)
+                 for state, outside_run in [(state, False) for state in states] + [(state, True) for state in outside]]
+    else:
+        if not os.path.isfile(plan):
+            raise InputError(f"plan-not-found: {plan}")
+        plans = [dict(_plan_stats(plan, None, warnings), outside_run=False)]
     out["plans"], out["warnings"] = plans, warnings
-    out["totals"] = {"tasks": sum(p["tasks"] for p in plans), "plan_bytes": sum(p["plan_bytes"] for p in plans),
-                     "bytes_read_est": sum(s["bytes_read_est"] for s in stages.values()),
-                     "bytes_written": sum(s["bytes_written"] for s in stages.values()),
-                     "effective_tokens_est": sum(s["effective_tokens_est"] for s in stages.values()),
-                     "minutes": (round(sum(s["minutes"] for s in stages.values() if s["minutes"] is not None), 1)
-                                 if any(s["minutes"] is not None for s in stages.values()) else None),
-                     "basis": "host" if any(p["totals"]["basis"] == "host" for p in plans) else "estimate",
-                     "stages": stages}
+    out["totals"] = _stats_totals([item for item in plans if not item["outside_run"]])
+    out["journal_totals"] = _stats_totals(plans) if journal else None
     if baseline:
         try:
             with open(baseline, "r", encoding="utf-8") as fh:

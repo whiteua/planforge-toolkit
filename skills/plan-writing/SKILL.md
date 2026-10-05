@@ -47,7 +47,7 @@ skill's directory, absolute). Exit codes: `0` ok, `1` check failed, `2` bad inpu
 
 | Command | Use |
 |---|---|
-| `plan-path <spec>` | Plan path: `<X>-spec.md` → `<X>-impl.md` next to the spec (user preference overrides). |
+| `plan-path <spec>` | Plan path: `<X>-spec.md` → `<X>-impl.md` next to the spec (user preference overrides), and `writing_marker`: the plan's last line while it is being written, `> Writing: in progress (spec sha256 <first 12 hex of the spec's SHA-256>)` (`null` when the spec cannot be read; 4. Tasks, Writing order). |
 | `plan-check <plan> --root <project>` | Plan format contract, after writing the plan. Also returns `settings` (read by the shared rule: plan header, else the spec at `**Spec:**`), `task_count`, `plan_bytes`, and `journal`: the chain journal the plan leads to, `null` when there is none. |
 | `skeleton <plan> [--tasks ids] [--code none\|signatures]` | The plan without code bodies, for plan-resolver's first and closing full passes (this skill does not call it): the header, task headings, `Files`, conditions, `External`, `Size`, step headings, `Run:`/`Expected:`, one `[code <lang>, <N> lines: <signatures>]` line per code block. Text, not JSON; warnings on stderr. |
 | `task <plan> <id>` | One task byte for byte, for the same callers. Text, not JSON. |
@@ -83,6 +83,17 @@ and the chain runner. `J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/b
       without drift;
     - no such question → say the plan is already written and go to 7. Execution Handoff; a
       rewrite the user still asks for runs without stage events (say so in one line).
+- **Continuation**, right after the `running` event of Start when the stage was `running` or `failed` and the plan
+  file exists: `J plan-tasks <plan>`. `incomplete: false` → the plan is written anew, as before. `incomplete: true`
+  (the writing marker is in the file: a writer was cut off) → compare `marker_spec_sha` with the 12 hex in
+  `writing_marker` of `plan-path`:
+  - equal (the spec did not change) → keep the file: read it, redo 3. File Structure only for the tasks still to
+    write, and go on with the task after the last one `plan-tasks` returned, by 4. Tasks, Writing order; say in one
+    line after which task the writing continues;
+  - different, or `null` (a marker without a fingerprint or with a broken one) → delete the plan file and write the
+    plan anew.
+
+  Neither case is a question.
 - **End**, after 6. Check and Self-Review: `J journal-event <journal> --skill plan-writing --plan <plan> --stage writing --status done --input <spec> --artifact plan=<plan path relative to the journal's directory, forward slashes>`.
   When the `warnings` of the last `plan-check` contain a `plan-oversized: …` line, add
   `--data '{"warnings": ["<that line verbatim>"]}'`: the chain runner prints it, the chain does not stop.
@@ -154,6 +165,8 @@ Before defining tasks, list the files to create or modify and each file's single
 **Tier** (from Preflight) decides how much each task expands. See `references/task-tiers.md` for the table and for when to add `Constraints` and `If stuck`. Every tier keeps the core: `Files`, numbered steps, and a verifiable done-state.
 
 **No commit steps.** A plan never commits: `plan-executor` keeps rollback snapshots in hidden refs while it executes, and only its separate `commit` stage (`/plan-executor <plan> commit`, after the audit) commits the run's files and the audit's fixes.
+
+**Writing order.** The plan file is written task by task, so a writer that is cut off (a host limit, an exhausted context) loses at most the task in hand. After 3. File Structure write the plan header (Plan header below) and then, after one blank line, `writing_marker` of `plan-path` verbatim as the file's last line: `> Writing: in progress (spec sha256 <12 hex>)`. A task goes into the file only when it is finished: whole, in one edit, inserted before the marker; the marker stays the last line. After the last task delete the marker line, then 6. Check and Self-Review and the End event. While the marker is in the file the plan is not a plan: `plan-check` fails with `plan-incomplete` as its first error, `journal-reconcile` does not take the file as the end of `writing`, and the splitter, the executor and the revision refuse it with `plan-incomplete`. Never delete the marker before the last task is written, and never write a task after it.
 
 ### Plan header
 
@@ -263,7 +276,7 @@ Every step contains what the engineer needs. Plan failures:
 
 ## 6. Check and Self-Review
 
-1. Run `plan-check <plan> --root <project>` until it exits `0`. It enforces the header fields, task headings and unique ids, the task core per tier, backticked file paths, no commit steps, no placeholders, and the `Environments`/`External` rules. Review its `warnings`: a missing `Modify:` target is fine only if an earlier task creates it, and a code-size warning (or the error above 150 lines) is closed by splitting the task or by a `**Size:** <N> lines — <reason>` line, never by asking the user. `plan-oversized: N tasks, M bytes (budget …)` is about the whole plan, not a task: show it to the user, never split tasks to hide it; the plan stays valid and the End event carries it (Chain journal).
+1. Run `plan-check <plan> --root <project>` until it exits `0`. It enforces the header fields, task headings and unique ids, the task core per tier, backticked file paths, no commit steps, no placeholders, and the `Environments`/`External` rules. Review its `warnings`: a missing `Modify:` target is fine only if an earlier task creates it, and a code-size warning (or the error above 150 lines) is closed by splitting the task or by a `**Size:** <N> lines — <reason>` line, never by asking the user. `plan-oversized: N tasks, M bytes (budget …)` is about the whole plan, not a task: show it to the user, never split tasks to hide it; the plan stays valid and the End event carries it (Chain journal). `plan-incomplete` means the writing marker is still in the file: delete it once the last task is written (4. Tasks, Writing order). `marker-spec-mismatch` comes only with the marker: its fingerprint is not the spec's (Chain journal, Continuation).
 2. Then check what the tool cannot:
    - **Spec coverage:** every spec requirement maps to a task. Add a task for each gap.
    - **Grounding:** every `path:line` citation was actually read; `Create:` targets are new; the test command exists.

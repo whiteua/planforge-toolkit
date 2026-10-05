@@ -1,6 +1,6 @@
 # Helper CLIs: detailed behaviour
 
-This is the detailed description of each skill's Python CLI that used to live in `CLAUDE.md`. The authoritative sources are each skill's `USAGE.md`, `references/` and tests; this file is a consolidated map. Keep it in sync when a command's behaviour changes.
+The single place where every command, flag, field and error code of each skill's Python CLI is listed (the authoritative sources remain each skill's `USAGE.md`, `references/` and tests). `CLAUDE.md` names only what each script owns and changes only on structural events; every plan that changes a CLI updates this file instead.
 
 ## Commits
 

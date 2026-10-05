@@ -56,17 +56,19 @@ Skills refer to their own scripts as `python "<SKILL_DIR>/scripts/<tool>.py"` (a
 
 ## Helper CLIs
 
-One Python tool per skill; details (every command, field and error code) are in the skill's `USAGE.md` and `references/`, and consolidated in `docs/HELPER-CLIS.md`.
+One Python tool per skill. Every command, flag, field and error code is described in the skill's `USAGE.md` and `references/`, and consolidated in `docs/HELPER-CLIS.md`; this table names only what each script owns.
+
+**Stability of this file.** `CLAUDE.md` changes only on a structural event: a skill is added or removed; a script is added, renamed or moved; a cross-skill contract changes (a format parsed by another skill, the chain journal); a convention changes; a new artifact must never be committed. A new command, flag, field or error code is not such an event: it goes to the skill's `USAGE.md`, `docs/HELPER-CLIS.md` and, for a technique, `docs/TECHNOLOGIES.md`. A plan task that modifies `CLAUDE.md` must name the structural event it serves.
 
 | Script | Owns |
 |---|---|
-| `plan-brainstorming/scripts/brainstorm_tool.py` | Formats shared by all skills: `spec-check` (with the `volume` estimate), `SIZE_BUDGET` (the plan size budget, 40 tasks / 150000 bytes), `detect-lang`, `settings` (`resolve_settings`, the only parser of `> Chain:`/`> Environment:`/`> Backlog:` and `**Chain:**`/`**Environments:**`/`**Backlog:**`), the shared `BACKLOG.md` (`backlog-*`), the chain journal `<goal>-chain.json` (`journal-*`, schema in `assets/chain-journal.schema.json`), findings (`findings-parse`, `findings-coverage`). Also a Node visual-companion server (`server.cjs`). |
-| `plan-writing/scripts/plan_tool.py` | `plan-path`, `plan-check` (the plan format contract: header, `### Task N:` headings, task core per tier, `**External:**`/`**Size:**` rules, settings via `resolve_settings`; `size_class`, `budget` and the `plan-oversized` warning against `SIZE_BUDGET`, `--max-tasks`/`--max-bytes`). Reference plan in `tests/fixtures/`. |
-| `plan-iterative-revision/scripts/next_review_index.py` | `bootstrap`, `record` (single authority for loop gates and issue fingerprints; renders and validates review/completion files), `digest`, `validate-review`, diff-guard snapshots. Fixtures in `.fixtures/`. |
-| `plan-splitter/scripts/splitter_tool.py` | Parts `<base>-a.md`, `<base>-b.md`, … and `<base>-roadmap.md`: preflight, part/roadmap validation, verify baseline/record/status. |
-| `plan-executor/scripts/executor_tool.py` | The ledger and run loop (`ledger-init`, `unit-begin`, `unit-finish`, `consent`, `accept-changes`, `checkpoint-restore`), snapshots as hidden refs `refs/plan-executor/<run>/<unit>`, `run-diff` (`<base>-diffs.md`), `commit-run`, `parse-roadmap`. |
-| `plan-resolver/scripts/resolver_tool.py` | `bootstrap`, `preflight`, `fingerprint-workspace` + `assert-readonly`, report parsing/validation (`validate-report --root --plan`), `task-census`, the fix loop (`discover`, `open-issues`, `protect`, `mark-fix`, `cycle-check`). |
-| `plan-chain-runner/scripts/chain_tool.py` | The runner's deterministic scheduler and the journal's `runner` section: `settings-load/save`, `model-pick`, `run-init`, `run-session`, `run-next`, `run-eta`, `run-status`, `run-stats` (cost and quality per stage; `docs/COST.md`). Host profiles `claude-code`, `github-copilot`, `fallback`; settings in `~/.planforge/runner.json` (`PLANFORGE_HOME`). |
+| `plan-brainstorming/scripts/brainstorm_tool.py` | The formats shared by all skills: the spec contract and size budget, chain settings (the only parser of `> Chain:`/`> Environment:`/`> Backlog:` and `**Chain:**`/`**Environments:**`/`**Backlog:**`), the plan task parser, the shared `BACKLOG.md`, the chain journal `<goal>-chain.json` (schema in `assets/chain-journal.schema.json`), findings, the goal roadmap `<goal>-roadmap.md`. Also a Node visual-companion server (`server.cjs`). |
+| `plan-writing/scripts/plan_tool.py` | The plan format contract (`plan-check`), plan paths, the plan skeleton. Reference plan in `tests/fixtures/`. |
+| `plan-iterative-revision/scripts/next_review_index.py` | The review loop: bootstrap, the single authority for loop gates and issue fingerprints, review/completion files, audit scope, diff-guard snapshots. Fixtures in `.fixtures/`. |
+| `plan-splitter/scripts/splitter_tool.py` | The split gate, parts `<base>-a.md`, `<base>-b.md`, … and `<base>-roadmap.md`: writing, validation, verify ledger. |
+| `plan-executor/scripts/executor_tool.py` | The execution ledger and run loop, snapshots as hidden refs `refs/plan-executor/<run>/<unit>`, the diff report `<base>-diffs.md`, the run commit. |
+| `plan-resolver/scripts/resolver_tool.py` | The audit: workspace fingerprint and read-only guard, report parsing and validation, task census, incremental re-audit scope, the fix loop. |
+| `plan-chain-runner/scripts/chain_tool.py` | The runner's deterministic scheduler, the journal's `runner` section, settings and sessions (`~/.planforge/`, `PLANFORGE_HOME`), run statistics and cost. Host profiles `claude-code`, `github-copilot`, `fallback`. |
 
 ## Cross-skill contracts
 
@@ -81,7 +83,7 @@ One Python tool per skill; details (every command, field and error code) are in 
 ## Conventions
 
 - Commits: `<type>(<scope>): <subject>`. Type is one of feat/fix/docs/refactor/test/chore/ci/perf/style. Scope is a skill name, `readme`, `docs`, `scripts`, or omitted. The subject is imperative and lowercase, with no period and at most 72 characters. Run the modified skill's tests before committing.
-- Never commit user-workspace artifacts generated by the skills: `*-ledger.json`, `*-review-*.md`, `*-report-*.md`, `.exec/`, `*-chain.json`, `*-diffs.md`, `*-followups.json`.
+- Never commit user-workspace artifacts generated by the skills: `*-ledger.json`, `*-review-*.md`, `*-report-*.md`, `.exec/`, `*-chain.json`, `*-diffs.md`, `*-followups.json`, `*-roadmap.md`.
 - The agent stages specific paths (never `git add .`), shows the staged diff, and waits for user confirmation before committing. It never pushes without explicit approval.
 - Keep changes surgical and traceable to the request. Don't refactor adjacent code.
 - New skills: follow `skills/writing-skills/SKILL.md` (TDD for skills, behavioural testing with subagents).

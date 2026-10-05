@@ -680,7 +680,7 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
                                 f"{expected or 'none (unreadable)'}")
 
     # Dialogue language: the plan text outside code fences.
-    lang =detect_lang_text("\n".join(line for _, line, fenced in lines if not fenced))
+    lang = detect_lang_text("\n".join(line for _, line, fenced in lines if not fenced))
     # External lines need settings: without the spec and without header settings nothing
     # says which environments the user permitted. Same source as the executor (Task 43):
     # resolve_settings could not read its source and found no environments.

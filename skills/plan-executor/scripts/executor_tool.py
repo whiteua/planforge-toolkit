@@ -2339,7 +2339,7 @@ def _refuse_incomplete(plan_path):
 
 
 def cmd_ledger_init(args):
-    light =getattr(args, "light", None)
+    light = getattr(args, "light", None)
     if light is not None and not light.strip():
         raise ToolError("light-invalid: --light needs a model name", 2)
     detected = detect_input(args.plan_path, force_whole=args.whole)

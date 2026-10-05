@@ -59,7 +59,7 @@
       "kind": {"enum": ["stage-start", "stage-end", "stage-update", "unit-begin", "unit-finish", "question", "answer",
                         "applied", "finding", "commit", "reconcile", "lock-takeover", "diffs-rebuilt"]},
       "data": {"type": "object"}}},
-    "runner": {"type": "object", "description": "optional; written by plan-chain-runner (chain_tool.py run-init, run-session); spec paths are relative to the journal's directory",
+    "runner": {"type": "object", "description": "optional; written by plan-chain-runner (chain_tool.py run-init, run-session, host-wait, writing-resume); spec paths are relative to the journal's directory",
       "required": ["version", "profile", "specs", "graph", "models", "sessions"],
       "properties": {
         "version": {"const": 1},
@@ -75,6 +75,18 @@
         "parallel": {"type": "integer", "minimum": 1, "description": "optional; run-init --parallel, read by run-next first"},
         "roadmap": {"type": "string", "minLength": 1, "description": "optional; run-init --roadmap: the goal roadmap <goal>-roadmap.md, a file name in the journal's directory"},
         "roadmap_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "optional; sha256 of the goal roadmap when run-init read it (run-status compares it with the file)"},
+        "host_errors": {"type": "array", "description": "optional; chain_tool.py host-wait: one record per pause after a host error of an agent call; at_event = len(events) when written, so a series ends at the stage's next stage-start, stage-end or retry answer; the last record of an exhausted series carries exhausted_for",
+          "items": {"type": "object", "required": ["plan", "stage", "at", "error", "attempt", "wait_seconds", "wait_until", "waited_total", "at_event"], "properties": {
+            "plan": {"type": "string", "minLength": 1}, "stage": {"enum": ["writing", "revision", "split", "execution", "diffs", "audit", "commit"]},
+            "at": {"$ref": "#/definitions/time"}, "error": {"type": "string", "minLength": 1}, "attempt": {"type": "integer", "minimum": 1},
+            "wait_seconds": {"type": "integer", "minimum": 0}, "wait_until": {"$ref": "#/definitions/time"},
+            "waited_total": {"type": "integer", "minimum": 0}, "at_event": {"type": "integer", "minimum": 0},
+            "exhausted_for": {"type": "object", "required": ["plan", "stage", "attempt", "event"]}}}},
+        "writing_resumes": {"type": "array", "description": "optional; chain_tool.py writing-resume: the plan file before each relaunch of a cut-off writer; three equal records in a row make run-next ask stage-failed: writing",
+          "items": {"type": "object", "required": ["plan", "tasks", "bytes", "sha256", "at_event"], "properties": {
+            "plan": {"type": "string", "minLength": 1}, "tasks": {"type": "integer", "minimum": 0},
+            "bytes": {"type": "integer", "minimum": 0}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "at_event": {"type": "integer", "minimum": 0}}}},
         "sessions": {"type": "array", "items": {"type": "object", "required": ["id", "started_at", "ended_at", "end"],
           "properties": {"id": {"type": "string", "minLength": 1}, "started_at": {"$ref": "#/definitions/time"},
             "ended_at": {"anyOf": [{"$ref": "#/definitions/time"}, {"type": "null"}]}, "end": {"enum": ["stopped", "complete", "interrupted", null]}}}}}}

@@ -14,13 +14,15 @@ Commands:
   subset-check   <journal> --roadmap R [--spec S]...
   run-session    <journal> (--begin [--host H] [--takeover] | --heartbeat --id ID | --end stopped|complete|interrupted --id ID)
   run-next       <journal> [--parallel N] [--in-flight PLAN_ID:STAGE]...
+  host-wait      <journal> --plan P --stage S --error TEXT
+  writing-resume <journal> --plan P
   run-eta        <journal>
   run-status     <journal>
   run-stats      (<journal> | --plan PLAN) [--baseline JSON] [--json-out FILE]
   run-checklist  <journal> [--backlog-root R]
 
 Exit codes: 0 ok, 1 contract (graph-cycle, session-active, session-stale-running, session-taken-over,
-runner-missing, no-model) or scheduler-bug (run-next, run-eta, run-status, run-stats, subset-check, run-checklist), 2 usage or
+runner-missing, no-model, stage-not-open, no-marker) or scheduler-bug (run-next, run-eta, run-status, run-stats, subset-check, run-checklist), 2 usage or
 I/O error (journal-corrupt, roadmap-mismatch and not-in-roadmap included).
 """
 from __future__ import annotations
@@ -282,9 +284,17 @@ def _split_gate(state: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Option
         return None, f"gate-unavailable: {exc}"
 
 
-def _gate_why(factors: Dict[str, Any]) -> str:
-    return (f"gate: keep ({factors['task_count']} tasks, {round(factors['plan_bytes'] / 1000)} KB, "
-            f"{factors['modules']} modules, {factors['dependency_shape']})")
+def _gate_why(gate: Dict[str, Any]) -> str:
+    """The skip reason of a plan the gate keeps whole: its numbers, and for a borderline plan the budget that
+    decided it (silent_verdict, spec plan-refactoring-03)."""
+    factors = gate["factors"]
+    numbers = (f"{factors['task_count']} tasks, {round(factors['plan_bytes'] / 1000)} KB, "
+               f"{factors['modules']} modules, {factors['dependency_shape']}")
+    if gate["verdict"] == "keep":
+        return f"gate: keep ({numbers})"
+    limits = gate["thresholds"]
+    return (f"gate: borderline → keep ({numbers}; budget {limits['split_tasks']} tasks / "
+            f"{round(limits['split_bytes'] / 1000)} KB)")
 
 
 def _brainstorm_exit(exc: BaseException) -> Optional[int]:
@@ -524,7 +534,7 @@ def run_init(journal: str, profile: str, specs: List[str], graph: Any, models: A
              start_commit: Optional[str] = None, parallel: Optional[int] = None,
              roadmap: Optional[str] = None) -> Dict[str, Any]:
     """Write the journal's `runner` section. Spec paths are taken relative to CWD and stored relative
-    to the journal; every one must be registered in journal.specs. Sessions of an earlier run-init stay;
+    to the journal; every one must be registered in journal.specs. Sessions, host_errors and writing_resumes of an earlier run-init stay;
     without --start-commit (--parallel, --roadmap) the earlier value stays, else the key is left out.
     With --roadmap the specs are stored in the roadmap's # order (not-in-roadmap for a spec it does not
     name), with runner.roadmap and runner.roadmap_sha256."""
@@ -566,6 +576,9 @@ def run_init(journal: str, profile: str, specs: List[str], graph: Any, models: A
         runner = {"version": bt.RUNNER_VERSION, "profile": profile, "specs": ordered, "graph": rel_graph,
                   "models": runner_models,
                   "sessions": old.get("sessions") if isinstance(old.get("sessions"), list) else []}
+        for key in ("host_errors", "writing_resumes"):  # the scheduler's marks outlive a new run-init
+            if isinstance(old.get(key), list):
+                runner[key] = old[key]
         kept = start_commit or old.get("start_commit")
         if kept:
             runner["start_commit"] = kept
@@ -1010,9 +1023,152 @@ def _failures(data: Dict[str, Any], plan_id: str, stage: str) -> int:
     return count
 
 
+# host-wait (spec plan-refactoring-03): a transient error of the host's agent call repeats the stage after a growing
+# pause. HOST_ERROR_RE classifies the error text of the launch tool, never an agent's ordinary reply.
+HOST_ERROR_RE = re.compile(
+    r"\b(?:529|429)\b|overloaded|rate[\s_-]?limit|too many requests"
+    r"|\b(?:api|http)[\s_-]*(?:error|status)?[\s:=]*5\d\d\b"
+    r"|internal server error|bad gateway|service unavailable|gateway time-?out"
+    r"|connection (?:reset|refused|aborted|closed|error|lost|dropped)|econnreset|socket hang up|network error"
+    r"|time[sd]?[\s_-]?out", re.IGNORECASE)
+HOST_WAITS = (60, 120, 300, 600)  # seconds; the last one repeats until the series has waited HOST_WAIT_TOTAL
+HOST_WAIT_TOTAL = 3600
+
+
+def _iso_at(seconds: float) -> str:
+    """A moment in seconds as a journal time YYYY-MM-DDTHH:MM:SSZ (UTC), like _iso_now."""
+    return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _plan_entry_of(data: Dict[str, Any], plan: str) -> Dict[str, Any]:
+    """The journal's plan entry named by `plan`, a plan id or a plan path; unknown-plan (exit 2) without one."""
+    plan_id = _brainstorm()._journal_plan_id(plan)
+    entry = next((item for item in data["plans"] if item.get("id") == plan_id), None)
+    if entry is None:
+        raise InputError(f"unknown-plan: {plan}")
+    return entry
+
+
+def _last_stage_move(data: Dict[str, Any], plan_id: str, stage: str) -> int:
+    """Index in `events` of the plan stage's last stage-start or stage-end, -1 without one."""
+    for index in range(len(data["events"]) - 1, -1, -1):
+        event = data["events"][index]
+        if (event.get("plan"), event.get("stage")) == (plan_id, stage) and event.get("kind") in ("stage-start", "stage-end"):
+            return index
+    return -1
+
+
+def _host_series_start(data: Dict[str, Any], plan_id: str, stage: str) -> int:
+    """Index in `events` after which the stage's current host-error series begins: its last stage-start or stage-end,
+    or the answer `retry` to a `stage-failed: <stage>` question (a launch that failed leaves no stage-start)."""
+    retried = {q.get("id") for q in data.get("questions") or []
+               if (q.get("plan"), q.get("stage")) == (plan_id, stage) and q.get("answer") == "retry"
+               and str(q.get("text", "")).startswith(f"stage-failed: {stage}")}
+    answers = [index for index, event in enumerate(data["events"])
+               if event.get("kind") == "answer" and (event.get("plan"), event.get("stage")) == (plan_id, stage)
+               and (event.get("data") or {}).get("id") in retried]
+    return max([_last_stage_move(data, plan_id, stage), *answers])
+
+
+def _host_series(data: Dict[str, Any], plan_id: str, stage: str) -> List[Dict[str, Any]]:
+    """The stage's runner.host_errors written after _host_series_start: the current series."""
+    last = _host_series_start(data, plan_id, stage)
+    runner = data.get("runner") if isinstance(data.get("runner"), dict) else {}
+    return [item for item in runner.get("host_errors") or []
+            if (item.get("plan"), item.get("stage")) == (plan_id, stage) and item.get("at_event", -1) > last]
+
+
+def _host_item(doc: Dict[str, Any], journal: str, plan_id: str, stage: str, error: str, now: float, wait: int,
+               attempt: int, total: int, exhausted: bool = False) -> Dict[str, Any]:
+    """Append one record to runner.host_errors inside a journal_update; an exhausted one carries exhausted_for, its
+    event the stage's last stage-start or stage-end (the failed stage-end)."""
+    item = {"plan": plan_id, "stage": stage, "at": _iso_at(now), "error": error.strip(), "attempt": attempt,
+            "wait_seconds": wait, "wait_until": _iso_at(now + wait), "waited_total": total,
+            "at_event": len(doc["events"])}
+    if exhausted:
+        item["exhausted_for"] = {"plan": plan_id, "stage": stage, "attempt": attempt,
+                                 "event": _last_stage_move(doc, plan_id, stage)}
+    _runner_of(doc, journal).setdefault("host_errors", []).append(item)
+    return item
+
+
+def _host_exhaust(journal: str, plan_id: str, stage: str, status: str, error: str, now: float, attempt: int,
+                  total: int) -> Dict[str, Any]:
+    """The series has waited HOST_WAIT_TOTAL: the stage goes to failed through journal_event under plan-chain-runner
+    (data why: host-error; pending, stopped and failed through running), then the record with exhausted_for. A
+    stopped stage with open questions is the journal's open-questions error: nothing is written."""
+    bt = _brainstorm()
+    if status in ("pending", "stopped", "failed"):
+        bt.journal_event(journal, "plan-chain-runner", plan_id, stage, "running", data={"why": "host-error"})
+    bt.journal_event(journal, "plan-chain-runner", plan_id, stage, "failed", data={"why": "host-error"})
+    return bt.journal_update(journal, lambda doc: _host_item(doc, journal, plan_id, stage, error, now, 0, attempt,
+                                                             total, exhausted=True))
+
+
+def host_wait(journal: str, plan: str, stage: str, error: str) -> Dict[str, Any]:
+    """A failed agent call of the plan's stage: text HOST_ERROR_RE does not match → host_error false, nothing
+    written; else the next pause of HOST_WAITS, then _host_exhaust after HOST_WAIT_TOTAL. An exhausted series answers
+    so and writes nothing until the stage moves or a `retry` answers its question (_host_series_start).
+    stage-not-open (exit 1) for a done or skipped stage; unknown plan or stage: exit 2."""
+    bt = _brainstorm()
+    journal = os.path.abspath(journal)
+    if stage not in bt.STAGES:
+        raise InputError(f"unknown-stage: {stage}")
+    data, _ = _runner_journal(journal)
+    entry = _plan_entry_of(data, plan)
+    plan_id, status = entry["id"], (entry["stages"].get(stage) or {}).get("status", "pending")
+    if status in ("done", "skipped"):
+        raise ChainError(f"stage-not-open: {plan_id} {stage} is {status}", plan=plan_id, stage=stage, status=status)
+    if not HOST_ERROR_RE.search(error or ""):
+        return {"ok": True, "host_error": False}
+    now = _now()
+
+    def pause(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        series = _host_series(doc, plan_id, stage)
+        exhausted = [item for item in series if "exhausted_for" in item]
+        if exhausted:
+            return exhausted[-1]
+        waited = sum(item["wait_seconds"] for item in series)
+        wait = min(HOST_WAITS[min(len(series), len(HOST_WAITS) - 1)], HOST_WAIT_TOTAL - waited)
+        if wait <= 0:
+            return None
+        return _host_item(doc, journal, plan_id, stage, error, now, wait, len(series) + 1, waited + wait)
+
+    item = bt.journal_update(journal, pause)
+    if item is None:
+        series = _host_series(bt.journal_load(journal), plan_id, stage)
+        item = _host_exhaust(journal, plan_id, stage, status, error, now, len(series) + 1,
+                             sum(record["wait_seconds"] for record in series))
+    return {"ok": True, "host_error": True, "attempt": item["attempt"], "wait_seconds": item["wait_seconds"],
+            "waited_total": item["waited_total"], "wait_until": item["wait_until"],
+            "exhausted": "exhausted_for" in item}
+
+
+def _host_wait_left(data: Dict[str, Any], plan_id: str, stage: str) -> Optional[int]:
+    """Seconds left (rounded up) until wait_until of the stage's current host-error series; None for no series, an
+    exhausted one or a moment passed. The one comparison with the clock."""
+    series = _host_series(data, plan_id, stage)
+    if not series or "exhausted_for" in series[-1]:
+        return None
+    until = _parse_iso(series[-1].get("wait_until"))
+    left = None if until is None else int(-(-(until - _now()) // 1))
+    return left if left is not None and left > 0 else None
+
+
+def _host_exhausted(data: Dict[str, Any], plan_id: str, stage: str) -> Optional[Dict[str, Any]]:
+    """The stage's last record with exhausted_for while its event is still the stage's last stage-start or
+    stage-end, else None: the next stage-start lifts the mark."""
+    runner = data.get("runner") if isinstance(data.get("runner"), dict) else {}
+    for item in reversed(runner.get("host_errors") or []):
+        mark = item.get("exhausted_for")
+        if (item.get("plan"), item.get("stage")) == (plan_id, stage) and isinstance(mark, dict):
+            return item if mark.get("event") == _last_stage_move(data, plan_id, stage) else None
+    return None
+
+
 def _stage_step(data: Dict[str, Any], state: Dict[str, Any], stage: str, reason: Optional[str]) -> Dict[str, Any]:
     """The step for the plan's next stage (open questions are checked before): a run, a skip
-    (split=never, resolver=skip), an ask (rule 10: stage-failed) or {"kind": "wait", "why"}.
+    (split=never, resolver=skip), an ask (rule 10: stage-failed; at once after an exhausted host wait) or {"kind": "wait", "why"}.
     A running audit started by an open-audit `fix` resumes as `fix`."""
     record = _record(state, stage)
     status = record.get("status", "pending")
@@ -1024,8 +1180,8 @@ def _stage_step(data: Dict[str, Any], state: Dict[str, Any], stage: str, reason:
     gate_warning = None
     if status == "pending" and stage == "split" and state["chain"].get("split") == "auto":
         verdict, gate_warning = _split_gate(state)
-        if verdict is not None and verdict["verdict"] == "keep":
-            return dict(where, kind="skip", why=_gate_why(verdict["factors"]))
+        if verdict is not None and verdict.get("silent_verdict", verdict["verdict"]) == "keep":
+            return dict(where, kind="skip", why=_gate_why(verdict))
     touched = max(record.get("started_at") or "", record.get("finished_at") or "")
     for prefix, name in (("not-confirmed", stage), ("stage-failed", stage), ("model", STAGE_ROLES[stage])):
         # stop: the plan waits until the stage moves again (the user ran or fixed it by hand).
@@ -1040,9 +1196,13 @@ def _stage_step(data: Dict[str, Any], state: Dict[str, Any], stage: str, reason:
     if status == "failed":
         asked = _latest_question(state, stage, f"stage-failed: {stage}")
         current = asked is not None and (asked.get("asked_at") or "") >= (record.get("finished_at") or "")
-        if not current and _failures(data, state["entry"]["id"], stage) >= 2:
-            return dict(where, kind="ask", prefix=f"stage-failed: {stage}",
-                        options=list(QUESTION_OPTIONS["stage-failed"]))
+        exhausted = _host_exhausted(data, state["entry"]["id"], stage)
+        if not current and (exhausted is not None or _failures(data, state["entry"]["id"], stage) >= 2):
+            ask = dict(where, kind="ask", prefix=f"stage-failed: {stage}",
+                       options=list(QUESTION_OPTIONS["stage-failed"]))
+            if exhausted is not None:  # an hour of host errors: no automatic repeat
+                ask["host_error"] = {key: exhausted[key] for key in ("attempt", "waited_total", "error")}
+            return ask
     if stage == "audit" and status == "running" and reason is None:  # an interrupted fix resumes as a fix
         starts = [event for event in data["events"] if event.get("plan") == state["entry"]["id"]
                   and event.get("stage") == "audit" and event.get("kind") == "stage-start"]
@@ -1134,6 +1294,53 @@ def _writing_resumes(state: Dict[str, Any]) -> bool:
     return marker is not None and bool(text) and marker(text) is not None
 
 
+def writing_resume(journal: str, plan: str) -> Dict[str, Any]:
+    """Before a writer is relaunched with resume: true: the plan file's task count (parse_plan_tasks), bytes and
+    sha256 appended to runner.writing_resumes. No plan file: exit 2 plan-missing; no writing marker: exit 1
+    no-marker; nothing is written then."""
+    bt = _brainstorm()
+    journal = os.path.abspath(journal)
+    data, _ = _runner_journal(journal)
+    entry = _plan_entry_of(data, plan)
+    path = os.path.join(os.path.dirname(journal), entry["plan"])
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise InputError(f"plan-missing: {path}: {exc}") from exc
+    parsed = bt.parse_plan_tasks(raw.decode("utf-8", errors="replace"))
+    if not parsed["incomplete"]:
+        raise ChainError(f"no-marker: {entry['plan']}", plan=entry["id"])
+
+    def mutate(doc: Dict[str, Any]) -> Dict[str, Any]:
+        item = {"plan": entry["id"], "tasks": len(parsed["tasks"]), "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(), "at_event": len(doc["events"])}
+        _runner_of(doc, journal).setdefault("writing_resumes", []).append(item)
+        return item
+
+    return dict({"ok": True}, **bt.journal_update(journal, mutate))
+
+
+def _writing_stalled(data: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    """No progress: the plan's last three runner.writing_resumes records after the last `retry` answer of a
+    `stage-failed: writing` question have the same task count and sha256."""
+    plan_id = state["entry"]["id"]
+    retried = {q.get("id") for q in state["questions"] if q.get("stage") == "writing" and q.get("answer") == "retry"
+               and str(q.get("text", "")).startswith("stage-failed: writing")}
+    start = max((index for index, event in enumerate(data["events"])
+                 if event.get("kind") == "answer" and (event.get("data") or {}).get("id") in retried), default=-1)
+    runner = data.get("runner") if isinstance(data.get("runner"), dict) else {}
+    marks = [(item.get("tasks"), item.get("sha256")) for item in runner.get("writing_resumes") or []
+             if item.get("plan") == plan_id and item.get("at_event", -1) > start]
+    return len(marks) >= 3 and len(set(marks[-3:])) == 1
+
+
+def _reads_code(state: Dict[str, Any], flying: Dict[str, str]) -> bool:
+    """The plan reads the code now: its revision or split is running or has an agent in flight (CODE_READING_STAGES)."""
+    return (flying.get(state["entry"]["id"]) in CODE_READING_STAGES
+            or any(_record(state, stage).get("status") == "running" for stage in CODE_READING_STAGES))
+
+
 def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[str, Any]],
                 waiting: List[Dict[str, Any]], asks: Dict[str, Dict[str, Any]],
                 flying: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
@@ -1142,10 +1349,13 @@ def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[
     (even while it waits for an answer), the one with uncommitted changes first (a committed plan
     sent back by drift must not execute over them), else the first plan in runner order that reaches them
     (taken before the loop, so a revision earlier in runner order does not start next to it). The revision
-    and split of the other plans wait for the holder too (CODE_READING_STAGES).
+    and split of the other plans wait for the holder too (CODE_READING_STAGES). The first plan to reach them waits
+    with reading-busy while another plan's revision or split runs or is in flight, and new readers wait for it
+    (code-busy).
     Rule 9 cascade questions do not hold their plan: they become `answer` steps. A plan whose agent
     is in flight (`flying`: plan id -> stage) gets no step; an agent in a code stage holds them.
-    A running writing whose plan file carries the writing marker gets resume: true (spec 3 of plan-refactoring-02)."""
+    A writing running, failed or stopped whose plan file carries the writing marker gets resume: true (spec 3 of
+    plan-refactoring-02), or the stage-failed: writing ask when it stalled (_writing_stalled)."""
     flying = flying or {}
     by_spec = {state["spec"]: state for state in states}
     holder = next((state for state in states if flying.get(state["entry"]["id"]) in CODE_STAGES), None)
@@ -1157,32 +1367,54 @@ def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[
         state["open"] = [qid for qid in state["open"] if qid not in {q["id"] for q in cascade}]
         steps.extend({"kind": "answer", "spec": state["spec"], "plan": state["entry"]["plan"], "stage": q["stage"],
                       "qid": q["id"], "answer": "rewrite", "running": False} for q in cascade)
-    holder = holder or next((state for state in states if state["entry"]["id"] not in flying and not state["open"]
-                             and state["next"] is not None and state["next"][0] in CODE_STAGES), None)
+    pending_holder = None if holder else next((state for state in states if state["entry"]["id"] not in flying
+                                               and not state["open"] and state["next"] is not None
+                                               and state["next"][0] in CODE_STAGES), None)
+    # Mirror rule: the first plan to reach the code stages takes them only when no other plan's revision or split runs
+    # or is in flight; meanwhile new readers wait for it (code-busy), so they cannot starve it.
+    reader = None if pending_holder is None else next(
+        (state for state in states if state is not pending_holder and _reads_code(state, flying)), None)
+    if pending_holder is not None and reader is None:
+        holder = pending_holder
     for state in states:
         if state["entry"]["id"] in flying:
             stage = flying[state["entry"]["id"]]
+            left = _host_wait_left(data, state["entry"]["id"], stage)
             waiting.append({"spec": state["spec"], "plan": state["entry"]["plan"], "stage": stage,
-                            "reason": f"in-flight: {stage}"})
+                            "reason": f"host-wait: {left}s" if left else f"in-flight: {stage}"})
             continue
         if state["next"] is None:
             continue
         stage, reason = state["next"]
         where = {"spec": state["spec"], "plan": state["entry"]["plan"], "stage": stage}
         why: Optional[str] = None
-        if state["open"]:
+        left = _host_wait_left(data, state["entry"]["id"], stage)
+        if left:  # a host error of its agent call: the pair waits until wait_until (spec plan-refactoring-03)
+            why = f"host-wait: {left}s"
+        elif state["open"]:
             why = "open-question: " + ", ".join(state["open"])
         elif stage == "writing" and _record(state, "writing").get("status") == "pending":
             why = _dependency_wait(runner, by_spec, state, asks)
         if why is None and stage in CODE_STAGES + CODE_READING_STAGES and holder is not None and holder is not state:
             why = f"code-busy: {holder['entry']['id']}"
+        elif why is None and reader is not None:
+            if state is pending_holder:
+                why = f"reading-busy: {reader['entry']['id']}"
+            elif stage in CODE_STAGES or (stage in CODE_READING_STAGES
+                                          and _record(state, stage).get("status") != "running"):
+                why = f"code-busy: {pending_holder['entry']['id']}"
         step = _stage_step(data, state, stage, reason) if why is None else {"kind": "wait", "why": why}
         if step["kind"] == "wait":
             waiting.append(dict(where, reason=step["why"]))
         else:
             step["running"] = _record(state, stage).get("status") == "running"
-            if stage == "writing" and step["running"] and step["kind"] == "run" and _writing_resumes(state):
-                step["resume"] = True  # relaunched with the same brief until done, failed or stopped (LOOP.md, 4)
+            if (stage == "writing" and step["kind"] == "run" and _writing_resumes(state)
+                    and _record(state, stage).get("status") in ("running", "failed", "stopped")):
+                if _writing_stalled(data, state):  # three relaunches without progress: a question, not a fourth
+                    step = dict(where, kind="ask", prefix="stage-failed: writing",
+                                options=list(QUESTION_OPTIONS["stage-failed"]), running=step["running"])
+                else:
+                    step["resume"] = True  # relaunched with the same brief, writing-resume first (LOOP.md, 4)
             steps.append(step)
     return steps
 
@@ -1258,8 +1490,17 @@ def run_next(journal: str, parallel: Optional[int] = None, in_flight: Any = ()) 
         step.pop("running", None)
     # Rule 11 (rule 6: limits.enabled is false, nothing is checked).
     done = not flying and all(state["next"] is None and not state["open"] for state in states)
+    hosting = any(item["reason"].startswith("host-wait: ") for item in waiting)  # a host wait is not a stop
     return {"ok": True, "journal_dir": os.path.dirname(os.path.abspath(journal)), "actions": actions,
-            "waiting": waiting, "done": done, "blocked": not done and not actions and not flying}
+            "waiting": waiting, "done": done, "blocked": not done and not actions and not flying and not hosting}
+
+
+def cmd_host_wait(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    return 0, host_wait(args.journal, args.plan, args.stage, args.error)
+
+
+def cmd_writing_resume(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    return 0, writing_resume(args.journal, args.plan)
 
 
 def cmd_run_next(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
@@ -1301,14 +1542,15 @@ def _spans(data: Dict[str, Any], start: str, end: str, key: Any) -> List[Tuple[A
 def _journal_stats(data: Dict[str, Any], runner: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
     """The journal layer of run-stats for one plan state: per stage its status, the summed minutes of its
     stage-start/stage-end spans, the role's model and effort (runner.models), its artifacts and the actual
-    cost the runner recorded (artifacts cost_tokens/cost_source); the plan's unit events, audit result and
-    failed stages."""
+    cost the runner recorded (artifacts cost_tokens/cost_source), the host waits of runner.host_errors (host_waits,
+    host_waited_seconds); the plan's unit events, audit result and failed stages."""
     plan_id = state["entry"]["id"]
     own = {"events": [event for event in data["events"] if event.get("plan") == plan_id]}
     minutes: Dict[str, float] = {}
     for stage, seconds in _spans(own, "stage-start", "stage-end", lambda event: event.get("stage")):
         minutes[stage] = minutes.get(stage, 0.0) + seconds / 60
     models = runner.get("models") or {}
+    marks = [item for item in runner.get("host_errors") or [] if item.get("plan") == plan_id]
     stages: Dict[str, Any] = {}
     for stage in _brainstorm().STAGES:
         record, role = _record(state, stage), models.get(STAGE_ROLES[stage]) or {}
@@ -1317,7 +1559,10 @@ def _journal_stats(data: Dict[str, Any], runner: Dict[str, Any], state: Dict[str
                          "minutes": round(minutes[stage], 1) if stage in minutes else None,
                          "model": role.get("model"), "effort": role.get("effort"), "artifacts": dict(artifacts),
                          "actual_tokens": _int_or_none(artifacts.get("cost_tokens")),
-                         "actual_source": artifacts.get("cost_source")}
+                         "actual_source": artifacts.get("cost_source"),
+                         "host_waits": sum(1 for item in marks if item.get("stage") == stage and item.get("wait_seconds")),
+                         "host_waited_seconds": sum(item.get("wait_seconds") or 0 for item in marks
+                                                    if item.get("stage") == stage)}
     begun = [(event.get("data") or {}).get("unit") for event in own["events"] if event.get("kind") == "unit-begin"]
     # unit-finish --delegated (spec 8 of plan-refactoring-01): attempts a subagent on the light model made;
     # a failed one is always retried in the main agent, so its fails are the delegated retries.
@@ -1681,7 +1926,7 @@ def _roadmap_state(journal: str, data: Dict[str, Any], runner: Dict[str, Any]) -
 
 def run_status(journal: str) -> Dict[str, Any]:
     """Per plan: stage statuses, the next stage (rules 7 and 9), unit progress; open questions, waits
-    without a question of their own (stage-failed: stop, not-confirmed: stop, model: stop, code-busy),
+    without a question of their own (stage-failed: stop, not-confirmed: stop, model: stop, code-busy, reading-busy, host-wait),
     ETA, the session mark, the cost totals, the goal roadmap's state and the plans' # order. Reads only."""
     bt = _brainstorm()
     data, runner = _runner_journal(journal)
@@ -1703,7 +1948,8 @@ def run_status(journal: str) -> Dict[str, Any]:
     waiting: List[Dict[str, Any]] = []
     _candidates(data, runner, states, waiting, {})
     waits = [item for item in waiting
-             if item["reason"] in ("stage-failed: stop", "not-confirmed: stop", "model: stop") or item["reason"].startswith("code-busy: ")]
+             if item["reason"] in ("stage-failed: stop", "not-confirmed: stop", "model: stop")
+             or item["reason"].startswith(("code-busy: ", "reading-busy: ", "host-wait: "))]
     totals = run_stats(journal, None)["totals"]
     roadmap = _roadmap_state(journal, data, runner)
     rows = roadmap.pop("rows") if roadmap is not None else {}
@@ -1776,6 +2022,8 @@ def _plan_stats(plan_path: str, journal_layer: Optional[Dict[str, Any]], warning
     else:  # --plan: no journal, so no durations; every stage still carries the key
         for item in stats["stages"].values():
             item.setdefault("minutes", None)
+            item.setdefault("host_waits", None)
+            item.setdefault("host_waited_seconds", None)
     estimate = _cost_estimate(stats, folder, warnings)
     quality = _quality(stats, folder)
     if journal_layer and journal_layer["audit"]["status"]:
@@ -2050,6 +2298,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_run_next.add_argument("--in-flight", action="append", default=[], metavar="PLAN_ID:STAGE",
                             help="an agent launched and not yet returned (repeatable): not returned again, counted")
     p_run_next.set_defaults(func=cmd_run_next)
+    p_host = sub.add_parser("host-wait", help="a host error of an agent call: the next pause, or the stage failed "
+                                              "after an hour of pauses")
+    p_host.add_argument("journal", help="path to <goal>-chain.json with a runner section")
+    p_host.add_argument("--plan", required=True, help="plan id or plan path")
+    p_host.add_argument("--stage", required=True, help="the stage of the agent call")
+    p_host.add_argument("--error", required=True, help="the error text of the launch tool, never the agent's reply")
+    p_host.set_defaults(func=cmd_host_wait)
+    p_resume = sub.add_parser("writing-resume", help="record the plan file before a cut-off writer is relaunched")
+    p_resume.add_argument("journal", help="path to <goal>-chain.json with a runner section")
+    p_resume.add_argument("--plan", required=True, help="plan id or plan path")
+    p_resume.set_defaults(func=cmd_writing_resume)
     p_run_eta = sub.add_parser("run-eta", help="minutes left from the stage and unit history of the journal")
     p_run_eta.add_argument("journal", help="path to <goal>-chain.json with a runner section")
     p_run_eta.set_defaults(func=cmd_run_eta)

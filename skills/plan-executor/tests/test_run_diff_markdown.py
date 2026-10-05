@@ -79,6 +79,17 @@ class RunDiffCase(unittest.TestCase):
         return self.tool.unit_finish(self.exec_dir, unit_id, "pass")
 
 
+class TestDiffsPath(unittest.TestCase):
+    """Spec plan-refactoring-03: one diff report per master plan, the same for its roadmap."""
+
+    def test_one_report_per_master_plan(self):
+        tool = load_tool()
+        folder = Path(tempfile.gettempdir()).resolve() / "plans"
+        for name in ("p1-impl.md", "p1-impl-roadmap.md", "p1.md"):
+            self.assertEqual(tool.diffs_path(str(folder / name)), str(folder / "p1-diffs.md"), name)
+        self.assertEqual(tool.diffs_path(str(folder / "notes-impl.md")), str(folder / "notes-diffs.md"))
+
+
 class TestRunDiffNoGit(RunDiffCase):
     def test_no_git_is_exit_1_and_distinct_from_unavailable(self):
         self.write("app.py", "x = 1\n")
@@ -529,6 +540,45 @@ class TestDiffReportGateFixes(RunDiffCase):
         head = f"Full diff: `git diff {result['baseline']} {result['last']} -- "
         self.assertIn(head + "\":(top,literal)it's big.py\"`\n", text)
         self.assertIn(head + "':(top,literal)cost$big.py'` (command for a POSIX shell: bash, zsh)\n", text)
+
+
+@unittest.skipUnless(shutil.which("git"), "git required")
+class TestCanonicalDiffsPath(RunDiffCase):
+    """Spec plan-refactoring-03: run-diff --markdown writes the one canonical report and names it."""
+
+    def setUp(self):
+        super().setUp()
+        self.init_repo({"app.py": "x = 1\n"})
+        self.start()
+        self.unit("task-1", {"app.py": "x = 2\n"})
+        self.canonical = (self.repo / "docs" / "plans" / "p1-diffs.md").resolve()
+
+    def test_without_a_path_the_canonical_file(self):
+        result = self.tool.run_diff_markdown(self.exec_dir)
+        self.assertEqual((result["markdown"], result["path"]), (str(self.canonical), str(self.canonical)))
+        self.assertTrue(self.canonical.is_file())
+
+    def test_another_path_is_refused_and_nothing_is_written(self):
+        wrong = self.repo / "docs" / "plans" / "p1-impl-diffs.md"
+        with self.assertRaises(ValueError) as ctx:
+            self.tool.run_diff_markdown(self.exec_dir, str(wrong))
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertTrue(str(ctx.exception).startswith("diffs-path-mismatch: "))
+        self.assertFalse(wrong.exists() or self.canonical.exists())
+
+    def test_a_roadmap_run_writes_the_same_file(self):
+        roadmap = self.write("docs/plans/p1-impl-roadmap.md", "# Roadmap\n")
+        state = self.tool.ledger_path(self.exec_dir)
+        led = json.loads(state.read_text(encoding="utf-8"))
+        led["plan_path"] = str(roadmap.resolve())
+        state.write_text(json.dumps(led), encoding="utf-8")
+        self.assertEqual(self.tool.run_diff_markdown(self.exec_dir)["markdown"], str(self.canonical))
+
+    def test_cli_markdown_without_a_value(self):
+        code, data = run_cli("run-diff", self.exec_dir, "--markdown")
+        self.assertEqual((code, data["markdown"]), (0, str(self.canonical)))
+        code, data = run_cli("run-diff", self.exec_dir, "--markdown", str(self.base / "elsewhere-diffs.md"))
+        self.assertEqual((code, data["errors"][0].startswith("diffs-path-mismatch: ")), (2, True))
 
 
 class TestRunDiffCli(RunDiffCase):

@@ -105,7 +105,9 @@ parse the same ids.
                        for a plan without task headings is written by hand).
      keep            → journal: split skipped (why: gate); print assets/gate-pass.<LANG>.md, exit.
      split           → step 3.
-     borderline      → decide from T (step 3) alone, never from the plan text; "keep" as above.
+     borderline      → with a confirmation channel decide from T (step 3) alone, never from the plan
+                       text; without one take G.silent_verdict (keep within 40 tasks / 150 000 bytes,
+                       else split), no question; "keep" as above.
 
 3. ANALYSIS (references/STAGE-FORMAT.md §4-5, references/ROADMAP-FORMAT.md)
    T = python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py" plan-tasks PLAN
@@ -116,9 +118,11 @@ parse the same ids.
 
 4. DRAFT & CONFIRM
    Write the boundaries as parts.json (references/STAGE-FORMAT.md §6) in a temp folder outside
-   the repository and show the split table (id, title, tasks, depends, group, weight); on
-   rejection with feedback retry step 3 once; on a second rejection exit without files.
-   Never generate without explicit confirmation.
+   the repository. In a dialogue show the split table (id, title, tasks, depends, group, weight);
+   on rejection with feedback retry step 3 once; on a second rejection exit without files.
+   In a dialogue never generate without explicit confirmation. Without a confirmation channel
+   (a chain run, a subagent call) there is nothing to confirm: no table, no question; parts.json
+   goes straight to step 5, and the table reaches the journal as `parts_table` (Split done).
 
 5. GENERATE
    R = TOOL split-write PLAN --parts <parts.json>
@@ -190,9 +194,9 @@ parse the same ids.
   `J journal-event <journal> --skill plan-splitter --plan P --stage split --status skipped --data '{"why": "<gate | no-tasks | split=never | user>"}'`
   (`no-tasks`: `gate` exit `1`, the plan has no `### Task N:` headings).
 - **Split done** (step 7 with `scope = none`, or step 8 after `verify-status` exit 0):
-  `J journal-event <journal> --skill plan-splitter --plan P --stage split --status done --input PLAN --artifact roadmap=<BASE>-roadmap.md --artifact parts[]=<BASE>-a.md --artifact parts[]=<BASE>-b.md ... --artifact split_method=script`
+  `J journal-event <journal> --skill plan-splitter --plan P --stage split --status done --input PLAN --artifact roadmap=<BASE>-roadmap.md --artifact parts[]=<BASE>-a.md --artifact parts[]=<BASE>-b.md ... --artifact split_method=script --artifact "parts_table=<id>: <title> — tasks <ids>; depends <ids>; group <g>; weight <w> | …"`
   (one `parts[]` per part; paths relative to the journal's directory, forward slashes;
-  `split_method=script` tells `chain_tool.py run-stats` that the stage read the task list, not the plan). The batch
+  `split_method=script` tells `chain_tool.py run-stats` that the stage read the task list, not the plan; `parts_table` is the split table of step 4 as one string, the parts separated by ` | ` and `depends —` for none: each event replaces it, so a new split after drift leaves no row of the old one). The batch
   verification of step 8 belongs to this stage: plan-iterative-revision writes no stage events on
   a roadmap.
 - **No usable split** (second rejection of the draft, step 6 failing after 3 rounds):

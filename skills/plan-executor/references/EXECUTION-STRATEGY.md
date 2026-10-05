@@ -29,7 +29,7 @@ Off unless the launch names a `light` model. `unit-begin`'s `strategy.delegable`
 
 1. The repository: `<repo>` (absolute path); the unit's text: `text` of `unit-begin`, verbatim.
 2. Its files: the `path` of every entry of `files`, relative to `<repo>` (`lines` are hints).
-3. Change only these files and write only inside `<repo>`: every path relative to `<repo>`, never an absolute path, a `..` path or a path in another folder; run the commands of the steps and keep their output.
+3. Change only these files and write only inside `<repo>`: every path relative to `<repo>`, never an absolute path, a `..` path or a path in another folder; run the commands of the steps and keep their output. Edit code that holds `\n`, `\\` or regular expressions only with the Edit or Write tool or a script file, never through a bash heredoc, which folds the backslashes.
 4. Return every path you wrote, created files included, relative to `<repo>`, and the output of every command you ran.
 5. Do not read the plan, do not call `executor_tool.py` (no `unit-finish`), do not commit or run other git commands that write, do not reach any database, API or remote service.
 

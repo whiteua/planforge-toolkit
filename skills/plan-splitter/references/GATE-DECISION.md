@@ -9,7 +9,7 @@ tasks for it.
 `split` from the chain settings of the source plan (SKILL.md, Inputs) comes first: `always` →
 split without the gate; `never` → the splitter is not needed; `auto`, or no settings → run the
 gate. In a chain with `split=auto` the runner calls the same gate (`gate_verdict`) before it
-launches the splitter and skips the stage without an agent on `keep`.
+launches the splitter and skips the stage without an agent on `keep`, and on `borderline` when `silent_verdict` is `keep`.
 
 ## Factors
 
@@ -36,6 +36,10 @@ equal. The result carries `factors`, `thresholds` and one `reasons` line per fac
 `borderline` is the only case the model decides: from `brainstorm_tool.py plan-tasks PLAN` (ids,
 titles, files, refs, sizes), never from the plan text. Prefer "keep" when the tasks form one
 module and a linear chain; split when they fall into groups that each fit one agent pass.
+
+Without a confirmation channel (a chain run, a subagent call) the model does not decide `borderline`:
+`silent_verdict` does — `keep` when `task_count` ≤ 40 and `plan_bytes` ≤ 150 000 (`--split-tasks`,
+`--split-bytes`), else `split`; for `keep` and `split` it equals `verdict`. Nobody is asked about it.
 
 ## Outcomes
 

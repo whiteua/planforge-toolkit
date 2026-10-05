@@ -83,8 +83,8 @@ and the chain runner. `J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/b
       without drift;
     - no such question → say the plan is already written and go to 7. Execution Handoff; a
       rewrite the user still asks for runs without stage events (say so in one line).
-- **Continuation**, right after the `running` event of Start when the stage was `running` or `failed` and the plan
-  file exists: `J plan-tasks <plan>`. `incomplete: false` → the plan is written anew, as before. `incomplete: true`
+- **Continuation**, right after the `running` event of Start when the stage was `running`, `failed` or `stopped`
+  (`stopped`: after its questions were answered and applied) and the plan file exists: `J plan-tasks <plan>`. `incomplete: false` → the plan is written anew, as before. `incomplete: true`
   (the writing marker is in the file: a writer was cut off) → compare `marker_spec_sha` with the 12 hex in
   `writing_marker` of `plan-path`:
   - equal (the spec did not change) → keep the file: read it, redo 3. File Structure only for the tasks still to

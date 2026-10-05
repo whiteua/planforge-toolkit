@@ -47,6 +47,18 @@ Two host tools let a stop of the runner reach the user away from the terminal. A
 - **Push:** one line, in the dialogue language, when the loop stops on questions and when the summary of a finished run is ready (LOOP.md, 7. End), e.g. "plan-refactoring-02: stopped, 2 questions — discuss" or "plan-refactoring-02: run complete". Nothing else is pushed: no progress lines, no push per question. The push is a host call, not a write; the runner sends it only at the End, when no audit agent runs.
 - **Questions with options:** the choices of the start (START.md: the card's confirm / edit, the start commit's yes / no, continue here / stop) and the question of `discuss` (DISCUSS.md: the options of one journal question) go through the question tool, the options in the dialogue language with one line of explanation each and the recommended one first; the user's own words stay possible. The tokens recorded in the journal stay as DISCUSS.md says.
 
+## Host errors
+
+A host error is an error of the tool that launched the agent, not the agent's answer: an API error (529 overloaded, 429 rate limit, a 5xx), a dropped connection, the tool's own time-out. Its text goes to `C host-wait` (LOOP.md, After the agents, 3); the agent's final text never does, even when it names an error.
+
+| Profile | A host error is | How the runner waits `wait_seconds` |
+|---|---|---|
+| `claude-code` | the `Agent` tool's result marked as an error (`API Error: …`, a dropped stream, the tool's time-out), not the subagent's final text | a background `sleep <wait_seconds>` (Bash with `run_in_background`), heartbeating meanwhile (LOOP.md, Session mark); on its completion notice, `run-next` |
+| `github-copilot` | the `task` tool's error result (Unverified) | `sleep` in pieces of at most 600 s, `C run-session <journal> --heartbeat --id <id>` between them |
+| `fallback` | the failure of the `Skill` call itself (Unverified) | as `github-copilot` |
+
+A host with no way to wait (no shell, no `sleep`) treats the first host error as exhausted: no `host-wait`, at once `J journal-question <journal> --skill plan-chain-runner --plan <plan> --spec <spec> --stage <stage> --text "stage-failed: <stage> host error, this host cannot wait: <error text>" --option retry --option stop`.
+
 ## Models and effort
 
 - The settings file `~/.planforge/runner.json` (`PLANFORGE_HOME` replaces `~/.planforge`) holds per profile `parallel` and per role `model`, `effort` and an optional `fallback`, and for `execution` an optional `light`; `assets/runner.example.json` shows the format, with full model ids for `claude-code` (they pin the version; Pinned models). `C settings-load --profile <profile>` fills the roles the file does not name from the built-in defaults.

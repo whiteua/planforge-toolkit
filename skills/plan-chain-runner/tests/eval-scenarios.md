@@ -306,3 +306,38 @@ given to the subagent as fixed JSON when the script is not under test.
   names g-2 as "in the roadmap, not in this run", not as an added spec; "Apply" → `run-init` with g-1 and g-3 only.
 - **Red flags (FAIL):** g-2 named as added or passed to `run-init`; `subset-check` without `--spec`; `spec-check` or
   `journal-path --create` for g-2 without the user adding it.
+
+## Scenario 24: A host error is waited out, then the stage repeats
+
+- **Setup:** Profile `claude-code`; the writer of plan A was launched; the `Agent` tool returns an error result
+  `API Error: 529 {"type":"overloaded_error"}`; the journal still shows `writing` `running`.
+- **Trigger:** The runner handles the return (LOOP.md, After the agents, 3), and later the host keeps failing for an hour.
+- **Expected (PASS):** `C host-wait <journal> --plan a-impl --stage writing --error "API Error: 529 …"` → `wait_seconds: 60`;
+  no `not-confirmed:` question; the pair stays in the in-flight set; a background `sleep 60` with heartbeats; then
+  `run-next` without the pair returns the same action, launched with the same brief, without `writing-resume`; the
+  runner writes no stage event. After an hour `exhausted: true`: `run-next` returns `ask` `stage-failed: writing` with
+  `host_error`, the question names the stage, the plan, the attempts, the minutes and the error.
+- **Red flags (FAIL):** `host-wait` with the agent's own final text; a `not-confirmed:` question during the pause; a
+  relaunch before `wait_until`; the End or `run-session --end` during a host wait; a stage event written by the runner
+  while waiting.
+
+## Scenario 25: A writer without progress stops on a question
+
+- **Setup:** Plan A's `writing` is `failed`; its plan file carries the marker; `run-next` returns `writing` with
+  `resume: true`. Each relaunched writer is cut off before it adds a task.
+- **Trigger:** The loop relaunches the writer.
+- **Expected (PASS):** `C writing-resume <journal> --plan a-impl` before every relaunch; after the third equal record
+  `run-next` returns `ask` `stage-failed: writing`, recorded with `J journal-question … --spec <spec>`; no fourth
+  relaunch; after `retry` in `discuss` and `continue` the writer is relaunched with `writing-resume` again.
+- **Red flags (FAIL):** A relaunch without `writing-resume`; `writing-resume` after a host wait; a fourth relaunch on
+  the same plan bytes; the plan edited by the runner.
+
+## Scenario 26: Execution waits for another plan's revision
+
+- **Setup:** Three plans. A reached `execution`; B's revision agent is in flight; C's revision has not started.
+- **Trigger:** `run-next` after B's launch, and again after B's revision ends.
+- **Expected (PASS):** First A waits with `reading-busy: b-impl`, C with `code-busy: a-impl`, B goes on. After B's
+  revision ends, A's execution starts, and C's revision starts after A's commit; `status` lists `reading-busy` as a
+  wait that needs no action.
+- **Red flags (FAIL):** A's execution launched while B's revision runs; C's revision started before A takes the code
+  stages; `reading-busy` reported as a stop with a way out by hand.

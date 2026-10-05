@@ -401,6 +401,8 @@ Choose most relevant language:
 
 You're good at porting - one great example is enough.
 
+**Editing code and scripts:** change code that holds `\n`, `\\` or regular expressions only with the Edit or Write tool or a script file, never through a bash heredoc (`cat <<EOF > file`, `python - <<EOF`): the shell folds the backslashes, and the file differs from what you wrote.
+
 ## File Organization
 
 ### Self-Contained Skill

@@ -4,6 +4,7 @@ Run: python -m pytest skills/plan-chain-runner/tests/test_chain_tool.py -q
 """
 import argparse
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -1622,13 +1623,14 @@ class WritingResumeTest(_T2Case):
         self.assertEqual([(a["stage"], a.get("resume")) for a in result["actions"]], [("writing", True)])
         self.assertNotIn("running", result["actions"][0])
 
-    def test_no_resume_without_the_marker_or_a_running_writing(self):
+    def test_failed_and_stopped_resume_too_but_not_without_the_marker(self):  # spec plan-refactoring-03
         path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")])
         self.write_plan(marker=False)
         self.assertNotIn("resume", ct.run_next(path, 1)["actions"][0])
-        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="failed")])
         self.write_plan(marker=True)
-        self.assertNotIn("resume", ct.run_next(path, 1)["actions"][0])
+        for status in ("failed", "stopped"):
+            path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing=status)])
+            self.assertTrue(ct.run_next(path, 1)["actions"][0].get("resume"), status)
         path = self.journal(["a-spec.md"])
         self.assertNotIn("resume", ct.run_next(path, 1)["actions"][0])
 
@@ -2295,6 +2297,18 @@ class SplitGateTest(unittest.TestCase):
         step = self.step(FIXTURE_PLAN.read_text(encoding="utf-8"))
         self.assertEqual((step["kind"], step["why"]), ("skip", "gate: keep (3 tasks, 2 KB, 2 modules, linear)"))
 
+    BORDERLINE = "# P\n\n" + "".join(f"### Task {n}: t{n}\n\n**Files:**\n- Modify: `m{n % 2}/s/f{n}.py`\n\n"
+                                     for n in range(1, 31))
+
+    def test_borderline_within_the_budget_is_kept_without_an_agent(self):  # spec plan-refactoring-03
+        step = self.step(self.BORDERLINE)
+        self.assertEqual(step["kind"], "skip")
+        self.assertTrue(step["why"].startswith("gate: borderline → keep (30 tasks, "), step["why"])
+        self.assertTrue(step["why"].endswith(" KB, 2 modules, linear; budget 40 tasks / 150 KB)"), step["why"])
+        over = self.BORDERLINE + "".join(f"### Task {n}: t{n}\n\n**Files:**\n- Modify: `m{n % 2}/s/f{n}.py`\n\n"
+                                         for n in range(31, 46))
+        self.assertEqual(self.step(over)["kind"], "run")
+
     def test_split_runs_the_splitter(self):
         step = self.step(WIDE_PLAN)
         self.assertEqual((step["kind"], step["skill"], step.get("warnings")), ("run", "plan-splitter", None))
@@ -2774,6 +2788,339 @@ class Spec2RunnerDocsTest(unittest.TestCase):
         self.assertNotIn("g-2 → g-3", text)
         self.assertIn("## Scenario 22: A stop on questions sends one push", text)
         self.assertIn("## Scenario 23: A changed roadmap in a run of part of its specs", text)
+
+
+def _host_record(plan_id, stage, wait, at_event=0, until="2026-10-05T10:02:00Z", total=None, **extra):
+    """A valid runner.host_errors record (spec plan-refactoring-03); `extra` adds or replaces keys."""
+    return dict({"plan": plan_id, "stage": stage, "at": "2026-10-05T10:00:00Z", "error": "API Error: 529 overloaded",
+                 "attempt": 1, "wait_seconds": wait, "wait_until": until,
+                 "waited_total": wait if total is None else total, "at_event": at_event}, **extra)
+
+
+class _HostCase(_T2Case):
+    """_T2Case at a fixed clock, 2026-10-05T10:00:00Z, with a helper that sets runner lists in the journal file."""
+    NOW = "2026-10-05T10:00:00Z"
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(ct, "_now", return_value=ct._parse_iso(self.NOW))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def marks(self, path, **lists):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["runner"].update(lists)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return path
+
+
+class HostHelpersTest(unittest.TestCase):
+    def test_host_error_texts(self):
+        for text in ('API Error: 529 {"type":"overloaded_error"}', "API Error: 429 rate_limit_error",
+                     "API Error: 503 Service Unavailable", "HTTP 502 Bad Gateway", "Connection reset by peer",
+                     "socket hang up", "Request timed out", "Tool timeout after 600000ms"):
+            self.assertTrue(ct.HOST_ERROR_RE.search(text), text)
+        for text in ("Plan written: 28 tasks", "API Error: 400 invalid_request_error", "stage done, 3 files changed"):
+            self.assertIsNone(ct.HOST_ERROR_RE.search(text), text)
+
+    def test_time_and_plan_entry(self):
+        self.assertEqual(ct._iso_at(ct._parse_iso("2026-10-05T10:00:00Z") + 90), "2026-10-05T10:01:30Z")
+        data = {"plans": [{"id": "a-impl"}]}
+        self.assertIs(ct._plan_entry_of(data, "docs/a-impl.md"), data["plans"][0])
+        with self.assertRaisesRegex(ct.InputError, "^unknown-plan: b-impl"):
+            ct._plan_entry_of(data, "b-impl")
+
+
+class HostSeriesTest(unittest.TestCase):
+    def test_series_follows_the_stage_events(self):
+        events = [_t2_event("01:00:00", "a-impl", "writing", "stage-start"),
+                  _t2_event("01:01:00", "a-impl", "revision", "stage-start"),
+                  _t2_event("01:02:00", "a-impl", "writing", "question")]
+        data = {"events": events, "runner": {"host_errors": [
+            _host_record("a-impl", "writing", 60, at_event=0), _host_record("a-impl", "writing", 120, at_event=1),
+            _host_record("b-impl", "writing", 300, at_event=3)]}}
+        self.assertEqual((ct._last_stage_move(data, "a-impl", "writing"), ct._last_stage_move(data, "a-impl", "audit")),
+                         (0, -1))
+        self.assertEqual([item["wait_seconds"] for item in ct._host_series(data, "a-impl", "writing")], [120])
+
+    def test_a_retry_answer_starts_a_new_series(self):
+        retry = _t2_question("Q1", "a-impl", "writing", "stage-failed: writing host errors", answer="retry")
+        events = [_t2_event("01:00:00", "a-impl", "writing", "stage-end"),
+                  _t2_event("01:02:00", "a-impl", "writing", "answer", id="Q1", answer="retry")]
+        records = [_host_record("a-impl", "writing", 60, at_event=1), _host_record("a-impl", "writing", 120, at_event=2)]
+        data = {"events": events, "questions": [retry], "runner": {"host_errors": records}}
+        self.assertEqual(ct._host_series_start(data, "a-impl", "writing"), 1)
+        self.assertEqual([item["wait_seconds"] for item in ct._host_series(data, "a-impl", "writing")], [120])
+
+    def test_host_item_appends_a_record(self):
+        now = ct._parse_iso("2026-10-05T10:00:00Z")
+        doc = {"events": [{}], "runner": {"sessions": []}}
+        item = ct._host_item(doc, "j", "a-impl", "writing", " API Error: 529 ", now, 60, 1, 60)
+        self.assertEqual(item, _host_record("a-impl", "writing", 60, at_event=1, until="2026-10-05T10:01:00Z",
+                                            error="API Error: 529"))
+        doc["events"].append({"plan": "a-impl", "stage": "writing", "kind": "stage-end"})
+        last = ct._host_item(doc, "j", "a-impl", "writing", "x", now, 0, 2, 60, exhausted=True)
+        self.assertEqual(last["exhausted_for"], {"plan": "a-impl", "stage": "writing", "attempt": 2, "event": 1})
+        self.assertEqual(len(doc["runner"]["host_errors"]), 2)
+
+
+class HostExhaustTest(_HostCase):
+    def test_the_stage_fails_under_the_runner_and_is_marked(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md")])
+        bt = ct._brainstorm()
+        item = ct._host_exhaust(path, "a-impl", "writing", "pending", "API Error: 529", ct._now(), 10, 3600)
+        data = bt.journal_load(path)
+        self.assertEqual(data["plans"][0]["stages"]["writing"]["status"], "failed")
+        self.assertEqual([(e["skill"], e["kind"], e["data"]) for e in data["events"]],
+                         [("plan-chain-runner", "stage-start", {"why": "host-error", "from": "pending", "to": "running"}),
+                          ("plan-chain-runner", "stage-end", {"why": "host-error", "from": "running", "to": "failed"})])
+        self.assertEqual((item["wait_seconds"], item["waited_total"], item["at_event"]), (0, 3600, 2))
+        self.assertEqual(item["exhausted_for"], {"plan": "a-impl", "stage": "writing", "attempt": 10, "event": 1})
+        self.assertEqual(data["runner"]["host_errors"], [item])
+        self.assertEqual(bt.journal_validate(path), {"ok": True, "errors": []})
+        self.assertEqual(bt.journal_show(path)["plans"][0]["owner"], "plan-writing")
+
+    def test_a_running_stage_fails_in_one_step(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")])
+        ct._host_exhaust(path, "a-impl", "writing", "running", "API Error: 529", ct._now(), 3, 3600)
+        events = ct._brainstorm().journal_load(path)["events"]
+        self.assertEqual([(e["kind"], e["data"]["from"], e["data"]["to"]) for e in events],
+                         [("stage-end", "running", "failed")])
+
+    def test_a_stopped_stage_with_an_open_question_is_a_journal_error(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="stopped")],
+                            questions=[_t2_question("Q1", "a-impl", "writing", "which?")])
+        bt = ct._brainstorm()
+        with self.assertRaisesRegex(bt.JournalError, "^open-questions: Q1"):
+            ct._host_exhaust(path, "a-impl", "writing", "stopped", "API Error: 529", ct._now(), 2, 3600)
+        self.assertNotIn("host_errors", bt.journal_load(path)["runner"])
+
+
+class HostWaitTest(_HostCase):
+    ERROR = "API Error: 529 overloaded"
+
+    def test_pauses_grow_to_an_hour_then_the_stage_fails(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md")])
+        waits = [ct.host_wait(path, "a-impl.md", "writing", self.ERROR) for _ in range(9)]
+        self.assertEqual([w["wait_seconds"] for w in waits], [60, 120, 300, 600, 600, 600, 600, 600, 120])
+        self.assertEqual(waits[0], {"ok": True, "host_error": True, "attempt": 1, "wait_seconds": 60,
+                                    "waited_total": 60, "wait_until": "2026-10-05T10:01:00Z", "exhausted": False})
+        self.assertEqual((waits[-1]["attempt"], waits[-1]["waited_total"]), (9, 3600))
+        last = ct.host_wait(path, "a-impl", "writing", self.ERROR)
+        self.assertEqual((last["exhausted"], last["attempt"], last["waited_total"]), (True, 10, 3600))
+        bt = ct._brainstorm()
+        data = bt.journal_load(path)
+        self.assertEqual(data["plans"][0]["stages"]["writing"]["status"], "failed")
+        self.assertTrue(ct.host_wait(path, "a-impl", "writing", self.ERROR)["exhausted"])  # nothing new
+        self.assertEqual(bt.journal_load(path)["runner"]["host_errors"], data["runner"]["host_errors"])
+        bt.journal_event(path, "plan-writing", "a-impl", "writing", "running")  # retry: a new series
+        again = ct.host_wait(path, "a-impl", "writing", self.ERROR)
+        self.assertEqual((again["attempt"], again["wait_seconds"], again["exhausted"]), (1, 60, False))
+
+    def test_a_retry_answer_starts_a_new_series_without_a_stage_move(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md")])
+        for _ in range(10):  # the launch fails every time, the stage never starts: the 10th call exhausts
+            ct.host_wait(path, "a-impl", "writing", self.ERROR)
+        bt = ct._brainstorm()
+        bt.journal_question(path, "plan-chain-runner", "a-impl", "writing", "stage-failed: writing host errors",
+                            options=["retry", "stop"], answer="retry")
+        again = ct.host_wait(path, "a-impl", "writing", self.ERROR)  # no stage-start in between
+        self.assertEqual((again["attempt"], again["wait_seconds"], again["exhausted"]), (1, 60, False))
+
+    def test_not_a_host_error_or_not_open(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", done=("writing",))])
+        with open(path, "rb") as fh:
+            before = fh.read()
+        self.assertEqual(ct.host_wait(path, "a-impl", "revision", "Plan reviewed: 2 issues"),
+                         {"ok": True, "host_error": False})
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        with self.assertRaisesRegex(ct.ChainError, "^stage-not-open: a-impl writing is done"):
+            ct.host_wait(path, "a-impl", "writing", self.ERROR)
+        with self.assertRaisesRegex(ct.InputError, "^unknown-plan: b-impl"):
+            ct.host_wait(path, "b-impl", "writing", self.ERROR)
+        with self.assertRaisesRegex(ct.InputError, "^unknown-stage: build"):
+            ct.host_wait(path, "a-impl", "build", self.ERROR)
+
+
+class HostWaitCliTest(JournalCase):
+    def test_exit_codes_and_run_init_keeps_the_marks(self):
+        folder, journal = self.make_journal("a-spec.md", "b-spec.md")
+        self.assertEqual(self.init(journal, folder)[0], 0)
+        bt = ct._brainstorm()
+        bt.journal_event(journal, "plan-writing", os.path.join(folder, "a-impl.md"), "writing", "running",
+                         spec=os.path.join(folder, "a-spec.md"))
+        code, out = self.run_cli("host-wait", journal, "--plan", "a-impl", "--stage", "writing",
+                                 "--error", "API Error: 529 overloaded")
+        self.assertEqual((code, out["host_error"], out["attempt"], out["wait_seconds"]), (0, True, 1, 60))
+        self.assertEqual(self.run_cli("host-wait", journal, "--plan", "z-impl", "--stage", "writing",
+                                      "--error", "x")[0], 2)
+        bt.journal_event(journal, "plan-writing", "a-impl", "writing", "done")
+        code, out = self.run_cli("host-wait", journal, "--plan", "a-impl", "--stage", "writing", "--error", "x")
+        self.assertEqual((code, out["errors"][0].startswith("stage-not-open: ")), (1, True))
+        marks = bt.journal_load(journal)["runner"]["host_errors"]
+        self.assertEqual(self.init(journal, folder)[0], 0)
+        self.assertEqual(bt.journal_load(journal)["runner"]["host_errors"], marks)
+        self.assertEqual(bt.journal_validate(journal), {"ok": True, "errors": []})
+
+
+class HostRunNextTest(_HostCase):
+    def test_the_pair_waits_until_wait_until(self):
+        path = self.journal(["a-spec.md", "b-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")])
+        self.marks(path, host_errors=[_host_record("a-impl", "writing", 120)])
+        result = ct.run_next(path, 3)
+        self.assertEqual([(a["plan"], a["stage"]) for a in result["actions"]], [("b-impl.md", "writing")])
+        self.assertEqual([(w["plan"], w["reason"]) for w in result["waiting"]], [("a-impl.md", "host-wait: 120s")])
+        self.assertEqual(ct.run_next(path, 3, ["a-impl:writing"])["waiting"][0]["reason"], "host-wait: 120s")
+        with mock.patch.object(ct, "_now", return_value=ct._parse_iso("2026-10-05T10:02:00Z")):
+            self.assertEqual([(a["plan"], a["stage"]) for a in ct.run_next(path, 3)["actions"]],
+                             [("a-impl.md", "writing"), ("b-impl.md", "writing")])
+
+    def test_a_host_wait_is_not_blocked(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")])
+        self.marks(path, host_errors=[_host_record("a-impl", "writing", 120)])
+        result = ct.run_next(path, 3)
+        self.assertEqual((result["actions"], result["done"], result["blocked"]), ([], False, False))
+
+
+class HostExhaustedRunNextTest(_HostCase):
+    def test_an_exhausted_stage_asks_at_once_and_retry_runs_it(self):
+        entry = _t2_plan("a-spec.md", writing="failed")
+        entry["stages"]["writing"].update(started_at="2026-10-05T09:00:00Z", finished_at="2026-10-05T10:00:00Z")
+        events = [_t2_event("09:00:00", "a-impl", "writing", "stage-start", **{"from": "pending", "to": "running"}),
+                  _t2_event("10:00:00", "a-impl", "writing", "stage-end", **{"from": "running", "to": "failed"})]
+        mark = _host_record("a-impl", "writing", 0, at_event=2, total=3600, attempt=10,
+                            exhausted_for={"plan": "a-impl", "stage": "writing", "attempt": 10, "event": 1})
+        path = self.marks(self.journal(["a-spec.md"], plans=[entry], events=events), host_errors=[mark])
+        action = ct.run_next(path, 1)["actions"][0]
+        self.assertEqual((action["kind"], action["prefix"], action["options"]),
+                         ("ask", "stage-failed: writing", ["retry", "stop"]))
+        self.assertEqual(action["host_error"], {"attempt": 10, "waited_total": 3600, "error": "API Error: 529 overloaded"})
+        retry = _t2_question("Q1", "a-impl", "writing", "stage-failed: writing host errors", answer="retry",
+                             at="2026-10-05T10:05:00Z")
+        path = self.marks(self.journal(["a-spec.md"], plans=[entry], events=events, questions=[retry]),
+                          host_errors=[mark])
+        self.assertEqual(ct.run_next(path, 1)["actions"][0]["kind"], "run")
+        moved = {"events": events + [_t2_event("10:06:00", "a-impl", "writing", "stage-start")],
+                 "runner": {"host_errors": [mark]}}
+        self.assertIsNone(ct._host_exhausted(moved, "a-impl", "writing"))
+
+
+class WritingResumeCommandTest(_T2Case):
+    """Spec plan-refactoring-03: writing-resume records the plan file before a writer is relaunched."""
+    PLAN = WritingResumeTest.PLAN
+    write_plan = WritingResumeTest.write_plan
+
+    def test_records_tasks_bytes_and_sha256(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")])
+        self.write_plan(marker=True)
+        with open(os.path.join(self.tmp, "a-impl.md"), "rb") as fh:
+            raw = fh.read()
+        record = {"plan": "a-impl", "tasks": 1, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                  "at_event": 0}
+        self.assertEqual(ct.writing_resume(path, "a-impl.md"), dict({"ok": True}, **record))
+        data = ct._brainstorm().journal_load(path)
+        self.assertEqual(data["runner"]["writing_resumes"], [record])
+        self.assertEqual(ct._brainstorm()._journal_structure_errors(data), [])
+
+    def test_no_marker_and_no_plan_file(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")])
+        self.write_plan(marker=False)
+        code, out = self.run_cli("writing-resume", path, "--plan", "a-impl")
+        self.assertEqual((code, out["errors"][0]), (1, "no-marker: a-impl.md"))
+        os.remove(os.path.join(self.tmp, "a-impl.md"))
+        code, out = self.run_cli("writing-resume", path, "--plan", "a-impl")
+        self.assertEqual((code, out["errors"][0].startswith("plan-missing: ")), (2, True))
+        self.assertNotIn("writing_resumes", ct._brainstorm().journal_load(path)["runner"])
+
+
+class WritingStallTest(_T2Case):
+    """Spec plan-refactoring-03: three writing-resume records without progress turn the resume into stage-failed."""
+    PLAN = WritingResumeTest.PLAN
+    write_plan = WritingResumeTest.write_plan
+    RECORD = {"plan": "a-impl", "tasks": 1, "bytes": 10, "sha256": "a" * 64, "at_event": 0}
+
+    def action(self, records, questions=(), events=()):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")], questions=questions,
+                            events=events)
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["runner"]["writing_resumes"] = list(records)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return ct.run_next(path, 1)["actions"][0]
+
+    def test_three_equal_records_ask(self):
+        self.write_plan(marker=True)
+        ask = self.action([self.RECORD] * 3)
+        self.assertEqual((ask["kind"], ask["prefix"], ask["options"]), ("ask", "stage-failed: writing", ["retry", "stop"]))
+        for change in ({"tasks": 2}, {"sha256": "b" * 64}):
+            self.assertTrue(self.action([self.RECORD, self.RECORD, dict(self.RECORD, **change)])["resume"], change)
+        self.assertTrue(self.action([self.RECORD] * 2)["resume"])
+
+    def test_retry_starts_the_count_again(self):
+        self.write_plan(marker=True)
+        retry = _t2_question("Q1", "a-impl", "writing", "stage-failed: writing no progress", answer="retry")
+        answer = _t2_event("02:00:00", "a-impl", "writing", "answer", id="Q1", answer="retry")
+        later = dict(self.RECORD, at_event=1)
+        self.assertTrue(self.action([self.RECORD] * 3, [retry], [answer])["resume"])
+        self.assertEqual(self.action([self.RECORD] * 3 + [later] * 3, [retry], [answer])["kind"], "ask")
+
+
+class ReadingBusyTest(_T2Case):
+    """Spec plan-refactoring-03: the next holder of the code stages waits for another plan's revision or split."""
+
+    def plans(self):
+        a = _t2_plan("a-spec.md", done=("writing", "revision", "split"))  # next: execution
+        b = _t2_plan("b-spec.md", done=("writing",), revision="running")
+        return a, b
+
+    def test_a_revision_in_flight_holds_the_next_holder(self):
+        a, b = self.plans()
+        result = ct.run_next(self.journal(["a-spec.md", "b-spec.md"], plans=[a, b]), 3, ["b-impl:revision"])
+        self.assertEqual((result["actions"], [(w["plan"], w["reason"]) for w in result["waiting"]]),
+                         ([], [("a-impl.md", "reading-busy: b-impl"), ("b-impl.md", "in-flight: revision")]))
+
+    def test_a_running_revision_goes_on_and_new_readers_wait(self):
+        a, b = self.plans()
+        steps, waiting = CandidatesTest.candidates(self, [a, b, _t2_plan("c-spec.md", done=("writing",))])
+        self.assertEqual(steps, [("b-impl.md", "revision", True)])
+        self.assertEqual(waiting, [("a-impl.md", "reading-busy: b-impl"), ("c-impl.md", "code-busy: a-impl")])
+
+    def test_after_the_reader_the_holder_then_the_others(self):
+        a = _t2_plan("a-spec.md", done=("writing", "revision", "split"))
+        b = _t2_plan("b-spec.md", done=("writing", "revision"))
+        c = _t2_plan("c-spec.md", done=("writing",))
+        steps, waiting = CandidatesTest.candidates(self, [a, b, c])
+        self.assertEqual((steps, waiting), ([("a-impl.md", "execution", False)],
+                                            [("b-impl.md", "code-busy: a-impl"), ("c-impl.md", "code-busy: a-impl")]))
+        steps, _ = CandidatesTest.candidates(self, [_t2_plan("a-spec.md", done=T2_STAGES), b, c])
+        self.assertIn(("c-impl.md", "revision", False), steps)
+
+
+class HostStatusTest(_HostCase):
+    def test_waits_name_reading_busy_and_host_wait(self):
+        plans = [_t2_plan("a-spec.md", done=("writing", "revision", "split")),
+                 _t2_plan("b-spec.md", done=("writing",), revision="running"), _t2_plan("c-spec.md", writing="running")]
+        path = self.journal(["a-spec.md", "b-spec.md", "c-spec.md"], plans=plans)
+        self.marks(path, host_errors=[_host_record("c-impl", "writing", 120)])
+        self.assertEqual([(w["plan"], w["reason"]) for w in ct.run_status(path)["waits"]],
+                         [("a-impl.md", "reading-busy: b-impl"), ("c-impl.md", "host-wait: 120s")])
+
+    def test_run_stats_counts_the_host_waits(self):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", writing="running")])
+        self.marks(path, host_errors=[_host_record("a-impl", "writing", 60),
+                                      _host_record("a-impl", "writing", 120, attempt=2, total=180),
+                                      _host_record("b-impl", "writing", 300)])
+        stages = ct.run_stats(path, None)["plans"][0]["stages"]
+        self.assertEqual((stages["writing"]["host_waits"], stages["writing"]["host_waited_seconds"]), (2, 180))
+        self.assertEqual((stages["audit"]["host_waits"], stages["audit"]["host_waited_seconds"]), (0, 0))
+        plan = os.path.join(self.tmp, "a-impl.md")
+        with open(plan, "w", encoding="utf-8") as fh:
+            fh.write("# P\n\n### Task 1: One\n")
+        self.assertIsNone(ct.run_stats(None, plan)["plans"][0]["stages"]["writing"]["host_waits"])
 
 
 if __name__ == "__main__":

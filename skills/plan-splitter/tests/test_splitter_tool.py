@@ -259,6 +259,15 @@ class TestGateVerdict(unittest.TestCase):
         self.assertEqual(verdict(_gate_plan(45, 2)), "borderline")
         self.assertEqual(verdict(_gate_plan(45, 2, refs=True)), "split")
 
+    def test_silent_verdict(self):  # spec plan-refactoring-03: a run without a confirmation channel
+        silent = lambda text: self.mod.gate_verdict(self.plan(text))["silent_verdict"]
+        self.assertEqual(self.mod.gate_verdict(FIXTURE)["silent_verdict"], "keep")
+        self.assertEqual(silent(_gate_plan(45, 4)), "split")
+        self.assertEqual(silent(_gate_plan(30, 2)), "keep")
+        self.assertEqual(silent(_gate_plan(45, 2)), "split")
+        self.assertEqual(silent(_gate_plan(30, 2) + "\n" + "x" * 150001 + "\n"), "split")
+        self.assertEqual(self.mod.gate_verdict(self.plan(_gate_plan(30, 2)))["verdict"], "borderline")
+
     def test_thresholds_change_the_verdict(self):
         self.assertEqual(self.mod.gate_verdict(FIXTURE, {"keep_tasks": 2})["verdict"], "borderline")
         split = self.mod.gate_verdict(FIXTURE, {"keep_tasks": 1, "split_tasks": 2, "modules": 1})

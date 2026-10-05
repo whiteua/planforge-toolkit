@@ -1632,6 +1632,16 @@ def _plan_id(plan_path):
     return name[:-3] if name.endswith(".md") else name
 
 
+def diffs_path(plan_path):
+    """The run's one diff report (spec plan-refactoring-03): `<X>-diffs.md` next to the master plan, X being its file
+    name without `-impl.md` (else without `.md`); a roadmap `<X>-impl-roadmap.md` names its source plan `<X>-impl.md`,
+    so a split plan and a whole one have the same report. FINALIZE and COMMIT write and record this file."""
+    base = _plan_id(plan_path)
+    if base.endswith("-impl"):
+        base = base[: -len("-impl")]
+    return str(Path(plan_path).resolve().parent / f"{base}-diffs.md")
+
+
 def _audit_fix_files(led, journal):
     """Repository-root-relative files the audit's fix loop changed: the journal's
     plans[<id>].stages.audit.artifacts.fix_files. The journal is `journal`, else the ledger's
@@ -1670,13 +1680,21 @@ def _audit_fix_files(led, journal):
     return sorted({_safe_rel_path(item) for item in raw})
 
 
-def run_diff_markdown(exec_dir, out_path, journal=None):
+def run_diff_markdown(exec_dir, out_path=None, journal=None):
     """The run's diff as a Markdown report (spec C): header, summary table, one diff block per
-    file; pipeline artifacts are excluded. The report file is overwritten (derived artifact).
+    file; pipeline artifacts are excluded. The report file is overwritten (derived artifact). Its path is
+    diffs_path of the ledger's plan_path: `out_path` None takes it, another path is diffs-path-mismatch
+    (exit 2) after the git checks, and nothing is written.
     With `journal`, the audit's fix files are diffed from the baseline to the working tree
     and marked."""
     info = run_diff(exec_dir)  # no-git and run-diff-unavailable come from here
     led = _load(exec_dir)
+    canonical = diffs_path(led["plan_path"])
+    if out_path is None:
+        out_path = canonical
+    elif os.path.normcase(os.path.realpath(out_path)) != os.path.normcase(os.path.realpath(canonical)):
+        raise ToolError(f"diffs-path-mismatch: {out_path} is not the run's diff report {canonical}", 2,
+                        markdown=canonical)
     baseline, last = info["baseline"], info["last"]
     root = os.path.realpath(_diff_git(led["workdir"], "rev-parse", "--show-toplevel").strip())
     plan = os.path.realpath(led["plan_path"])
@@ -1715,7 +1733,8 @@ def run_diff_markdown(exec_dir, out_path, journal=None):
     Path(out_path).write_bytes(text.encode("utf-8"))
     files = [{key: entry[key] for key in ("path", "old_path", "status", "added", "deleted", "binary", "fixed")}
              for entry in kept]
-    return {"ok": True, "path": str(Path(out_path).resolve()), "lang": lang, "baseline": baseline,
+    return {"ok": True, "path": str(Path(out_path).resolve()), "markdown": str(Path(out_path).resolve()),
+            "lang": lang, "baseline": baseline,
             "last": last, "files": files, "excluded": excluded, "fix_files": fix_files, "ignored": ignored}
 
 
@@ -2443,17 +2462,18 @@ def cmd_consent(args):
 
 
 def cmd_run_diff(args):
-    if args.include_fixes and not args.markdown:
+    if args.include_fixes and args.markdown is None:
         raise ToolError("include-fixes-needs-markdown: --include-fixes works with --markdown FILE", 2)
-    if args.markdown:
-        return run_diff_markdown(args.exec_dir, args.markdown, journal=args.include_fixes)
+    if args.markdown is not None:
+        return run_diff_markdown(args.exec_dir, args.markdown or None, journal=args.include_fixes)
     return run_diff(args.exec_dir)
 
 
 def _configure_run_diff(parser):
     parser.add_argument("exec_dir")
-    parser.add_argument("--markdown", metavar="FILE",
-                        help="write the diff report to FILE (overwritten); the output lists its files")
+    parser.add_argument("--markdown", nargs="?", const="", metavar="FILE",
+                        help="write the diff report to the run's one path, <X>-diffs.md next to the master plan "
+                             "(returned as markdown); a FILE other than that path is refused (diffs-path-mismatch)")
     parser.add_argument("--include-fixes", metavar="JOURNAL",
                         help="chain journal: add the audit's fix files, diffed up to the working tree")
 

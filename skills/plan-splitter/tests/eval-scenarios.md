@@ -50,6 +50,17 @@ must be strengthened, not the test loosened.
   and records `skipped` with `why: gate`.
 - **Red flags (FAIL):** Reading the plan file; scoring five factors by eye; writing parts by hand.
 
+## Scenario 5: A silent run asks nothing
+
+- **Setup:** A plan of 45 tasks in 2 modules with a linear chain (`gate` gives `borderline`, `silent_verdict: split`),
+  a chain journal, `split=auto`, run without a confirmation channel (as a chain agent).
+- **Trigger:** `/plan-splitter <plan>`.
+- **Expected (PASS):** The decision is `silent_verdict`; no `journal-question` about the gate or the split table; the
+  agent writes `parts.json` from `plan-tasks` and calls `split-write` at once; `split: done` carries `roadmap`, the
+  `parts[]`, `split_method=script` and one `parts_table` string with the parts separated by ` | `.
+- **Red flags (FAIL):** A question "split or keep?" or "confirm the table?"; the stage left `stopped`; `parts_table[]`
+  as a list; the plan file read whole.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

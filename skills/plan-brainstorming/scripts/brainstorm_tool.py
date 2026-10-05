@@ -1460,6 +1460,12 @@ RUNNER_SESSION_ENDS = ("stopped", "complete", "interrupted")
 RUNNER_START_COMMIT_RE = re.compile(r"^(?:[0-9a-f]{7,64}|declined|none)$")
 # runner.roadmap_sha256 (spec 10 of plan-refactoring-01): sha256 of the goal roadmap run-init read.
 RUNNER_ROADMAP_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# runner.host_errors and runner.writing_resumes (spec plan-refactoring-03): optional lists of chain_tool.py host-wait
+# and writing-resume; at_event = len(events) when written (the scheduler orders records by events, not by the clock).
+RUNNER_HOST_ERROR_KEYS = ("plan", "stage", "at", "error", "attempt", "wait_seconds", "wait_until", "waited_total",
+                          "at_event")
+RUNNER_EXHAUSTED_KEYS = ("plan", "stage", "attempt", "event")
+RUNNER_WRITING_RESUME_KEYS = ("plan", "tasks", "bytes", "sha256", "at_event")
 
 
 class JournalError(Exception):
@@ -2271,11 +2277,48 @@ def _runner_sessions_errors(sessions: Any) -> List[str]:
     return errors
 
 
+def _runner_mark_ok(name: str, value: Any) -> bool:
+    """One field of a host_errors / writing_resumes record or of exhausted_for: plan and error non-empty strings,
+    stage in STAGES, at and wait_until journal times, sha256 64 hex, attempt an int >= 1, the rest an int >= 0."""
+    if name in ("plan", "error"):
+        return isinstance(value, str) and bool(value.strip())
+    if name == "stage":
+        return value in STAGES
+    if name in ("at", "wait_until"):
+        return isinstance(value, str) and bool(JOURNAL_TIME_RE.fullmatch(value))
+    if name == "sha256":
+        return isinstance(value, str) and bool(RUNNER_ROADMAP_SHA_RE.match(value))
+    return isinstance(value, int) and not isinstance(value, bool) and value >= (1 if name == "attempt" else 0)
+
+
+def _runner_marks_errors(runner: Dict[str, Any]) -> List[str]:
+    """The optional runner.host_errors and runner.writing_resumes: every key of RUNNER_HOST_ERROR_KEYS /
+    RUNNER_WRITING_RESUME_KEYS (_runner_mark_ok), exhausted_for with RUNNER_EXHAUSTED_KEYS."""
+    errors: List[str] = []
+    for key, names in (("host_errors", RUNNER_HOST_ERROR_KEYS), ("writing_resumes", RUNNER_WRITING_RESUME_KEYS)):
+        items = runner.get(key, [])
+        if not isinstance(items, list):
+            errors.append(f"runner: '{key}' must be a list")
+            continue
+        for index, item in enumerate(items):
+            where = f"runner: {key}[{index}]"
+            if not isinstance(item, dict):
+                errors.append(f"{where}: must be an object")
+                continue
+            errors.extend(f"{where}: '{name}' missing or invalid" for name in names
+                          if not _runner_mark_ok(name, item.get(name)))
+            mark = item.get("exhausted_for")
+            if "exhausted_for" in item and not (key == "host_errors" and isinstance(mark, dict) and all(
+                    _runner_mark_ok(name, mark.get(name)) for name in RUNNER_EXHAUSTED_KEYS)):
+                errors.append(f"{where}: 'exhausted_for' invalid")
+    return errors
+
+
 def _runner_errors(runner: Any) -> List[str]:
     """Checks of the optional `runner` section (spec plan-chain-runner-2, section C): version,
     profile, specs, graph (membership, runner-graph-cycle), roles of models, start_commit, parallel,
-    roadmap and roadmap_sha256 (optional keys), sessions. Required keys: version, profile, specs, graph,
-    models, sessions."""
+    roadmap and roadmap_sha256 (optional keys), sessions. The optional host_errors and writing_resumes:
+    _runner_marks_errors. Required keys: version, profile, specs, graph, models, sessions."""
     if not isinstance(runner, dict):
         return ["runner: must be an object"]
     errors: List[str] = []
@@ -2303,6 +2346,7 @@ def _runner_errors(runner: Any) -> List[str]:
     if not (isinstance(digest, str) and RUNNER_ROADMAP_SHA_RE.match(digest)):
         errors.append("runner: 'roadmap_sha256' must be 64 lowercase hex digits")
     errors.extend(_runner_sessions_errors(runner.get("sessions")))
+    errors.extend(_runner_marks_errors(runner))
     return errors
 
 

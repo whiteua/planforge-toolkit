@@ -909,5 +909,15 @@ class TestDirtyCheckUntrackedFolders(RepoCase):
         self.assertFalse(self.detect(plan_dir="docs")["dirty"])
 
 
+class TestOneDiffReport(CommitCase):
+    def test_finalize_and_commit_share_one_report(self):  # spec plan-refactoring-03
+        self.commit_all()
+        self.run_plan({"app.py": "x = 2\n"})
+        finalize = self.tool.run_diff_markdown(self.exec_dir)["markdown"]
+        self.assertTrue(self.commit()["ok"])
+        self.assertEqual(self.tool.run_diff_markdown(self.exec_dir)["markdown"], finalize)
+        self.assertEqual(sorted(path.name for path in (self.repo / "docs").glob("*-diffs.md")), ["plan01-diffs.md"])
+
+
 if __name__ == "__main__":
     unittest.main()

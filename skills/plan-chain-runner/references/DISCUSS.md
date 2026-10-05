@@ -7,7 +7,7 @@
 1. Find the journal (SKILL.md, Commands); `C run-status <journal>`. A session is active and a stage `audit` is `running` → record nothing: say that an audit is running (any write to the journal or the working copy would invalidate it) and offer to come back when it has ended. Then `J journal-show <journal>`.
 2. No open questions → say so, list the `waits` of `run-status` if any (below), and offer `continue`.
 3. Group `open_questions` by plan, in the run's order (`run-status`); inside a plan by question id. One question per message.
-4. After the questions, the `waits` of `run-status`: plans that wait without an open question (`stage-failed: stop`, `not-confirmed: stop`, a `model:` answered `stop`, and the plans held by them with `code-busy: <plan id>`). For each say which stage stopped and how to lift the wait: run that stage by hand (`/<skill> <args>`, then `continue`), or fix the cause and run the stage by hand; the runner does not ask about it again.
+4. After the questions, the `waits` of `run-status`: plans that wait without an open question (`stage-failed: stop`, `not-confirmed: stop`, a `model:` answered `stop`, and the plans held by them with `code-busy: <plan id>`). For each say which stage stopped and how to lift the wait: run that stage by hand (`/<skill> <args>`, then `continue`), or fix the cause and run the stage by hand; the runner does not ask about it again. `reading-busy: <plan id>` and `host-wait: <N>s` are no stops: name the reason, no way out by hand.
 
 ## One question
 

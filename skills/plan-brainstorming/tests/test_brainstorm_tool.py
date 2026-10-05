@@ -1827,5 +1827,60 @@ class RoadmapCliTest(RoadmapCase):
         self.assertEqual(ft.roadmap_check(self.roadmap)[0]["warnings"], [])
 
 
+def _marks_runner(**changes):
+    """A valid runner section with one host-error record and one writing-resume record; `changes` replace keys."""
+    host = {"plan": "a-impl", "stage": "writing", "at": "2026-10-05T10:00:00Z", "error": "API Error: 529 overloaded",
+            "attempt": 1, "wait_seconds": 60, "wait_until": "2026-10-05T10:01:00Z", "waited_total": 60, "at_event": 3}
+    resume = {"plan": "a-impl", "tasks": 4, "bytes": 900, "sha256": "a" * 64, "at_event": 5}
+    runner = {"version": 1, "profile": "claude-code", "specs": [], "graph": {}, "models": {}, "sessions": [],
+              "host_errors": [host], "writing_resumes": [resume]}
+    runner.update(changes)
+    return runner, host, resume
+
+
+class RunnerMarksTest(unittest.TestCase):
+    """Spec plan-refactoring-03: runner.host_errors and runner.writing_resumes are optional and checked."""
+
+    def test_valid_marks_and_absent_lists(self):
+        runner, host, _ = _marks_runner()
+        self.assertEqual(ft._runner_errors(runner), [])
+        exhausted = dict(host, wait_seconds=0,
+                         exhausted_for={"plan": "a-impl", "stage": "writing", "attempt": 1, "event": 2})
+        self.assertEqual(ft._runner_errors(_marks_runner(host_errors=[exhausted])[0]), [])
+        bare = {key: value for key, value in runner.items() if key not in ("host_errors", "writing_resumes")}
+        self.assertEqual(ft._runner_errors(bare), [])
+
+    def test_each_rule(self):
+        _, host, resume = _marks_runner()
+        cases = [
+            ({"host_errors": {}}, "runner: 'host_errors' must be a list"),
+            ({"writing_resumes": ["x"]}, "runner: writing_resumes[0]: must be an object"),
+            ({"host_errors": [dict(host, at="2026-10-05 10:00")]}, "runner: host_errors[0]: 'at' missing or invalid"),
+            ({"host_errors": [dict(host, stage="build")]}, "runner: host_errors[0]: 'stage' missing or invalid"),
+            ({"host_errors": [dict(host, attempt=0)]}, "runner: host_errors[0]: 'attempt' missing or invalid"),
+            ({"host_errors": [{k: v for k, v in host.items() if k != "wait_until"}]},
+             "runner: host_errors[0]: 'wait_until' missing or invalid"),
+            ({"host_errors": [dict(host, exhausted_for={"plan": "a-impl"})]},
+             "runner: host_errors[0]: 'exhausted_for' invalid"),
+            ({"writing_resumes": [dict(resume, sha256="abc")]}, "runner: writing_resumes[0]: 'sha256' missing or invalid"),
+            ({"writing_resumes": [dict(resume, tasks=True)]}, "runner: writing_resumes[0]: 'tasks' missing or invalid"),
+        ]
+        for change, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(ft._runner_errors(_marks_runner(**change)[0]), [expected])
+
+
+class RunnerMarksSchemaTest(unittest.TestCase):
+    def test_schema_names_the_record_keys(self):
+        path = os.path.join(SCRIPTS, "..", "assets", "chain-journal.schema.json")
+        with open(path, encoding="utf-8") as fh:
+            props = json.load(fh)["definitions"]["runner"]["properties"]
+        host = props["host_errors"]["items"]
+        self.assertEqual(tuple(host["required"]), ft.RUNNER_HOST_ERROR_KEYS)
+        self.assertEqual(tuple(host["properties"]["exhausted_for"]["required"]), ft.RUNNER_EXHAUSTED_KEYS)
+        self.assertEqual(tuple(host["properties"]["stage"]["enum"]), ft.STAGES)
+        self.assertEqual(tuple(props["writing_resumes"]["items"]["required"]), ft.RUNNER_WRITING_RESUME_KEYS)
+
+
 if __name__ == "__main__":
     unittest.main()

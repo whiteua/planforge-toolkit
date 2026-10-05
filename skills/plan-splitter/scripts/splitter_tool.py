@@ -57,7 +57,8 @@ Subcommands:
   gate <plan> [--keep-tasks 20] [--keep-bytes 100000] [--split-tasks 40] [--split-bytes 150000] [--modules 3]
       Numeric split gate over brainstorm_tool.parse_plan_tasks: factors task_count, plan_bytes, modules
       (distinct Files folders two levels deep), dependency_shape (linear | groups by Preconditions refs);
-      verdict keep | split | borderline with reasons and thresholds. Exit 1 no-tasks; exit 2 for an
+      verdict keep | split | borderline with reasons and thresholds, and silent_verdict (borderline decided by the
+      budget: keep within --split-tasks and --split-bytes, else split). Exit 1 no-tasks; exit 2 for an
       unreadable plan, a bad flag value or plan-brainstorming not installed alongside.
       Errors of gate, split-write and validate-all print {"ok": false, "errors": [...]}.
 
@@ -628,7 +629,8 @@ def _gate_reason(name: str, value: int, keep: int, split: int) -> str:
 def gate_verdict(plan_path: str, thresholds: Optional[Dict[str, int]] = None) -> Dict[str, object]:
     """Numeric split gate over brainstorm_tool.parse_plan_tasks. keep: <= keep_tasks tasks, <= keep_bytes
     bytes and <= modules modules; split: (> split_tasks tasks or > split_bytes bytes) and (> modules modules
-    or dependency_shape 'groups'); otherwise borderline. Pure (no printing, no exit): plan-chain-runner
+    or dependency_shape 'groups'); otherwise borderline. silent_verdict decides borderline without a confirmation
+    channel: keep within split_tasks and split_bytes, else split. Pure (no printing, no exit): plan-chain-runner
     calls it in-process. Raises SplitterError: no-tasks (1), plan-unreadable or no parser (2)."""
     limits = dict(GATE_THRESHOLDS, **(thresholds or {}))
     parsed = _brainstorm_required().parse_plan_tasks(_read_plan(plan_path))
@@ -649,13 +651,17 @@ def gate_verdict(plan_path: str, thresholds: Optional[Dict[str, int]] = None) ->
         verdict = "split"
     else:
         verdict = "borderline"
+    # Without a confirmation channel nobody decides a borderline plan: the size budget does (spec plan-refactoring-03).
+    within = count <= limits["split_tasks"] and size <= limits["split_bytes"]
+    silent = verdict if verdict != "borderline" else ("keep" if within else "split")
     reasons = [
         _gate_reason("task_count", count, limits["keep_tasks"], limits["split_tasks"]),
         _gate_reason("plan_bytes", size, limits["keep_bytes"], limits["split_bytes"]),
         f"modules {modules} {'>' if modules > limits['modules'] else '<='} {limits['modules']}",
         f"dependency_shape {factors['dependency_shape']}",
     ]
-    return {"ok": True, "plan": plan_path, "verdict": verdict, "factors": factors, "thresholds": limits,
+    return {"ok": True, "plan": plan_path, "verdict": verdict, "silent_verdict": silent, "factors": factors,
+            "thresholds": limits,
             "reasons": reasons,
             "warnings": [f"malformed-task-heading: line {item['line']}" for item in parsed["malformed"]]}
 

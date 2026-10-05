@@ -99,7 +99,7 @@ must be strengthened, not the test loosened.
 - **Expected (PASS):** Finds the roadmap's ledger with `ledger-path <plan> --workdir <repo>`
   (`exists: true`, `matched: roadmap`; no `ledger-init`), sets `journal-event … --stage commit
   --status running --artifact declined=no --artifact empty=no` (`--reason recommit` when the stage
-  was `done`), rebuilds `<base>-diffs.md` with `run-diff <exec_dir> --markdown …
+  was `done`), rewrites the run's one diff report (`<X>-diffs.md`) with `run-diff <exec_dir> --markdown …
   --include-fixes <journal>`, writes the message file (`<type>(<scope>): …` with the plan name
   without `-impl.md` as the scope, the spec's Goal, the audit status `final`, «исправлено аудитом:
   src/app.py, src/util.py»), lists the two fixed files in Russian and waits. Only after an explicit

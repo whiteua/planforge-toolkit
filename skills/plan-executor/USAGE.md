@@ -51,7 +51,7 @@ In VS Code Copilot chat, type:
 BOOTSTRAP:  ledger-init  → units, ledger, baseline snapshot; you are told where the ledger lives
 LOOP:       unit-begin   → (external unit: asks you first) → execute the unit → gate → unit-finish
                            (pass: snapshot + done / fail: retry or stop)
-FINALIZE:   <base>-diffs.md (what this run changed), findings → journal + BACKLOG.md + <goal>-followups.json, propose plan-resolver
+FINALIZE:   <X>-diffs.md at the path run-diff returns (what this run changed), findings → journal + BACKLOG.md + <goal>-followups.json, propose plan-resolver
 COMMIT:     /plan-executor <plan> commit (after the audit) → diff report with the audit's fixes → commit-run → offer to prune snapshots
 ```
 
@@ -86,7 +86,7 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 - `<exec_dir>/progress.md` — human-readable progress
 
 - `BACKLOG.md` at the repository root — the same out-of-scope defects, appended to the plan's goal section (`/plan-brainstorming BACKLOG.md` starts the next cycle from them)
-- `<plan base>-diffs.md` next to the plan — the diff report: a summary table and one diff block per changed file, without the pipeline's own files (rebuilt with the audit's fixes in the `commit` mode; not written without git)
+- `<X>-diffs.md` next to the master plan `<X>-impl.md`, one for the plan and its roadmap (the path `run-diff --markdown` returns) — the diff report: a summary table and one diff block per changed file, without the pipeline's own files (rebuilt with the audit's fixes in the `commit` mode; not written without git)
 - `<goal>-chain.json` next to the spec — the chain journal: stages `execution`, `diffs`, `commit`, unit progress, open questions of a stopped run, findings, commits
 - `<goal>-followups.json` next to the journal — every out-of-scope defect of the goal, in the findings format `plan-brainstorming` accepts (`/plan-brainstorming <goal>-followups.json`)
 
@@ -123,7 +123,7 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 | `commit`: `index-not-empty` | Changes already staged in the index | Commit or unstage them yourself, then `commit` again |
 | `commit`: `mixed-files` | Files had your uncommitted work before the run, and the run changed them | Commit them by hand, or separate the changes |
 | `commit`: `foreign-changes` | Files changed after the run's last task and not by the audit | Accept them when asked, or stop |
-| `commit`: `baseline-head-unknown` | The ledger is older than the commit stage | Commit by hand; `<plan base>-diffs.md` lists the files |
+| `commit`: `baseline-head-unknown` | The ledger is older than the commit stage | Commit by hand; the diff report `<X>-diffs.md` lists the files |
 | `commit`: `run-incomplete` | A task is still `running` (the run was interrupted) | Resume the run with `/plan-executor <plan>`, then `commit` again |
 | `commit`: `failed-attempt` | A task failed and the files the commit would take differ from the last finished task (its half-done edits were not rolled back, or the files were changed outside the run) | The agent restores only these files to the last finished task (`checkpoint-restore --paths`, so the audit's fixes stay), then `commit` again; or commit by hand |
 | `commit`: `head-moved` | You switched to a branch that does not contain the commit the run started from | Switch back, or commit by hand |

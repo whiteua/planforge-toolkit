@@ -93,6 +93,10 @@ TIERS = ("Quick", "Standard", "Deep")
 # "> Tier: Quick", "> **Tier:** Quick" and "> **Tier**: Quick" are all accepted.
 TIER_RE = re.compile(r"^>\s*(?:\*\*)?Tier:?(?:\*\*)?:?\s*(?P<tier>[A-Za-z]+)\s*$")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
+# CommonMark code fence: three or more backticks or tildes after up to three spaces; the info string of a
+# backtick fence may not contain a backtick. A fence closes only on a line of the same character with at
+# least the opening length and nothing else, so a ```` block may hold ``` lines (F6/F13).
+FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 PLACEHOLDER_RE = re.compile(r"\b(TBD|TODO|FIXME)\b")
 NONE_TEXT = "(none)"
 # Size budget of one plan, shared by spec-check (volume), plan_tool.py plan-check (plan-oversized,
@@ -321,16 +325,35 @@ def check_locations(findings: List[Dict[str, Any]], root: str) -> List[str]:
     return warnings
 
 
+def _fence_scan(text: str) -> List[Tuple[int, str, str]]:
+    """(line number, raw line, kind) for every line: kind is `text` outside code fences, `fence` for an
+    opening or closing fence line, `code` inside a fence. Fences follow CommonMark: an opening fence of
+    N backticks or tildes is closed only by a line of the same character, at least N long, with nothing
+    else on it; an unclosed fence runs to the end of the text."""
+    result: List[Tuple[int, str, str]] = []
+    open_char = ""
+    open_len = 0
+    for number, raw in enumerate(text.splitlines(), start=1):
+        match = FENCE_OPEN_RE.match(raw)
+        if open_char:
+            closes = (match is not None and match.group("fence")[0] == open_char
+                      and len(match.group("fence")) >= open_len and not match.group("info").strip())
+            if closes:
+                open_char, open_len = "", 0
+                result.append((number, raw, "fence"))
+            else:
+                result.append((number, raw, "code"))
+        elif match is not None and not (match.group("fence")[0] == "`" and "`" in match.group("info")):
+            open_char, open_len = match.group("fence")[0], len(match.group("fence"))
+            result.append((number, raw, "fence"))
+        else:
+            result.append((number, raw, "text"))
+    return result
+
+
 def _unfenced_lines(text: str) -> List[Tuple[int, str]]:
     """(line number, right-stripped line) for every line outside code fences."""
-    lines: List[Tuple[int, str]] = []
-    in_fence = False
-    for number, raw in enumerate(text.splitlines(), start=1):
-        if FENCE_RE.match(raw):
-            in_fence = not in_fence
-        elif not in_fence:
-            lines.append((number, raw.rstrip()))
-    return lines
+    return [(number, raw.rstrip()) for number, raw, kind in _fence_scan(text) if kind == "text"]
 
 
 def _parse_chain(body: str, where: str, errors: List[str]) -> Dict[str, str]:
@@ -529,8 +552,10 @@ def parse_plan_tasks(text: str) -> Dict[str, Any]:
     text joined with newlines, without trailing blank lines. Task-like headings without `<id>:` go to
     `malformed`, repeated ids to `duplicates`; ids stay as written (consumers normalise them)."""
     lines = text.splitlines()
-    unfenced = _unfenced_lines(text)
+    scanned = _fence_scan(text)
+    unfenced = [(number, raw.rstrip()) for number, raw, kind in scanned if kind == "text"]
     visible = {number for number, _ in unfenced}
+    code = {number for number, _, kind in scanned if kind == "code"}
     headings: List[Tuple[int, int, str]] = []
     for number, line in unfenced:
         heading = PLAN_HEADING_RE.match(line)
@@ -563,7 +588,7 @@ def parse_plan_tasks(text: str) -> Dict[str, Any]:
             "files": _plan_task_files(plain),
             "refs": _plan_task_refs(plain),
             "size_bytes": len(body.encode("utf-8")),
-            "code_lines": sum(1 for n in inner if n not in visible and not FENCE_RE.match(lines[n - 1])),
+            "code_lines": sum(1 for n in inner if n in code),
             "sha1": hashlib.sha1(body.encode("utf-8")).hexdigest()[:8],
         })
     positions: Dict[str, List[int]] = {}
@@ -705,13 +730,9 @@ def check_spec(text: str) -> Dict[str, Any]:
     tier: Optional[str] = None
     positions: Dict[str, List[int]] = {}
     lines: List[Tuple[int, str]] = []
-    in_fence = False
 
-    for number, raw in enumerate(text.splitlines(), start=1):
-        if FENCE_RE.match(raw):
-            in_fence = not in_fence
-            continue
-        if in_fence:
+    for number, raw, kind in _fence_scan(text):
+        if kind != "text":
             continue
         line = raw.rstrip()
         lines.append((number, line))

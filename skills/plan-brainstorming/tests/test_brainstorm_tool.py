@@ -953,6 +953,54 @@ class PlanTasksTest(unittest.TestCase):
         self.assertEqual(ft.parse_plan_tasks("# Plan\n\n1. step\n"), {"tasks": [], "malformed": [], "duplicates": []})
 
 
+NESTED_FENCE_PLAN = "\n".join([
+    "### Task 1: Outer",
+    "text",
+    "````markdown",
+    "### Task 9: quoted inside a four-backtick block",
+    "```python",
+    "x = 1",
+    "```",
+    "more",
+    "````",
+    "after",
+    "### Task 2: Next",
+    "body",
+    "~~~",
+    "```",
+    "### Task 8: inside a tilde block",
+    "~~~",
+    "tail",
+])
+
+
+class NestedFenceTest(unittest.TestCase):
+    """F6/F13: a ```` block may hold ``` lines; a fence closes only on its own character and length."""
+
+    def test_nested_fences_do_not_split_tasks(self):
+        parsed = ft.parse_plan_tasks(NESTED_FENCE_PLAN)
+        self.assertEqual([(t["id"], t["line_start"], t["line_end"]) for t in parsed["tasks"]],
+                         [("1", 1, 10), ("2", 11, 17)])
+        self.assertEqual(parsed["malformed"], [])
+
+    def test_code_lines_count_only_lines_inside_fences(self):
+        parsed = ft.parse_plan_tasks(NESTED_FENCE_PLAN)
+        self.assertEqual([t["code_lines"] for t in parsed["tasks"]], [5, 2])
+
+    def test_unclosed_fence_runs_to_the_end(self):
+        parsed = ft.parse_plan_tasks("### Task 1: A\n````\n### Task 2: B\n```\nstill code\n")
+        self.assertEqual([(t["id"], t["line_end"]) for t in parsed["tasks"]], [("1", 5)])
+
+    def test_backtick_fence_with_backtick_in_info_is_text(self):
+        unfenced = ft._unfenced_lines("``` not a `fence`\n### Task 1: A\n")
+        self.assertEqual([number for number, _ in unfenced], [1, 2])
+
+    def test_spec_check_ignores_nested_fences(self):
+        spec = VALID_SPEC.replace("## Architecture\n", "## Architecture\n````markdown\n```\n# Goal\n```\n````\n", 1)
+        result = ft.check_spec(spec)
+        self.assertTrue(result["ok"], result["errors"])
+
+
 class PlanTaskBodyTest(unittest.TestCase):
     def test_code_lines_count_lines_inside_fences(self):
         parsed = ft.parse_plan_tasks(TASKS_PLAN)

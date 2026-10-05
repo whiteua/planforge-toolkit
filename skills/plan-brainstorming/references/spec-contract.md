@@ -126,6 +126,7 @@ an external system there still needs the user's explicit permission.
 |---|---|---|
 | goal / idea | goal file or chat input | user |
 | spec | `<plan-root>-spec.md`, next to the goal file | `plan-brainstorming` |
+| goal roadmap | `<goal>-roadmap.md` next to the specs and the journal (`<goal>` = the journal's goal); written after the last spec of a call, also for one spec (see Goal roadmap) | `plan-brainstorming` (`roadmap-write`; `roadmap-check`, `roadmap-parse`); reader: `plan-chain-runner` |
 | plan | `<plan-root>-impl.md`, same directory (`plan_tool.py plan-path`) | `plan-writing` |
 | execution result | code in the working tree; committed by the `commit` stage, `/plan-executor <plan> commit` after the audit (only the run's files and the audit's fixes; never push, amend or force) | `plan-executor` |
 | backlog | `BACKLOG.md` at the repository root (`git rev-parse --show-toplevel` of the spec's or plan's directory; outside git the working directory) | `plan-brainstorming` (format, `backlog-append`, `backlog-mark`, `backlog-parse`); writers: `plan-brainstorming`, `plan-executor`, `plan-resolver`, `plan-iterative-revision` (through `journal-finding`) |
@@ -167,6 +168,57 @@ goal that already has specs takes the next free number; existing specs are never
 - `/plan-brainstorming BACKLOG.md [section]` starts the next cycle from the unchecked items, after
   `backlog-sweep` (read-only) gave the agent the specs registered in the section's chain journal
   to match them against.
+
+## Goal roadmap
+
+`<goal>-roadmap.md` orders the specs of one goal for `plan-chain-runner`. `plan-brainstorming`
+writes it with `roadmap-write` from `assets/goal-roadmap-template.<ru|en>.md`; `roadmap-check`
+validates it, `roadmap-parse` returns it as JSON. Headings and table headers are English tokens;
+prose is in the language of the first spec (or `--lang`).
+
+```markdown
+> Goal: <goal>
+> Specs: <N>
+> Generated: <YYYY-MM-DDTHH:MM:SSZ>
+
+# Roadmap: <title>
+
+## Overview
+## Order
+| # | Spec | Title | Depends on | Group | Tier | Estimate |
+## Graph
+(a mermaid block: graph LR, one subgraph per group, one node per spec, one edge per dependency)
+## Parallelism
+## Shared touchpoints
+| File or symbol | Specs | Delivery order | Note |   (or the one line none / нет)
+## Specs
+### <#>. <spec file>
+- Goal: … / - Depends on: … / - Notes: … / - Hands off: …   (ru: Цель, Зависит от, Примечания, Передаёт)
+## Sources
+- `<path>` — <role>
+Instruction: followed by a text block with the instruction verbatim, or Instruction: —   (ru: Инструкция)
+## Notes
+```
+
+- `> Goal:` among the first ten lines (plain or bold, `GOAL_ROADMAP_RE`) marks a goal roadmap.
+  `journal-path` on it gives the goal's journal (`kind: goal-roadmap`, `plan: null`);
+  `plan-executor` refuses it as input (`not-a-split-roadmap`) and keeps a plan `<X>.md` next to
+  such an `<X>-roadmap.md` whole. A split roadmap `<X>-impl-roadmap.md` carries `> Source:` instead.
+- `#` is the execution order: topological by `depends`, by levels (1 + the deepest dependency),
+  the order of the JSON inside a level. File numbers (`-N-spec.md`) are the order of writing.
+- `Depends on`, `Specs` and `Delivery order` name a spec by its file number, or by its file name
+  when the number is missing or repeated; `—` for none; `Delivery order` joins with ` → `.
+- `Tier` and `Estimate` (`~N`) come from `spec-check`; `?` when it fails, `—` without `volume`;
+  `roadmap-check` accepts both, an empty `Estimate` is a warning.
+- Mermaid nodes are `s<N>` (file number) or `n<#>` with the label `"<#>. <title>"`; the edges
+  `dependency --> spec` must equal the table.
+- A spec is never in the group of one of its dependencies; a delivery order follows `#`.
+- `roadmap-check` errors: the header lines, the eight sections in order, the Order table (header,
+  `#` = 1..N, the `> Specs:` count), unknown dependency, cycle, `order-violation`,
+  `group-conflict`, Mermaid nodes and edges, Shared touchpoints rows (`unknown-shared-spec`,
+  `shared-order-conflict`), a missing `### <#>. <file>` section, a spec file missing next to the
+  roadmap.
+- The spec map in `BACKLOG.md` stays a pointer and gets one `--plain` line naming the roadmap.
 
 ## Hand-off rules
 

@@ -36,7 +36,7 @@ Each skill is an independent, installable module. Together they form a coherent 
 
 | Skill | Description | Depends on | Techniques |
 |---|---|---|---|
-| [`plan-brainstorming`](skills/plan-brainstorming/) | Turn ideas into validated design specs through collaborative dialogue | — | Depth-tiered elaboration, spec contract validation, chain settings and per-environment read/write consent recorded in the spec, shared `BACKLOG.md`, dialogue in the user's language |
+| [`plan-brainstorming`](skills/plan-brainstorming/) | Turn ideas or several input files into validated design specs and a goal roadmap through collaborative dialogue; stops there | — | Depth-tiered elaboration, spec contract validation, chain settings and per-environment read/write consent recorded in the spec, shared `BACKLOG.md`, multi-input intake, spec-set consistency check, goal roadmap (`<goal>-roadmap.md`, DAG + Mermaid), dialogue in the user's language |
 | [`plan-writing`](skills/plan-writing/) | Convert a spec into a detailed, step-by-step implementation plan | `plan-brainstorming` | Spec preflight, plan format contract (`plan-check`), codebase grounding with `path:line` citations and a recorded test baseline, access type on external tasks, justified size exceptions (`**Size:**`) |
 | [`plan-splitter`](skills/plan-splitter/) | Decompose a large plan into self-contained parts (`<base>-a.md`, `-b.md`, …) with a dependency roadmap | `plan-iterative-revision` (optional, deep verification); `plan-brainstorming` (required: task parser for `gate`, `split-write`, `validate-all`; chain settings) | Numeric gate (`gate`: tasks, bytes, modules, dependency shape) or the `split` setting, parts written by script (`split-write`: task texts byte for byte, checked by hash), topological ordering + parallel groups, 3-level VERIFY, self-sufficiency invariant, SHA-256 origin hash, one batch verification run with a machine gate, `External` and `Size` lines carried verbatim |
 | [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | `plan-brainstorming` (chain settings, `BACKLOG.md`) | Persistent progress ledger with resume, plan-drift and settings-drift detection, strictly ordered units with retry-first policy (a split plan runs task by task with one checkpoint per part), risk-scaled gates, read/write consent per external system, foreign-change detection against an expected tree with per-file restore, rollback snapshots in hidden git refs (no branch commits), run diff, findings to `BACKLOG.md` |
@@ -51,9 +51,9 @@ Each skill is an independent, installable module. Together they form a coherent 
 
 ```
   ┌─────────────────────┐
-  │  plan-brainstorming │  ← Start here: idea → design spec
+  │  plan-brainstorming │  ← Start here: idea(s) → specs + goal roadmap, then stops
   └──────────┬──────────┘
-             │ *-spec.md
+             │ *-spec.md, <goal>-roadmap.md
   ┌──────────▼──────────┐
   │    plan-writing     │  ← spec → implementation plan
   └──────────┬──────────┘
@@ -295,7 +295,7 @@ The CLI does not currently display commit hashes or dates. To verify you are on 
 /plan-brainstorming BACKLOG.md        # next cycle: the unchecked items of the shared backlog
 ```
 
-The skill will guide you through the full brainstorming → spec → plan cycle.
+The skill guides you from the idea to approved specs and the goal roadmap `<goal>-roadmap.md`, then stops; its closing report names the next command (`/plan-chain-runner <spec>…` or `/plan-writing <spec>`).
 
 ### Executing an existing plan
 
@@ -605,6 +605,14 @@ One `BACKLOG.md` at the repository root collects what the chain deferred: Out of
 One `<goal>-chain.json` next to the spec records, for each plan of the goal, seven stages (`writing`, `revision`, `split`, `execution`, `diffs`, `audit`, `commit`) with the statuses `pending`, `running`, `done`, `stopped`, `failed`, `skipped`, the artifacts each skill produced and an append-only event log. Every skill marks its own stage through `brainstorm_tool.py journal-event`, which refuses a transition outside the state machine (`illegal-transition`); a finished stage re-opens only for a named reason (`drift`, `audit-open`, `recommit`, `user-request`). The SHA-256 of the stage input stored on `done` turns a changed spec or plan into a drift question; the skill that owns the stage asks it and re-runs the stage (`--reason drift`) or keeps its result for the changed input. A run without a confirmation channel records its question (`Qn`, `open → answered → applied`) and stops; the next run reads `journal-show`, applies the answer and continues. Writes go through a lock file (`journal-locked` after 10 s, takeover of a lock older than 60 s) and an atomic replace; `journal-reconcile` restores the statuses from the artifacts after a crash and `journal-validate` replays the events and checks the time fields. A question asked before `plan-writing` names its spec (`journal-question --spec`), so the plan's entry is bound to it from the start. Manual runs keep the journal too; a skill without `plan-brainstorming` beside it works without one.
 
 **Used in:** all six pipeline skills and `plan-chain-runner`
+
+---
+
+### Goal roadmap
+
+After the last spec of a goal, `plan-brainstorming` writes `<goal>-roadmap.md` next to the specs from a JSON the agent assembles in the dialogue. `roadmap-write` checks it against the chain journal and the disk (every spec of the journal present, known and acyclic dependencies, no spec in its dependency's group, shared touchpoints in an order that follows the execution order) and writes the file atomically from a template: the execution order `#` (topological, by levels), a Mermaid `graph LR` with one node per spec and a subgraph per parallel group, the shared touchpoints that `spec-set-check` found in the specs' Components, notes and hand-offs per spec, and the inputs of the call. `roadmap-check` parses the file back and requires the Mermaid edges to equal the table; `roadmap-parse` returns it as JSON for `plan-chain-runner`. Before the roadmap, `spec-set-check` and a reviewer subagent check the set of specs together, so conflicts between specs written one at a time surface before any plan exists. `journal-path` maps the roadmap to the goal's journal, and `plan-executor` refuses it as a split roadmap.
+
+**Used in:** `plan-brainstorming`, `plan-executor`, `plan-chain-runner`
 
 ---
 

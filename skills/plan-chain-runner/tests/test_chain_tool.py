@@ -1642,7 +1642,7 @@ class SiblingLoaderTest(HomeCase):
         self.assertIs(ct._chain_file_re(warnings), ct._CHAIN_FILE_FALLBACK_RE)
         ct._chain_file_re(warnings)
         self.assertEqual(warnings, ["executor-not-installed"])
-        for name in ("x-impl-a.md", "x-impl-roadmap.md", "x-impl-review-2.md", "x-impl-completion.md",
+        for name in ("x-impl-a.md", "x-impl-roadmap.md", "g-roadmap.md", "x-impl-review-2.md", "x-impl-completion.md",
                      "x-impl-report-3-final.md", "x-diffs.md", "g-followups.json", "g-chain.json"):
             self.assertTrue(ct._CHAIN_FILE_FALLBACK_RE.fullmatch(name), name)
         self.assertIsNone(ct._CHAIN_FILE_FALLBACK_RE.fullmatch("notes.md"))

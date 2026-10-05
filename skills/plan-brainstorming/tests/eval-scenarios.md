@@ -221,6 +221,58 @@ must be strengthened, not the test loosened.
   without asking; the split done by a script or decided without the user; the estimate written
   into the spec file.
 
+## Scenario 22: No skill call after the spec is approved
+
+- **Setup:** One Standard spec of goal `search` is ready; the host can invoke skills.
+- **Trigger:** The user approves the spec file.
+- **Expected (PASS):** Backlog lines, `journal-path --create`, then `roadmap-write` (one row, one
+  node) and `roadmap-check`; one closing report names the spec, the roadmap, the BACKLOG lines, the
+  journal and the command the user runs (`/plan-chain-runner <spec>` or `/plan-writing <spec>`).
+  No Skill call at all.
+- **Red flags (FAIL):** `plan-writing`, `plan-chain-runner` or any other skill invoked; "let me
+  start the plan"; code or project files changed after the approval.
+
+## Scenario 23: Three inputs and an instruction
+
+- **Setup:** `/plan-brainstorming goal.md research.md findings.json research — справочно, findings — во вторую спеку`.
+- **Trigger:** Subagent starts step 1.
+- **Expected (PASS):** `inputs goal.md research.md findings.json --note "…"` runs first; the
+  Russian restatement names each file with its role (goal — the task, research — background,
+  findings — the second spec) and the instruction; `findings-parse` runs on the findings.
+- **Red flags (FAIL):** files read without `inputs`; research.md treated as a second goal; findings
+  mode for the whole call; the instruction ignored or taken for a file path.
+
+## Scenario 24: Two specs end with the set check and the roadmap
+
+- **Setup:** The user chose two specs, `g-1-spec.md` and `g-2-spec.md`; both name `chain_tool.py`
+  in Components and the second needs the first.
+- **Trigger:** The user approves the second spec.
+- **Expected (PASS):** `spec-set-check <dir>`, the reviewer subagent with
+  `references/spec-set-reviewer-prompt.md`, the findings in one message, accepted edits applied as
+  amend with their own approval; then `roadmap-write` with two rows and the edge `s1 --> s2`,
+  `chain_tool.py` in `## Shared touchpoints` with the order `1 → 2`; `roadmap-check` valid.
+- **Red flags (FAIL):** no set check; the reviewer skipped because the tier is Standard; a spec
+  edited without its approval; a roadmap without the edge or the shared point; any Skill call.
+
+## Scenario 25: One spec still gets a roadmap
+
+- **Setup:** A Quick spec, the only spec of its goal, is approved.
+- **Trigger:** Subagent finishes the Backlog and Chain journal steps.
+- **Expected (PASS):** no reviewer (`spec-set-check` skipped or only `single-spec`);
+  `roadmap-write` writes a roadmap with one row, one Mermaid node and `## Shared touchpoints`
+  "none"/"нет"; the closing report follows.
+- **Red flags (FAIL):** no roadmap for one spec; a reviewer dispatched for one spec.
+
+## Scenario 26: An existing spec of the goal is not rewritten
+
+- **Setup:** Goal `g` has the approved `g-1-spec.md`; the user runs `/plan-brainstorming goal.md`
+  with an instruction to add a second part.
+- **Trigger:** Subagent proposes the decomposition.
+- **Expected (PASS):** the new spec is `g-2-spec.md`; `g-1-spec.md` is read, not edited, except
+  through an accepted set-check finding with its own approval; the roadmap lists both specs.
+- **Red flags (FAIL):** `g-1-spec.md` rewritten as part of the new design; the new spec named
+  `g-1-spec.md` or the old one renumbered; a roadmap without the old spec.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

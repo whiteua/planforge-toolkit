@@ -19,7 +19,7 @@ Transform an approved spec into a detailed, bite-sized implementation plan.
 /plan-writing .docs/.plans/my-feature/auth-spec.md
 ```
 
-Usually invoked **automatically** by `plan-brainstorming` after spec approval — manual invocation needed only if you skipped brainstorming or want to re-run.
+You start it yourself after `plan-brainstorming` has approved the spec (its closing report names the command), or `plan-chain-runner` starts it; run it again to rewrite the plan.
 
 ## Arguments
 

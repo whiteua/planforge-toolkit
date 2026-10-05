@@ -14,6 +14,10 @@
   chain_tool (parse_plan_tasks, loaded by path).
 - detect-lang: dialogue language of a goal file or findings JSON
   (`ru` when more than 5% of the letters are Cyrillic, otherwise `en`).
+- inputs: kind, language and size of each input file of a call, the mode of the call and plan_root.
+- spec-set-check: paths and symbols that several specs of a goal name, pairs that do not mention
+  each other, shared numbered sections.
+- roadmap-write / roadmap-check / roadmap-parse: the goal roadmap <goal>-roadmap.md.
 - journal-*: the chain journal <goal>-chain.json next to the spec: stages of
   every plan, questions Qn, out-of-plan findings Fn and an append-only event
   log; journal-export-findings writes <goal>-followups.json (findings-parse format);
@@ -28,6 +32,11 @@ Commands:
   settings          <spec|plan|roadmap|part.md>
   plan-tasks        <plan|part.md>
   detect-lang       <file|->
+  inputs            [<file>…] [--note TEXT]
+  spec-set-check    <dir> [--goal G] [--specs <file>…]
+  roadmap-write     <dir> --graph <json> [--lang ru|en] [--force]
+  roadmap-check     <roadmap.md>
+  roadmap-parse     <roadmap.md>
   backlog-append    <root> --section S --source "skill, artifact" --item TEXT [--lang ru|en] [--plain] [--date D]
   backlog-parse     <BACKLOG.md> [--section S] [--state open|done|cancelled|all]
   backlog-mark      <root> --section S --item TEXT
@@ -149,6 +158,10 @@ SOURCE_RE = re.compile(
     r"^>\s*(?:\*\*)?(?:Source|Источник)(?::\*\*|\*\*:|:)\s*\[[^\]]*\]"
     r"\((?P<open><)?(?P<target>(?(open)[^<>\n]+|[^<>)\s]+))(?(open)>)\)"
 )
+# A goal roadmap (<goal>-roadmap.md, written by roadmap-write) names its goal in one of its first ten
+# lines: "> Goal: <goal>", plain and bold forms as for the Tier line. executor_tool._GOAL_ROADMAP_RE is
+# a copy of this pattern (contract test in plan-executor/tests).
+GOAL_ROADMAP_RE = re.compile(r"^>\s*(?:\*\*)?Goal(?::\*\*|\*\*:|:)\s*(?P<goal>\S.*?)\s*$")
 
 
 class InputError(Exception):
@@ -1394,11 +1407,27 @@ def _strip_suffix(name: str, suffix: str) -> str:
     return name[:-len(suffix)] if name.endswith(suffix) and name != suffix else os.path.splitext(name)[0]
 
 
+def _goal_roadmap_goal(text: str) -> Optional[str]:
+    """The goal named by a '> Goal:' line among the first ten lines (a goal roadmap), else None."""
+    return next((m.group("goal") for m in map(GOAL_ROADMAP_RE.match, text.splitlines()[:10]) if m), None)
+
+
 def journal_path_for(path: str) -> Dict[str, Any]:
-    """Journal of a spec, plan, roadmap or part: roadmap/part → master plan → spec at **Spec:**."""
+    """Journal of a spec, plan, roadmap or part: roadmap/part → master plan → spec at **Spec:**. A goal
+    roadmap ('> Goal:' in its first ten lines) → the goal's journal next to it, `kind: goal-roadmap`."""
     current = os.path.abspath(path)
     text = _read_source(current)
+    warnings: List[str] = []
     source = next((m.group("target") for m in map(SOURCE_RE.match, text.splitlines()[:10]) if m), None)
+    roadmap_goal = _goal_roadmap_goal(text)
+    if roadmap_goal is not None:
+        if source is not None:
+            warnings.append(f"roadmap-both-markers: {os.path.basename(current)}: '> Goal:' wins over Source")
+        journal = os.path.join(os.path.dirname(current), _check_goal(roadmap_goal) + JOURNAL_SUFFIX)
+        return {"ok": True, "journal": journal, "goal": roadmap_goal, "spec": None, "plan": None,
+                "kind": "goal-roadmap", "exists": os.path.isfile(journal), "warnings": warnings}
+    if source is None and os.path.basename(current).endswith("-roadmap.md"):
+        warnings.append(f"roadmap-without-markers: {os.path.basename(current)}")
     if source is not None:
         current = os.path.normpath(os.path.join(os.path.dirname(current), source))
         if not os.path.isfile(current):
@@ -1422,7 +1451,7 @@ def journal_path_for(path: str) -> Dict[str, Any]:
         goal = _strip_suffix(os.path.basename(plan or ""), "-impl.md")
     journal = os.path.join(os.path.dirname(spec or plan or ""), _check_goal(goal) + JOURNAL_SUFFIX)
     return {"ok": True, "journal": journal, "goal": goal, "spec": spec, "plan": plan,
-            "exists": os.path.isfile(journal)}
+            "exists": os.path.isfile(journal), "warnings": warnings}
 
 
 def journal_load(journal: str) -> Dict[str, Any]:
@@ -1595,7 +1624,7 @@ def journal_create(journal: str, goal: str, lang: str, spec: Optional[str] = Non
 def cmd_journal_path(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     result = journal_path_for(args.file)
     if args.create:
-        lang = detect_lang_text(_read_source(result["spec"] or result["plan"]))
+        lang = detect_lang_text(_read_source(result["spec"] or result["plan"] or args.file))
         result["created"] = journal_create(result["journal"], result["goal"], lang, result["spec"],
                                            result["plan"])["created"]
         result["exists"] = True
@@ -2594,6 +2623,816 @@ def cmd_journal_reconcile(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]
     return 0, journal_reconcile(args.journal, rebuild=args.rebuild)
 
 
+# Inputs of a brainstorming call (spec plan-refactoring-01-9): every file given is classified, the free
+# text is the instruction (`note`). Nothing is written.
+MARKDOWN_EXTENSIONS = (".md", ".markdown")
+GOAL_NAME_RE = re.compile(r"(?:^|[-_])goal$", re.IGNORECASE)
+SINGLE_FILE_MODES = {"spec": "amend", "findings": "findings", "backlog": "backlog",
+                     "goal": "idea", "markdown": "idea", "text": "idea"}
+
+
+def _plan_root(path: str) -> str:
+    """<plan-root> of a goal file (spec-contract.md): the name without extension and without a descriptive
+    suffix after the last numeric segment: plan02-goal.md → plan02, plan01.md → plan01, goal.md → goal."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    match = re.match(r"^(?P<root>.*\d)[-_][^\d]*$", stem)
+    return match.group("root") if match else stem
+
+
+def _findings_count(text: str) -> Optional[int]:
+    """Number of findings when `text` is a findings JSON (a list of objects with `file` and `summary`, or
+    {"findings": [...]}); None for other JSON; ValueError when it is not JSON."""
+    data = json.loads(text)
+    items = data.get("findings") if isinstance(data, dict) else data
+    if isinstance(items, list) and items and all(isinstance(i, dict) and "file" in i and "summary" in i
+                                                  for i in items):
+        return len(items)
+    return None
+
+
+def _classify_input(path: str) -> Tuple[Dict[str, Any], bool]:
+    """(entry, goal candidate) of one input file; a goal candidate is markdown without spec headings."""
+    entry: Dict[str, Any] = {"path": path, "exists": os.path.isfile(path)}
+    if not entry["exists"]:
+        return dict(entry, kind="missing"), False
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    entry.update(bytes=len(raw), lines=0 if not raw else raw.count(b"\n") + (0 if raw.endswith(b"\n") else 1))
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return dict(entry, kind="binary"), False
+    entry["lang"] = detect_lang_text(_text_for_lang(text))
+    name = os.path.basename(path)
+    lines = [line for _, line in _unfenced_lines(text)]
+    markdown = name.lower().endswith(MARKDOWN_EXTENSIONS)
+    if name == BACKLOG_FILE:
+        return dict(entry, kind="backlog"), False
+    if _goal_roadmap_goal(text) is not None:
+        return dict(entry, kind="goal-roadmap"), False
+    if name.endswith("-spec.md") and "# Goal" in lines:
+        return dict(entry, kind="spec"), False
+    if name.endswith("-impl.md") and any(PLAN_TASK_HEADING_RE.match(line) for line in lines):
+        return dict(entry, kind="plan"), False
+    if not markdown and text.lstrip()[:1] in ("[", "{"):
+        try:
+            count = _findings_count(text)
+        except ValueError:
+            pass  # not JSON: a text file
+        else:
+            return (dict(entry, kind="json") if count is None else dict(entry, kind="findings", count=count)), False
+    if markdown:
+        return dict(entry, kind="markdown"), not any(line in SPEC_HEADINGS for line in lines)
+    return dict(entry, kind="text"), False
+
+
+def inputs_report(paths: List[str], note: Optional[str]) -> Tuple[int, Dict[str, Any]]:
+    """`inputs`: kind, language and size of each file, the mode of the call, plan_root and the note.
+    The goal is a markdown file without spec headings whose name ends in 'goal', else the first such
+    file; the other markdown files are reference material (`markdown`)."""
+    if not paths and not (note or "").strip():
+        raise InputError("nothing-to-classify: give input files or --note")
+    files: List[Dict[str, Any]] = []
+    candidates: List[int] = []
+    for index, path in enumerate(paths):
+        entry, candidate = _classify_input(path)
+        files.append(entry)
+        if candidate:
+            candidates.append(index)
+    goals = [i for i in candidates if GOAL_NAME_RE.search(os.path.splitext(os.path.basename(paths[i]))[0])]
+    goals = goals or candidates[:1]
+    for index in goals:
+        files[index]["kind"] = "goal"
+    warnings = [f"binary: {entry['path']}" for entry in files if entry["kind"] == "binary"]
+    if len(goals) > 1:
+        warnings.append(f"several-goals: plan_root from {files[goals[0]]['path']}")
+    errors = [f"missing: {entry['path']}" for entry in files if entry["kind"] == "missing"]
+    if not files:
+        mode = "idea"
+    elif len(files) == 1:
+        mode = SINGLE_FILE_MODES.get(files[0]["kind"], "multi")
+    else:
+        mode = "multi"
+    langs = [files[i]["lang"] for i in goals] + ([detect_lang_text(note)] if (note or "").strip() else [])
+    langs += [entry["lang"] for entry in files if "lang" in entry]
+    return (1 if errors else 0), {
+        "ok": not errors, "mode": mode, "plan_root": _plan_root(files[goals[0]]["path"]) if goals else None,
+        "lang": langs[0] if langs else "en", "note": note, "files": files, "warnings": warnings, "errors": errors}
+
+
+def cmd_inputs(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    return inputs_report(args.files, args.note)
+
+
+# Specs of one goal (spec-set-check, roadmap-write): the journal in their directory names them.
+SPEC_NUMBER_RE = re.compile(r"-(?P<n>\d+)-spec\.md$")
+SPEC_MENTION_RE = re.compile(r"(?<![\w-])(?:спек[аиуеой]{0,2}|specs?)\s+(?P<n>\d+)\b", re.IGNORECASE)
+NUMBERED_REF_RE = re.compile(r"`?(?P<path>[\w./-]+\.[A-Za-z0-9]+)`?\s*(?:\(\s*)?"
+                             r"(?:§\s*\d+|(?:пункт|шаг|item|step)\s+\d+)", re.IGNORECASE)
+CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _spec_number(name: str) -> Optional[int]:
+    """N of '<root>-N-spec.md', else None."""
+    match = SPEC_NUMBER_RE.search(name)
+    return int(match.group("n")) if match else None
+
+
+def _dir_rel(directory: str, path: str) -> str:
+    """`path` relative to `directory` with forward slashes (absolute on another drive)."""
+    try:
+        rel = os.path.relpath(os.path.abspath(path), os.path.abspath(directory))
+    except ValueError:
+        rel = os.path.abspath(path)
+    return rel.replace("\\", "/")
+
+
+def _goal_journal(directory: str, goal: Optional[str] = None) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """(path, data) of the goal's chain journal in `directory`: the only `*-chain.json` there, or
+    `<goal>-chain.json` among several; (None, None) without one; several and no goal among them is
+    ambiguous-journal (exit 2)."""
+    names = sorted(name for name in os.listdir(directory) if name.endswith(JOURNAL_SUFFIX))
+    if goal is not None and len(names) > 1 and goal + JOURNAL_SUFFIX in names:
+        names = [goal + JOURNAL_SUFFIX]
+    if not names:
+        return None, None
+    if len(names) > 1:
+        raise InputError(f"ambiguous-journal: {', '.join(names)} in {directory}")
+    path = os.path.join(directory, names[0])
+    data = journal_load(path)
+    specs = data.get("specs")
+    if not (isinstance(specs, list) and all(isinstance(s, dict) and isinstance(s.get("path"), str) for s in specs)):
+        raise InputError(f"journal-corrupt: {path}: 'specs' must be a list of {{path, sha256}} objects")
+    return path, data
+
+
+def _set_specs(directory: str, given: Optional[List[str]], warnings: List[str],
+               goal: Optional[str] = None) -> Tuple[Optional[str], List[str]]:
+    """(journal, spec names relative to `directory`): the journal's specs (`goal` picks `<goal>-chain.json`
+    among the journals of several goals); without a journal the `given` files, else every '*-spec.md' in
+    `directory` by file number, only '<goal>-*-spec.md' when `goal` is given (warning no-journal)."""
+    journal, data = _goal_journal(directory, goal)
+    if data is not None:
+        if given:
+            warnings.append("specs-ignored: the journal lists the goal's specs")
+        return journal, [_normalize_path(spec["path"]) for spec in data["specs"]]
+    warnings.append("no-journal")
+    if given:
+        return None, [_dir_rel(directory, path) for path in given]
+    names = [name for name in os.listdir(directory)
+             if name.endswith("-spec.md") and (goal is None or name.startswith(goal + "-"))]
+    return None, sorted(names, key=lambda name: (_spec_number(name) is None, _spec_number(name) or 0, name))
+
+
+def _components_cells(lines: List[str]) -> Optional[List[str]]:
+    """First cells of the rows of the '## Components' table (header and separator left out); None when
+    the section has no table."""
+    rows: List[str] = []
+    inside = False
+    for line in lines:
+        if line in SPEC_HEADINGS:
+            inside = line == "## Components"
+        elif inside and line.startswith("|"):
+            rows.append(line)
+    if not rows:
+        return None
+    cells: List[str] = []
+    for index, line in enumerate(rows):
+        following = rows[index + 1] if index + 1 < len(rows) else ""
+        if not (_is_table_separator(line) or _is_table_separator(following)):
+            cells.append(re.split(r"(?<!\\)\|", line.strip().strip("|"))[0])
+    return cells
+
+
+def _touch_names(cell: str) -> List[Tuple[str, str]]:
+    """(name, kind) of the code spans of one Components cell: a path (has '/' or an extension; a ':line'
+    suffix is dropped) or a symbol (an identifier). A span with spaces counts by its first word."""
+    names: List[Tuple[str, str]] = []
+    for span in CODE_SPAN_RE.findall(cell):
+        words = span.split()
+        token = re.sub(r":\d+(?:-\d+)?$", "", words[0].replace("\\", "/")) if words else ""
+        if not token or token.startswith(":"):
+            continue
+        if "/" in token or re.search(r"\.[A-Za-z0-9]+$", token):
+            names.append((_normalize_path(token), "path"))
+        elif IDENTIFIER_RE.match(token):
+            names.append((token, "symbol"))
+    return names
+
+
+def _spec_mentions(text: str, own: str, names: List[str]) -> List[str]:
+    """Other specs of the set that `text` names: 'спека N' / 'spec N' (N = file number) or the file name."""
+    numbers: Dict[int, List[str]] = {}
+    for name in names:
+        if _spec_number(name) is not None:
+            numbers.setdefault(_spec_number(name), []).append(name)
+    found = {numbers[n][0] for n in (int(m.group("n")) for m in SPEC_MENTION_RE.finditer(text))
+             if len(numbers.get(n, ())) == 1}
+    found |= {name for name in names
+              if re.search(r"(?<![\w.-])" + re.escape(os.path.basename(name)), text)}
+    return [name for name in names if name in found and name != own]
+
+
+def spec_set_check(directory: str, given: Optional[List[str]] = None, goal: Optional[str] = None) -> Dict[str, Any]:
+    """`spec-set-check`: paths and symbols that two or more specs of the goal name in their Components
+    table, the pairs among them that do not mention each other, files with numbered references from
+    two or more specs, and each spec's mentions of the others. `goal` names the goal when the directory
+    holds the journals of several goals. Warnings only; nothing is written."""
+    if not os.path.isdir(directory):
+        raise InputError(f"not a directory: {directory}")
+    warnings: List[str] = []
+    journal, names = _set_specs(directory, given, warnings, goal)
+    result: Dict[str, Any] = {"ok": True, "journal": journal, "specs": names, "touchpoints": [],
+                              "undeclared": [], "numbered_items": [], "self_edges": [], "warnings": warnings}
+    if len(names) < 2:
+        warnings.append("single-spec")
+        return result
+    touch: Dict[Tuple[str, str], List[str]] = {}
+    numbered: Dict[str, List[str]] = {}
+    mentions: Dict[str, List[str]] = {}
+    for name in names:
+        lines = [line for _, line in _unfenced_lines(_read_source(os.path.join(directory, name)))]
+        cells = _components_cells(lines)
+        if cells is None:
+            warnings.append(f"no-components-table: {name}")
+        for key in dict.fromkeys(key for cell in cells or [] for key in _touch_names(cell)):
+            touch.setdefault(key, []).append(name)
+        text = "\n".join(lines)
+        for path in dict.fromkeys(m.group("path") for m in NUMBERED_REF_RE.finditer(text)):
+            numbered.setdefault(path, []).append(name)
+        mentions[name] = _spec_mentions(text, name, names)
+
+    def declared(a: str, b: str) -> bool:
+        return b in mentions[a] or a in mentions[b]
+
+    for (point, kind), specs in touch.items():
+        if len(specs) > 1:
+            result["touchpoints"].append({"name": point, "kind": kind, "specs": specs})
+            if any(not declared(a, b) for i, a in enumerate(specs) for b in specs[i + 1:]):
+                result["undeclared"].append({"name": point, "specs": specs})
+    result["numbered_items"] = [{"file": path, "specs": specs} for path, specs in numbered.items() if len(specs) > 1]
+    result["self_edges"] = [{"spec": name, "mentions": mentions[name]} for name in names if mentions[name]]
+    return result
+
+
+def cmd_spec_set_check(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    return 0, spec_set_check(args.dir, args.specs, args.goal)
+
+
+# Goal roadmap <goal>-roadmap.md (spec-contract.md, "Goal roadmap"): written by roadmap-write, checked by
+# roadmap-check, read by roadmap-parse (plan-chain-runner's input).
+ROADMAP_SUFFIX = "-roadmap.md"
+ROADMAP_HEADINGS = ("## Overview", "## Order", "## Graph", "## Parallelism", "## Shared touchpoints",
+                    "## Specs", "## Sources", "## Notes")
+ROADMAP_ORDER_HEADER = ("#", "Spec", "Title", "Depends on", "Group", "Tier", "Estimate")
+ROADMAP_SHARED_HEADER = ("File or symbol", "Specs", "Delivery order", "Note")
+ROADMAP_LABELS = {
+    "ru": {"goal": "Цель", "depends": "Зависит от", "notes": "Примечания", "handoff": "Передаёт",
+           "instruction": "Инструкция", "none": "нет", "together": "можно вести одновременно", "alone": "одна спека"},
+    "en": {"goal": "Goal", "depends": "Depends on", "notes": "Notes", "handoff": "Hands off",
+           "instruction": "Instruction", "none": "none", "together": "may run at the same time", "alone": "one spec"},
+}
+ROADMAP_GROUP_RE = re.compile(r"^[A-Za-z0-9_]+$")
+DASH = "—"
+
+
+def _graph_text(value: Any, where: str, required: bool = False) -> Optional[str]:
+    """A text field of the roadmap JSON, stripped; None when empty; graph-invalid (exit 2) otherwise."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if required:
+            raise InputError(f"graph-invalid: {where} is required")
+        return None
+    if not isinstance(value, str):
+        raise InputError(f"graph-invalid: {where} must be a string")
+    return value.strip()
+
+
+def _graph_files(value: Any, where: str) -> List[str]:
+    """A list of spec files of the roadmap JSON (missing → [])."""
+    if value is None:
+        return []
+    if not (isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value)):
+        raise InputError(f"graph-invalid: {where} must be a list of spec files")
+    return [_normalize_path(item) for item in value]
+
+
+def _graph_items(graph: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+    value = graph.get(key) or []
+    if not (isinstance(value, list) and all(isinstance(item, dict) for item in value)):
+        raise InputError(f"graph-invalid: {key} must be a list of objects")
+    return value
+
+
+def _roadmap_graph(graph: Any) -> Dict[str, Any]:
+    """The roadmap JSON of roadmap-write with its shape checked (graph-invalid, exit 2)."""
+    if not isinstance(graph, dict):
+        raise InputError("graph-invalid: not a JSON object")
+    specs = []
+    for index, item in enumerate(_graph_items(graph, "specs")):
+        where = f"specs[{index}]"
+        group = _graph_text(item.get("group"), where + ".group", True)
+        if not ROADMAP_GROUP_RE.match(group):
+            raise InputError(f"graph-invalid: {where}.group must be letters, digits or _")
+        specs.append({"file": _normalize_path(_graph_text(item.get("file"), where + ".file", True)),
+                      "title": _graph_text(item.get("title"), where + ".title", True),
+                      "depends": _graph_files(item.get("depends"), where + ".depends"), "group": group,
+                      "notes": _graph_text(item.get("notes"), where + ".notes"),
+                      "handoff": _graph_text(item.get("handoff"), where + ".handoff")})
+    files = [spec["file"] for spec in specs]
+    if not files or len(set(files)) != len(files):
+        raise InputError("graph-invalid: specs must list each spec once")
+    sources = [{"path": _graph_text(item.get("path"), f"sources[{i}].path", True),
+                "role": _graph_text(item.get("role"), f"sources[{i}].role", True)}
+               for i, item in enumerate(_graph_items(graph, "sources"))]
+    shared = [{"name": _graph_text(item.get("name"), f"shared[{i}].name", True),
+               "kind": _graph_text(item.get("kind"), f"shared[{i}].kind"),
+               "specs": _graph_files(item.get("specs"), f"shared[{i}].specs"),
+               "order": _graph_files(item.get("order"), f"shared[{i}].order"),
+               "note": _graph_text(item.get("note"), f"shared[{i}].note")}
+              for i, item in enumerate(_graph_items(graph, "shared"))]
+    lang = graph.get("lang")
+    if lang not in (None, "ru", "en"):
+        raise InputError("graph-invalid: lang must be ru or en")
+    return {"goal": _graph_text(graph.get("goal"), "goal"), "title": _graph_text(graph.get("title"), "title", True),
+            "overview": _graph_text(graph.get("overview"), "overview"), "lang": lang,
+            "instruction": _graph_text(graph.get("instruction"), "instruction"),
+            "notes": _graph_text(graph.get("notes"), "notes"), "specs": specs, "sources": sources, "shared": shared}
+
+
+def _roadmap_order(specs: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    """(execution order, errors). The order is topological by `depends`: level = 1 + the deepest
+    dependency's level, the JSON order inside a level. Errors: unknown-dependency, dependency-cycle,
+    group-conflict (a spec in the group of one of its dependencies)."""
+    files = [spec["file"] for spec in specs]
+    graph = {spec["file"]: spec["depends"] for spec in specs}
+    errors = [f"unknown-dependency: {name} -> {dep}" for name, deps in graph.items() for dep in deps if dep not in graph]
+    if errors:
+        return [], errors
+    cycle = _runner_cycle(graph)
+    if cycle:
+        return [], ["dependency-cycle: " + " -> ".join(cycle)]
+    group = {spec["file"]: spec["group"] for spec in specs}
+    errors = [f"group-conflict: {name} and its dependency {dep} are both in group {group[name]}"
+              for name in files for dep in graph[name] if group[dep] == group[name]]
+    level: Dict[str, int] = {}
+
+    def depth(name: str) -> int:
+        if name not in level:
+            level[name] = 1 + max((depth(dep) for dep in graph[name]), default=-1)
+        return level[name]
+
+    return sorted(files, key=lambda name: (depth(name), files.index(name))), errors
+
+
+def _shared_errors(shared: List[Dict[str, Any]], position: Dict[str, int]) -> List[str]:
+    """unknown-shared-spec (a spec outside the roadmap, or an `order` entry outside the point's `specs`)
+    and shared-order-conflict (a delivery order against the execution order `#`)."""
+    errors: List[str] = []
+    for item in shared:
+        unknown = [name for name in item["specs"] + item["order"]
+                   if name not in position or name not in item["specs"]]
+        if unknown:
+            errors.append(f"unknown-shared-spec: {item['name']}: {', '.join(dict.fromkeys(unknown))}")
+            continue
+        ranks = [position[name] for name in item["order"]]
+        if ranks != sorted(ranks):
+            errors.append(f"shared-order-conflict: {item['name']}: {' → '.join(item['order'])} "
+                          f"goes against the execution order")
+    return errors
+
+
+ROADMAP_TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets",
+                                "goal-roadmap-template.{lang}.md")
+
+
+def _spec_refs(files: List[str]) -> Dict[str, str]:
+    """How the roadmap names a spec in Depends on, Specs and Delivery order: its file number when no
+    other spec of the roadmap has that number, else its file name."""
+    numbers = [_spec_number(name) for name in files]
+    return {name: str(number) if number is not None and numbers.count(number) == 1 else name
+            for name, number in zip(files, numbers)}
+
+
+def _node_id(ref: str, position: int) -> str:
+    """Mermaid node of a spec: s<file number>, or n<#> for a spec named by its file name."""
+    return f"s{ref}" if ref.isdigit() else f"n{position}"
+
+
+def _one_line(text: Optional[str]) -> str:
+    return " ".join(text.split()) if text and text.strip() else DASH
+
+
+def _cell(text: Optional[str]) -> str:
+    """A table cell: one line, '|' escaped, '—' when empty."""
+    return _one_line(text).replace("|", "\\|")
+
+
+def _fence(text: str, info: str) -> str:
+    """`text` in a code fence one backtick longer than any backtick run inside it (at least three)."""
+    ticks = "`" * max(3, max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+    return f"{ticks}{info}\n{text}\n{ticks}"
+
+
+def _spec_goal_phrase(text: str) -> str:
+    """The first sentence of a spec's '# Goal' section on one line; '?' when the section is empty."""
+    body: List[str] = []
+    inside = False
+    for _, line in _unfenced_lines(text):
+        if line in SPEC_HEADINGS:
+            if inside:
+                break
+            inside = line == "# Goal"
+        elif inside and line.strip():
+            body.append(line.strip())
+        elif inside and body:
+            break
+    paragraph = " ".join(" ".join(body).split())
+    return re.split(r"(?<=[.!?])\s", paragraph, maxsplit=1)[0] if paragraph else "?"
+
+
+def _render_roadmap(lang: str, goal: str, graph: Dict[str, Any], order: List[str],
+                    facts: Dict[str, Dict[str, str]]) -> str:
+    """The text of <goal>-roadmap.md from assets/goal-roadmap-template.<lang>.md."""
+    labels = ROADMAP_LABELS[lang]
+    spec = {item["file"]: item for item in graph["specs"]}
+    position = {name: index + 1 for index, name in enumerate(order)}
+    refs = _spec_refs(order)
+    nodes = {name: _node_id(refs[name], position[name]) for name in order}
+
+    def named(files: List[str], joiner: str = ", ") -> str:
+        return joiner.join(refs[name] for name in files) or DASH
+
+    rows = ["| " + " | ".join(ROADMAP_ORDER_HEADER) + " |", "|" + "---|" * len(ROADMAP_ORDER_HEADER)]
+    rows += ["| " + " | ".join((str(position[name]), _cell(name), _cell(spec[name]["title"]),
+                                named(spec[name]["depends"]), spec[name]["group"], _cell(facts[name]["tier"]),
+                                _cell(facts[name]["estimate"]))) + " |" for name in order]
+    groups: Dict[str, List[str]] = {}
+    for name in order:
+        groups.setdefault(spec[name]["group"], []).append(name)
+    mermaid = ["graph LR"]
+    for group, members in groups.items():
+        mermaid += [f"    subgraph {group}"] + [
+            f'        {nodes[name]}["{position[name]}. {_one_line(spec[name]["title"]).replace(chr(34), "#quot;")}"]'
+            for name in members] + ["    end"]
+    mermaid += [f"    {nodes[dep]} --> {nodes[name]}" for name in order for dep in spec[name]["depends"]]
+    shared = ["| " + " | ".join(ROADMAP_SHARED_HEADER) + " |", "|" + "---|" * len(ROADMAP_SHARED_HEADER)]
+    shared += [f"| `{_one_line(item['name'])}` | {named(item['specs'])} | {named(item['order'], ' → ')} | "
+               f"{_cell(item['note'])} |" for item in graph["shared"]]
+    sections = [f"### {position[name]}. {name}\n\n- {labels['goal']}: {facts[name]['goal']}\n"
+                f"- {labels['depends']}: {named(spec[name]['depends'])}\n"
+                f"- {labels['notes']}: {_one_line(spec[name]['notes'])}\n"
+                f"- {labels['handoff']}: {_one_line(spec[name]['handoff'])}" for name in order]
+    sources = [f"- `{item['path']}` — {_one_line(item['role'])}" for item in graph["sources"]] or [DASH]
+    instruction = graph["instruction"]
+    sources += ["", f"{labels['instruction']}:" + (f"\n\n{_fence(instruction, 'text')}" if instruction else f" {DASH}")]
+    values = {
+        "goal": goal, "count": str(len(order)), "generated": _iso_now(), "title": _one_line(graph["title"]),
+        "overview": graph["overview"] or DASH, "order": "\n".join(rows),
+        "graph": _fence("\n".join(mermaid), "mermaid"),
+        "parallelism": "\n".join(f"- {group}: {named(members)} — "
+                                 f"{labels['together'] if len(members) > 1 else labels['alone']}"
+                                 for group, members in groups.items()),
+        "shared": "\n".join(shared) if graph["shared"] else labels["none"],
+        "specs": "\n\n".join(sections), "sources": "\n".join(sources), "notes": graph["notes"] or DASH,
+    }
+    template = _read_source(ROADMAP_TEMPLATE.format(lang=lang))
+    return re.sub(r"\$\{(\w+)\}", lambda match: values[match.group(1)], template)
+
+
+def _spec_facts(path: str, name: str, warnings: List[str]) -> Dict[str, str]:
+    """Tier, estimate (`~N` from spec-check's volume) and the Goal sentence of one spec, with the text.
+    A failing spec-check gives '?' (warning spec-check-failed); a result without volume '—' (no-volume)."""
+    text = _read_source(path)
+    result = check_spec(text)
+    facts = {"text": text, "goal": _spec_goal_phrase(text), "tier": result.get("tier") or "?"}
+    if not result["ok"]:
+        warnings.append(f"spec-check-failed: {name}")
+        return dict(facts, tier="?", estimate="?")
+    if result.get("volume") is None:
+        warnings.append(f"no-volume: {name}")
+        return dict(facts, estimate=DASH)
+    return dict(facts, estimate=f"~{result['volume']['estimate_tasks']}")
+
+
+def _is_own_roadmap(path: str) -> bool:
+    """True when the existing file is a goal roadmap ('> Goal:' in its first lines)."""
+    try:
+        return _goal_roadmap_goal(_read_source(path)) is not None
+    except InputError:
+        return False
+
+
+def roadmap_write(directory: str, graph_file: str, lang: Optional[str] = None,
+                  force: bool = False) -> Tuple[int, Dict[str, Any]]:
+    """`roadmap-write`: check the roadmap JSON against the goal's journal and the disk, then write
+    <goal>-roadmap.md atomically. Every error comes before the write (exit 1, the file is not touched)."""
+    if not os.path.isdir(directory):
+        raise InputError(f"not a directory: {directory}")
+    try:
+        graph = _roadmap_graph(json.loads(_read_source(graph_file)))
+    except ValueError as exc:  # InputError is not a ValueError
+        raise InputError(f"graph-invalid: {exc}") from exc
+    warnings: List[str] = []
+    errors: List[str] = []
+    journal, data = _goal_journal(directory, graph["goal"])
+    listed = [item["file"] for item in graph["specs"]]
+    if data is None:
+        warnings.append("no-journal")
+        if graph["goal"] is None:
+            raise InputError("graph-invalid: goal is required when the directory has no journal")
+        goal, first = _check_goal(graph["goal"]), listed[0]
+    else:
+        goal = data["goal"]
+        registered = [_normalize_path(item["path"]) for item in data["specs"]]
+        first = registered[0] if registered else listed[0]
+        if graph["goal"] not in (None, goal):
+            errors.append(f"goal-mismatch: the journal's goal is {goal}, the JSON says {graph['goal']}")
+        missing = [name for name in registered if name not in listed]
+        if missing:
+            errors.append("specs-missing: " + ", ".join(missing))
+    absent = [name for name in listed if not os.path.isfile(os.path.join(directory, name))]
+    if absent:
+        errors.append("spec-not-found: " + ", ".join(absent))
+    order, order_errors = _roadmap_order(graph["specs"])
+    errors += order_errors
+    if order:
+        errors += _shared_errors(graph["shared"], {name: index + 1 for index, name in enumerate(order)})
+    target = os.path.join(directory, goal + ROADMAP_SUFFIX)
+    if os.path.exists(target) and not force and not _is_own_roadmap(target):
+        errors.append(f"exists-foreign: {target} has no '> Goal:' line; --force overwrites it")
+    if errors:
+        return 1, {"ok": False, "path": target, "errors": errors, "warnings": warnings}
+    facts = {name: _spec_facts(os.path.join(directory, name), name, warnings) for name in order}
+    lang = lang or graph["lang"] or detect_lang_text(
+        facts[first]["text"] if first in facts else _read_source(os.path.join(directory, first)))
+    _atomic_write_text(target, _render_roadmap(lang, goal, graph, order, facts))
+    return 0, {"ok": True, "path": target, "goal": goal, "journal": journal, "lang": lang, "order": order,
+               "warnings": warnings}
+
+
+def cmd_roadmap_write(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    return roadmap_write(args.dir, args.graph, args.lang, args.force)
+
+
+ROADMAP_FENCE_RE = re.compile(r"^(?P<ticks>`{3,}|~{3,})(?P<info>.*)$")
+Block = Tuple[Optional[str], List[str]]
+
+
+def _md_blocks(lines: List[str]) -> List[Block]:
+    """(None, [line]) for every line outside code fences and (info, body lines) for every fenced block.
+    A fence closes on a line of its character at least as long as the opening run."""
+    blocks: List[Block] = []
+    fence: Optional[str] = None
+    info = ""
+    body: List[str] = []
+    for line in lines:
+        if fence is None:
+            match = ROADMAP_FENCE_RE.match(line)
+            if match:
+                fence, info, body = match.group("ticks"), match.group("info").strip(), []
+            else:
+                blocks.append((None, [line.rstrip()]))
+        elif set(line.strip()) == {fence[0]} and len(line.strip()) >= len(fence):
+            blocks.append((info, body))
+            fence = None
+        else:
+            body.append(line)
+    if fence is not None:
+        blocks.append((info, body))
+    return blocks
+
+
+def _roadmap_sections(text: str) -> Tuple[List[str], List[str], Dict[str, List[Block]]]:
+    """(lines before the first '## ' heading, the '## ' headings in order, blocks of each heading)."""
+    head: List[str] = []
+    names: List[str] = []
+    sections: Dict[str, List[Block]] = {}
+    current: Optional[str] = None
+    for info, body in _md_blocks(text.splitlines()):
+        if info is None and body[0].startswith("## "):
+            current = body[0]
+            names.append(current)
+            sections.setdefault(current, [])
+        elif current is None:
+            head.extend(body if info is None else [])
+        else:
+            sections[current].append((info, body))
+    return head, names, sections
+
+
+def _section_lines(blocks: List[Block]) -> List[str]:
+    return [body[0] for info, body in blocks if info is None]
+
+
+def _table_rows(blocks: List[Block]) -> List[List[str]]:
+    """Cells of the table rows outside fences (separator rows left out, '\\|' unescaped)."""
+    rows: List[List[str]] = []
+    for line in (line.strip() for line in _section_lines(blocks)):
+        if line.startswith("|") and not _is_table_separator(line):
+            rows.append([cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", line[1:].rstrip("|"))])
+    return rows
+
+
+def _section_text(blocks: List[Block]) -> Optional[str]:
+    text = "\n".join(_section_lines(blocks)).strip()
+    return None if text in ("", DASH) else text
+
+
+def _parse_order(blocks: List[Block], errors: List[str], warnings: List[str]) -> List[Dict[str, Any]]:
+    """Rows of the '## Order' table; `depends` stays the raw cell (resolved by _order_graph_errors)."""
+    rows = _table_rows(blocks)
+    if not rows or tuple(rows[0]) != ROADMAP_ORDER_HEADER:
+        errors.append("order-table: the header must be | " + " | ".join(ROADMAP_ORDER_HEADER) + " |")
+        return []
+    specs: List[Dict[str, Any]] = []
+    for cells in rows[1:]:
+        if len(cells) != len(ROADMAP_ORDER_HEADER):
+            errors.append("order-row: " + " | ".join(cells))
+            continue
+        number, name, title, depends, group, tier, estimate = cells
+        match = re.fullmatch(r"~(\d+)", estimate)
+        if not match and estimate not in (DASH, "?"):
+            warnings.append(f"no-estimate: {name}")
+        specs.append({"n": int(number) if number.isdigit() else None, "file": name, "title": title,
+                      "depends": depends, "group": group, "tier": None if tier in ("", DASH, "?") else tier,
+                      "estimate": int(match.group(1)) if match else None, "notes": None, "handoff": None})
+    if not specs:
+        errors.append("order-table: no specs")
+    elif [spec["n"] for spec in specs] != list(range(1, len(specs) + 1)):
+        errors.append("order-numbering: # must run 1, 2, … in table order")
+    return specs
+
+
+def _order_graph_errors(specs: List[Dict[str, Any]], blocks: List[Block]) -> List[str]:
+    """Resolves `depends` to files and checks the table's graph (unknown-dependency, dependency-cycle,
+    order-violation, group-conflict) and the Mermaid block of '## Graph' against it."""
+    files = [spec["file"] for spec in specs]
+    position = {name: index + 1 for index, name in enumerate(files)}
+    refs = _spec_refs(files)
+    by_ref = {ref: name for name, ref in refs.items()}
+    errors: List[str] = []
+    for spec in specs:
+        tokens = [] if spec["depends"] in ("", DASH) else [token.strip() for token in spec["depends"].split(",")]
+        errors += [f"unknown-dependency: {spec['file']} -> {token}" for token in tokens if token not in by_ref]
+        spec["depends"] = [by_ref[token] for token in tokens if token in by_ref]
+    graph = {spec["file"]: spec["depends"] for spec in specs}
+    group = {spec["file"]: spec["group"] for spec in specs}
+    cycle = _runner_cycle(graph)
+    if cycle:
+        errors.append("dependency-cycle: " + " -> ".join(cycle))
+    else:
+        errors += [f"order-violation: {name} (#{position[name]}) depends on {dep} (#{position[dep]})"
+                   for name in files for dep in graph[name] if position[dep] > position[name]]
+    errors += [f"group-conflict: {name} and its dependency {dep} are both in group {group[name]}"
+               for name in files for dep in graph[name] if group[dep] == group[name]]
+    mermaid = next((body for info, body in blocks if info == "mermaid"), None)
+    if mermaid is None:
+        return errors + ["graph-missing: no mermaid block in ## Graph"]
+    if not mermaid or mermaid[0].strip() != "graph LR":
+        errors.append("graph-not-lr: the mermaid block must start with 'graph LR'")
+    nodes = {name: _node_id(refs[name], position[name]) for name in files}
+    defined = {m.group(1) for m in (re.match(r'^\s*([A-Za-z]\w*)\["', line) for line in mermaid) if m}
+    edges = {(m.group(1), m.group(2)) for m in
+             (re.match(r"^\s*([A-Za-z]\w*)\s*-->\s*([A-Za-z]\w*)\s*$", line) for line in mermaid) if m}
+    expected = {(nodes[dep], nodes[name]) for name in files for dep in graph[name]}
+    errors += [f"graph-node-missing: {nodes[name]} ({name})" for name in files if nodes[name] not in defined]
+    errors += [f"graph-node-unknown: {node}" for node in sorted(defined - set(nodes.values()))]
+    errors += [f"graph-edge-without-row: {a} --> {b}" for a, b in sorted(edges - expected)]
+    errors += [f"row-edge-missing-in-graph: {a} --> {b}" for a, b in sorted(expected - edges)]
+    return errors
+
+
+def _parse_shared(blocks: List[Block], files: List[str], errors: List[str]) -> List[Dict[str, Any]]:
+    """Rows of the '## Shared touchpoints' table ([] for the one-line 'none'), checked by _shared_errors."""
+    rows = _table_rows(blocks)
+    if not rows:
+        return []
+    if tuple(rows[0]) != ROADMAP_SHARED_HEADER:
+        errors.append("shared-table: the header must be | " + " | ".join(ROADMAP_SHARED_HEADER) + " |")
+        return []
+    by_ref = {ref: name for name, ref in _spec_refs(files).items()}
+    shared: List[Dict[str, Any]] = []
+    for cells in rows[1:]:
+        if len(cells) != len(ROADMAP_SHARED_HEADER):
+            errors.append("shared-row: " + " | ".join(cells))
+            continue
+        name = cells[0].strip("`")
+        specs = [] if cells[1] == DASH else [by_ref.get(token.strip(), token.strip()) for token in cells[1].split(",")]
+        order = [] if cells[2] == DASH else [by_ref.get(token.strip(), token.strip()) for token in cells[2].split("→")]
+        kind = "path" if "/" in name or re.search(r"\.[A-Za-z0-9]+$", name) else "symbol"
+        shared.append({"name": name, "kind": kind, "specs": specs, "order": order,
+                       "note": None if cells[3] == DASH else cells[3]})
+    errors += _shared_errors(shared, {name: index + 1 for index, name in enumerate(files)})
+    return shared
+
+
+def _parse_spec_sections(blocks: List[Block], specs: List[Dict[str, Any]], errors: List[str]) -> None:
+    """Notes and handoff of each spec from its '### <#>. <file>' section (labels of either language)."""
+    keys = {labels[key]: key for labels in ROADMAP_LABELS.values() for key in ("goal", "depends", "notes", "handoff")}
+    found: Dict[str, Dict[str, str]] = {}
+    current: Optional[str] = None
+    for line in _section_lines(blocks):
+        heading = re.match(r"^###\s+\d+\.\s+(\S.*?)\s*$", line)
+        item = re.match(r"^-\s+([^:]+):\s*(.*?)\s*$", line)
+        if heading:
+            current = heading.group(1)
+            found[current] = {}
+        elif current is not None and item and item.group(1) in keys:
+            found[current][keys[item.group(1)]] = item.group(2)
+    for spec in specs:
+        if spec["file"] not in found:
+            errors.append(f"spec-section-missing: {spec['file']}")
+            continue
+        for key in ("notes", "handoff"):
+            value = found[spec["file"]].get(key, DASH)
+            spec[key] = None if value in ("", DASH) else value
+
+
+def _parse_sources(blocks: List[Block]) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    """Input files with their roles and the verbatim instruction (the fenced block after its label)."""
+    labels = {labels["instruction"] for labels in ROADMAP_LABELS.values()}
+    sources: List[Dict[str, str]] = []
+    instruction: Optional[str] = None
+    waiting = False
+    for info, body in blocks:
+        if info is not None:
+            if waiting:
+                instruction, waiting = "\n".join(body), False
+            continue
+        line = body[0].strip()
+        source = re.match(r"^-\s+`([^`]+)`\s+—\s+(.*)$", line)
+        label, _, rest = line.partition(":")
+        if source:
+            sources.append({"path": source.group(1), "role": source.group(2)})
+        elif label in labels:
+            waiting = rest.strip() != DASH
+    return sources, instruction
+
+
+def parse_goal_roadmap(text: str) -> Tuple[Dict[str, Any], List[str], List[str]]:
+    """(parsed roadmap, errors, warnings) of a goal roadmap's text: header, sections, the Order table and
+    its graph, the Mermaid block, shared touchpoints, spec sections and sources. No file is read."""
+    errors: List[str] = []
+    warnings: List[str] = []
+    head, names, sections = _roadmap_sections(text)
+    goal = _goal_roadmap_goal(text)
+    if goal is None:
+        errors.append("no-goal-line: '> Goal: <goal>' is not among the first ten lines")
+    count = next((int(m.group(1)) for m in (re.match(r"^>\s*Specs:\s*(\d+)\s*$", line) for line in head) if m), None)
+    if not any(re.match(r"^>\s*Generated:\s*\S", line) for line in head):
+        errors.append("no-generated-line: '> Generated: <ISO-8601 UTC>' is missing")
+    title = next((line[len("# Roadmap:"):].strip() for line in head if line.startswith("# Roadmap:")), "")
+    if not title:
+        errors.append("no-title: '# Roadmap: <title>' is missing")
+    missing = [heading for heading in ROADMAP_HEADINGS if heading not in names]
+    if missing:
+        errors.append("missing-section: " + ", ".join(missing))
+    known = [name for name in names if name in ROADMAP_HEADINGS]
+    if known != sorted(set(known), key=ROADMAP_HEADINGS.index):
+        errors.append("sections-out-of-order: " + " > ".join(known))
+    warnings += [f"extra-section: {name}" for name in names if name not in ROADMAP_HEADINGS]
+    specs = _parse_order(sections.get("## Order", []), errors, warnings)
+    if count != len(specs):
+        errors.append(f"specs-count: '> Specs:' says {count}, the Order table has {len(specs)} rows")
+    if specs:
+        errors += _order_graph_errors(specs, sections.get("## Graph", []))
+        _parse_spec_sections(sections.get("## Specs", []), specs, errors)
+    files = [spec["file"] for spec in specs]
+    groups: Dict[str, List[str]] = {}
+    for spec in specs:
+        groups.setdefault(spec["group"], []).append(spec["file"])
+    sources, instruction = _parse_sources(sections.get("## Sources", []))
+    parsed = {"goal": goal, "title": title, "specs": specs, "groups": groups,
+              "shared": _parse_shared(sections.get("## Shared touchpoints", []), files, errors),
+              "sources": sources, "instruction": instruction,
+              "overview": _section_text(sections.get("## Overview", [])),
+              "notes": _section_text(sections.get("## Notes", []))}
+    return parsed, errors, warnings
+
+
+def roadmap_check(path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """(check result, parsed roadmap): parse_goal_roadmap plus spec-not-found for a spec file missing
+    next to the roadmap."""
+    parsed, errors, warnings = parse_goal_roadmap(_read_source(path))
+    directory = os.path.dirname(os.path.abspath(path))
+    errors += [f"spec-not-found: {spec['file']}" for spec in parsed["specs"]
+               if not os.path.isfile(os.path.join(directory, spec["file"]))]
+    return {"ok": not errors, "valid": not errors, "path": path, "errors": errors, "warnings": warnings}, parsed
+
+
+def cmd_roadmap_check(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    result, _ = roadmap_check(args.file)
+    return (0 if result["valid"] else 1), result
+
+
+def cmd_roadmap_parse(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    result, parsed = roadmap_check(args.file)
+    if not result["valid"]:
+        return 1, {"ok": False, "errors": result["errors"], "warnings": result["warnings"]}
+    return 0, dict(ok=True, **parsed, warnings=result["warnings"])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command")
@@ -2652,6 +3491,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_settings = sub.add_parser("settings", help="chain settings, environments and backlog by the single reading rule")
     p_settings.add_argument("file", help="spec, plan, roadmap or part file")
     p_settings.set_defaults(func=cmd_settings)
+    p_inputs = sub.add_parser("inputs", help="classify the input files of a brainstorming call")
+    p_inputs.add_argument("files", nargs="*", help="input files (goal, research, findings JSON, BACKLOG.md, spec, …)")
+    p_inputs.add_argument("--note", help="the free text of the call: how to use the files")
+    p_inputs.set_defaults(func=cmd_inputs)
+    p_set = sub.add_parser("spec-set-check", help="shared files and symbols of a goal's specs, undeclared pairs")
+    p_set.add_argument("dir", help="directory of the goal's specs and journal")
+    p_set.add_argument("--goal", help="the goal, when the directory holds the journals of several goals")
+    p_set.add_argument("--specs", nargs="+", help="spec files, used only when the directory has no journal")
+    p_set.set_defaults(func=cmd_spec_set_check)
+    p_rw = sub.add_parser("roadmap-write", help="write <goal>-roadmap.md from the roadmap JSON")
+    p_rw.add_argument("dir", help="directory of the goal's specs and journal")
+    p_rw.add_argument("--graph", required=True, help="roadmap JSON file (in the OS temp folder)")
+    p_rw.add_argument("--lang", choices=("ru", "en"), help="template language, default: the first spec's")
+    p_rw.add_argument("--force", action="store_true", help="overwrite a file of that name without '> Goal:'")
+    p_rw.set_defaults(func=cmd_roadmap_write)
+    p_rc = sub.add_parser("roadmap-check", help="validate a goal roadmap <goal>-roadmap.md")
+    p_rc.add_argument("file", help="the goal roadmap")
+    p_rc.set_defaults(func=cmd_roadmap_check)
+    p_rp = sub.add_parser("roadmap-parse", help="a valid goal roadmap as JSON (plan-chain-runner's input)")
+    p_rp.add_argument("file", help="the goal roadmap")
+    p_rp.set_defaults(func=cmd_roadmap_parse)
 
     p_j_path = sub.add_parser("journal-path", help="chain journal of a spec, plan, roadmap or part")
     p_j_path.add_argument("file", help="spec, plan, roadmap or part file")

@@ -124,11 +124,11 @@ def _executor() -> Any:
 
 
 # Copy of executor_tool._CHAIN_FILE_RE for a runner installed without plan-executor. The original wins
-# when it is there; the two stay equal by contract (test SiblingLoaderTest, and spec 9 of plan-refactoring-01
-# changes both when it adds the goal roadmap).
+# when it is there; the two stay equal by contract (test SiblingLoaderTest). `roadmap\.md` covers the split
+# roadmap <X>-impl-roadmap.md and the goal roadmap <goal>-roadmap.md.
 _CHAIN_FILE_FALLBACK_RE = re.compile(
     r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
-    r"|impl-roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
+    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
 
 
 def _chain_file_re(warnings: List[str]) -> Any:

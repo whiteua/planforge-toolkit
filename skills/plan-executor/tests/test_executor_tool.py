@@ -168,6 +168,48 @@ class TestDetectInput(unittest.TestCase):
         self.assertEqual(result, {"input_type": "whole", "roadmap": None})
 
 
+GOAL_ROADMAP_TEXT = "> Goal: plan01\n> Specs: 1\n> Generated: 2026-10-05T00:00:00Z\n\n# Roadmap: Goal\n"
+
+
+class TestGoalRoadmap(unittest.TestCase):
+    def setUp(self):
+        self.tool = load_tool()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.roadmap = self.root / "plan01-roadmap.md"
+        self.roadmap.write_text(GOAL_ROADMAP_TEXT, encoding="utf-8")
+
+    def test_plan_next_to_a_goal_roadmap_stays_whole(self):
+        plan = self.root / "plan01.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        self.assertEqual(self.tool.detect_input(str(plan)), {"input_type": "whole", "roadmap": None})
+
+    def test_goal_roadmap_as_input_is_refused(self):
+        with self.assertRaisesRegex(self.tool.ToolError, "not-a-split-roadmap: this is a goal roadmap; "
+                                                         "run /plan-chain-runner "):
+            self.tool.detect_input(str(self.roadmap))
+        with self.assertRaisesRegex(self.tool.ToolError, "not-a-split-roadmap"):
+            self.tool.parse_roadmap(str(self.roadmap))
+
+    def test_ledger_init_on_a_goal_roadmap_is_exit_2(self):
+        result = subprocess.run([sys.executable, str(TOOL_PATH), "ledger-init", str(self.root / "exec"),
+                                 str(self.roadmap)], capture_output=True, text=True, encoding="utf-8", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(json.loads(result.stdout)["errors"][0].startswith("not-a-split-roadmap"))
+        self.assertFalse((self.root / "exec").exists())
+
+    def test_goal_roadmap_is_a_chain_file(self):
+        self.assertTrue(self.tool._is_chain_file("docs/x-roadmap.md"))
+        self.assertTrue(self.tool._is_chain_file("docs/x-impl-roadmap.md"))
+
+    def test_pattern_equals_plan_brainstorming(self):
+        module = self.tool._load_brainstorm_tool()
+        if module is None:
+            self.skipTest("plan-brainstorming not installed alongside")
+        self.assertEqual(self.tool._GOAL_ROADMAP_RE.pattern, module.GOAL_ROADMAP_RE.pattern)
+
+
 class TestParseRoadmap(unittest.TestCase):
     def setUp(self):
         self.tool = load_tool()

@@ -68,6 +68,18 @@ class JournalContractTest(unittest.TestCase):
         result = self.bt.journal_validate(self.journal)
         self.assertTrue(result["ok"], result["errors"])
 
+    def test_journal_path_of_both_roadmap_kinds(self):
+        goal_roadmap = _write(self.root, "demo-roadmap.md",
+                              "> Goal: demo\n> Specs: 1\n> Generated: 2026-10-05T00:00:00Z\n\n# Roadmap: Demo\n")
+        info = self.bt.journal_path_for(goal_roadmap)
+        self.assertEqual((info["journal"], info["kind"], info["spec"], info["plan"]),
+                         (self.journal, "goal-roadmap", None, None))
+        split = _write(self.root, "demo-impl-roadmap.md", "# Roadmap\n\n> Source: [demo-impl.md](demo-impl.md)\n")
+        info = self.bt.journal_path_for(split)
+        self.assertEqual((info["journal"], os.path.basename(info["plan"]), info["warnings"]),
+                         (self.journal, "demo-impl.md", []))
+        self.assertNotIn("kind", info)
+
     def test_full_chain_replays_and_validates(self):
         bt, plan = self.bt, self.plan
         self.assertEqual(os.path.basename(self.journal), "demo-chain.json")

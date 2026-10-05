@@ -134,3 +134,10 @@ right section is checked in the self-review.
   Each spec lists the other specs' finding ids in `Out of Scope` with a
   pointer to the spec that covers them, so `findings-coverage` passes for
   every spec.
+
+## Findings among several inputs
+
+With several inputs (`inputs` → `mode: multi`) a findings JSON is one of them. Steps A-C run for
+the part of the goal that takes the findings (the instruction says which; otherwise ask), and
+`findings-coverage` runs on the spec that takes them. A findings JSON alone is findings mode as
+above.

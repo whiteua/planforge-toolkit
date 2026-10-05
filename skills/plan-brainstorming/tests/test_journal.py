@@ -272,6 +272,45 @@ class JournalCreateTest(JournalCase):
         self.assertEqual([p["id"] for p in bt.journal_load(self.journal)["plans"]], ["alpha-1-impl"])
 
 
+GOAL_ROADMAP = "> Goal: alpha\n> Specs: 1\n> Generated: 2026-10-05T00:00:00Z\n\n# Roadmap: Alpha\n"
+
+
+class GoalRoadmapJournalPathTest(JournalCase):
+    def test_goal_roadmap_leads_to_the_goal_journal(self):
+        roadmap = _write(os.path.join(self.dir, "alpha-roadmap.md"), GOAL_ROADMAP)
+        out = bt.journal_path_for(roadmap)
+        self.assertEqual((out["journal"], out["goal"], out["spec"], out["plan"], out["kind"], out["warnings"]),
+                         (self.journal, "alpha", None, None, "goal-roadmap", []))
+        bold = _write(os.path.join(self.dir, "x-roadmap.md"), GOAL_ROADMAP.replace("> Goal:", "> **Goal:**"))
+        self.assertEqual(bt.journal_path_for(bold)["goal"], "alpha")
+
+    def test_splitter_roadmap_is_unchanged(self):
+        roadmap = _write(os.path.join(self.dir, "alpha-1-impl-roadmap.md"), SOURCE.format("roadmap"))
+        out = bt.journal_path_for(roadmap)
+        self.assertEqual((out["plan"], out["spec"], out["warnings"]), (self.plan, self.spec, []))
+        self.assertNotIn("kind", out)
+
+    def test_roadmap_without_markers_keeps_the_old_result_and_warns(self):
+        roadmap = _write(os.path.join(self.dir, "delta-roadmap.md"), "# Roadmap\n\nno markers\n")
+        out = bt.journal_path_for(roadmap)
+        self.assertEqual((out["goal"], out["plan"], out["spec"]), ("delta-roadmap", roadmap, None))
+        self.assertEqual(out["warnings"], ["roadmap-without-markers: delta-roadmap.md"])
+        self.assertEqual(bt.journal_path_for(self.plan)["warnings"], [])  # a plan is not a roadmap
+
+    def test_goal_line_wins_over_source(self):
+        both = _write(os.path.join(self.dir, "both-roadmap.md"), GOAL_ROADMAP + SOURCE.format("x"))
+        out = bt.journal_path_for(both)
+        self.assertEqual((out["kind"], out["journal"]), ("goal-roadmap", self.journal))
+        self.assertEqual(out["warnings"], ["roadmap-both-markers: both-roadmap.md: '> Goal:' wins over Source"])
+
+    def test_cli_create_from_a_goal_roadmap(self):
+        roadmap = _write(os.path.join(self.dir, "alpha-roadmap.md"), GOAL_ROADMAP)
+        code, out = _run("journal-path", roadmap, "--create")
+        self.assertEqual((code, out["kind"], out["created"]), (0, "goal-roadmap", True))
+        data = bt.journal_load(self.journal)
+        self.assertEqual((data["goal"], data["specs"], data["plans"]), ("alpha", [], []))
+
+
 class JournalTransitionTest(JournalCase):
     def setUp(self):
         super().setUp()

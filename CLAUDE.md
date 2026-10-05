@@ -9,7 +9,7 @@ PlanForge Toolkit is a collection of **agent skills** (agentskills.io `SKILL.md`
 The skills form one pipeline:
 
 ```
-plan-brainstorming → plan-writing → [plan-splitter] → plan-executor → plan-resolver
+plan-brainstorming (specs + <goal>-roadmap.md, then stops) → plan-writing → [plan-splitter] → plan-executor → plan-resolver
                                   plan-iterative-revision (usable at any stage)
 plan-chain-runner — runs approved specs of one goal through writing → revision → [split] → execution → audit → commit
 writing-skills — meta-skill for authoring/testing new skills

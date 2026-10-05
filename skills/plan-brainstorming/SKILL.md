@@ -1,6 +1,6 @@
 ---
 name: plan-brainstorming
-description: "Use before implementing a new feature, component, or behavior change that needs design decisions. Explores intent, requirements and trade-offs through one-question-at-a-time dialogue and produces an approved spec for plan-writing. Also use when given a JSON list of code-review findings (file, line, summary, failure_scenario) to design their fixes. Also use with the shared BACKLOG.md to turn its unchecked items into the next spec."
+description: "Use before implementing a new feature, component, or behavior change that needs design decisions. Explores intent, requirements and trade-offs through one-question-at-a-time dialogue and produces approved specs and the goal roadmap; never runs the later skills. Also use when given a JSON list of code-review findings (file, line, summary, failure_scenario) to design their fixes. Also use with the shared BACKLOG.md to turn its unchecked items into the next spec."
 ---
 
 # Brainstorming Ideas Into Designs
@@ -9,38 +9,64 @@ If the only argument is `help`: show this skill's USAGE.md in the dialogue langu
 
 Turn ideas into approved designs and specs through collaborative dialogue:
 understand the project context, ask questions one at a time, present the
-design, get approval, write the spec, hand off to `plan-writing`.
+design, get approval, write the spec; after the last spec of the call check
+the goal's specs together, write the goal roadmap and stop. The user starts
+the later skills.
 
 References are read at the step that needs them: `references/depth-tiers.md` at step 2,
 `references/clarify-checklist.md` at step 7, `references/spec-contract.md` (spec structure,
-naming, hand-off) at step 6 before presenting the design, `references/findings-input.md`
-before step 1 in findings mode.
+naming, hand-off, goal roadmap) at step 6 before presenting the design, `references/findings-input.md`
+before step 1 when a findings JSON is among the inputs, `references/spec-set-reviewer-prompt.md`
+at step 11.
 
 <HARD-GATE>
 Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.
+
+This skill writes only specs, the goal roadmap, the chain journal and its own BACKLOG.md lines. It never invokes `plan-writing`, `plan-executor`, `plan-chain-runner` or any other skill, never writes code and never changes project files — also after the user approved the specs: the closing report names the command, and the user runs it.
 </HARD-GATE>
 
 ## Anti-Pattern: "This Is Too Simple To Need A Design"
 
 Once this skill runs, every request goes through the process: a todo list, a single-function utility, a config change. "Simple" projects are where unexamined assumptions cause the most wasted work. The design can be a few sentences, but you MUST present it and get approval.
 
-## Input Modes
+## Inputs
 
-- **Idea** (default): a goal file path or an inline description.
-- **Findings**: a JSON array of code-review findings (`file`, `line`,
-  `summary`, `failure_scenario`), as a `.json` path or pasted inline. Read
+`/plan-brainstorming <file>… <free text>`: the tokens that exist as files are the inputs, the rest is
+the instruction how to use them. Before step 1 run `inputs <file>… --note "<free text>"` (only text:
+`inputs --note "<text>"`). It returns each file's `kind` (`spec`, `goal`, `findings`, `backlog`,
+`plan`, `goal-roadmap`, `markdown`, `json`, `text`, `binary`, `missing`) with `lang`, `bytes` and
+`lines` (`count` for findings), the `mode` of the call, `plan_root` and the `note`. The goal file is
+the markdown file without spec headings whose name ends in `goal`, else the first such file. Exit `1`
+(a `missing` file): show the list and ask what was meant. A token that looks like a path but is no
+file is part of the instruction by design: the step-1 restatement names what was taken as files, and
+the user corrects it. A `binary` file is not read.
+
+- **Idea** (`mode: idea`): one goal file, or only text.
+- **Findings** (`mode: findings`): a JSON array of code-review findings (`file`, `line`,
+  `summary`, `failure_scenario`) in a single `.json` file; `inputs` reports `mode: findings` only
+  for such a file. Findings pasted into the chat are not a file: do not put them into `--note`;
+  recognise them yourself, save them to a temporary file outside the project or pass them to
+  `findings-parse -`, and go on as in findings mode. Read
   `references/findings-input.md` before step 1. Findings are the problem
   statement, not the design. "Here are the bugs, just fix them" still needs
   an approved spec.
-- **Backlog**: `/plan-brainstorming BACKLOG.md [section]`. Run `backlog-parse <file>
+- **Backlog** (`mode: backlog`): `/plan-brainstorming BACKLOG.md [section]`. Run `backlog-parse <file>
   [--section <section>]`; the unchecked items are the problem statement. Before the first
   question, run the backlog sweep (see Backlog sweep): items an approved spec already covers
   are checked off after the user confirms and are not offered again. The first question is
   which of the remaining items go into this spec (multiple choice, one option per item). Never
   edit BACKLOG.md lines by hand: after the user approves the spec file, `backlog-mark` checks
   off the items the spec took in (see Backlog).
-- **Amend**: `/plan-brainstorming <…>-spec.md`, an existing spec (the file name ends in
-  `-spec.md` and the file has a `# Goal` heading). Change that spec in place; see Amend mode.
+- **Amend** (`mode: amend`): `/plan-brainstorming <…>-spec.md`, an existing spec as the only
+  argument (the file name ends in `-spec.md` and the file has a `# Goal` heading). Change that spec
+  in place; see Amend mode.
+- **Several inputs** (`mode: multi`): the instruction decides how each file is used. Without one:
+  `goal`, `markdown` and `text` are the problem statement and reference material (cited in the specs'
+  `## Architecture` as `path:line`); `findings` follow `references/findings-input.md` for the part of
+  the goal that takes them; `backlog` gives items to choose from (Backlog mode for its part); a `spec`
+  is reference material, not amend; a `plan` or a `goal-roadmap` is read only. Without `plan_root`
+  ask for the spec path as for an inline idea. The inputs and the instruction go into the goal
+  roadmap (`## Sources`), never into a spec's metadata.
 
 ## Language
 
@@ -59,8 +85,8 @@ instructions ("Spec written to …", "MAX review passes done …", "I'm using th
 skill …") are templates: say them in the dialogue language, not verbatim. The language is
 detected, not guessed: `ru` when more than 5% of the letters are Cyrillic, otherwise `en`.
 
-In this skill: `brainstorm_tool.py detect-lang <file>` for a goal file or a findings JSON; for an
-inline idea, the language of the user's message.
+In this skill: the `lang` of `inputs` (the goal file's, else the instruction's, else the first readable
+file's); `detect-lang <file>` for a single file; for an inline idea, the language of the user's message.
 
 ## Tool
 
@@ -81,7 +107,11 @@ Exit codes: `0` ok, `1` check failed, `2` bad input or I/O error.
 | `backlog-unmark <root> --section S --item TEXT` | Amend mode and a withdrawn spec, after the user confirms: unchecks one `[x]` item the spec no longer covers. `unmarked`, `already` (exit `0`); `cancelled`, `not-found`, `ambiguous` (exit `1`, nothing written). |
 | `settings <file>` | Chain settings, environments and backlog of a spec, plan, roadmap or part (single reading rule; other skills load it as a module). |
 | `plan-tasks <plan>` | Tasks of a plan by the plan format contract (`### Task N: <title>`): id, title, line range, Files, Preconditions refs, size and SHA-1 of the body, `malformed`, `duplicates`. Not used in the dialogue; the other pipeline scripts load `parse_plan_tasks` as a module, agents may call the command. Exit `2` with `plan-unreadable`. |
-| `journal-path <spec\|plan\|roadmap\|part> [--create]` | Path and goal of the chain journal `<goal>-chain.json` (a roadmap or part leads to its master plan, a plan to its spec). `--create` creates the journal and registers the spec: after the spec is approved (see Chain journal); given a plan, roadmap or part it also registers the master plan (every stage `pending`). |
+| `inputs [<file>…] [--note TEXT]` | Before step 1: kind, language and size of every input, the mode of the call, `plan_root`, the note (see Inputs). Exit `1` for a missing file, `2` (`nothing-to-classify`) without files and note. |
+| `spec-set-check <dir> [--goal G] [--specs <file>…]` | Step 11: `specs`, `touchpoints`, `undeclared`, `numbered_items`, `self_edges` of the goal's specs (from the journal, `--goal` picks `G-chain.json` when the directory holds the journals of several goals; without a journal `--specs`, else every `*-spec.md` there or only `G-*-spec.md` with `--goal`, warning `no-journal`); one spec → `single-spec`. Warnings only, exit `0`; `2` for an unreadable spec or several journals without `--goal` (`ambiguous-journal`). |
+| `roadmap-write <dir> --graph <json> [--lang ru\|en] [--force]` | Step 12: checks the roadmap JSON against the journal and the disk and writes `<goal>-roadmap.md` (see Goal roadmap). Exit `1` lists the errors, the file is untouched; `2` for malformed JSON (`graph-invalid`). |
+| `roadmap-check <file>`, `roadmap-parse <file>` | Step 12 after the write: `valid`, `errors`, `warnings` (exit `1` when invalid); the valid roadmap as JSON, the input format of `plan-chain-runner`. |
+| `journal-path <spec\|plan\|roadmap\|part> [--create]` | Path and goal of the chain journal `<goal>-chain.json` (a roadmap or part leads to its master plan, a plan to its spec; a goal roadmap with `> Goal:` leads to the goal's journal, `kind: goal-roadmap`). `--create` creates the journal and registers the spec: after the spec is approved (see Chain journal); given a plan, roadmap or part it also registers the master plan (every stage `pending`). |
 | `journal-event`, `journal-unit`, `journal-question`, `journal-answer`, `journal-finding`, `journal-commit`, `journal-export-findings`, `journal-show`, `journal-reconcile [--rebuild]`, `journal-validate` (each takes `<journal>` first) | The journal API of the later skills: stage transitions, unit events, questions and answers, findings outside the plan (appended to `BACKLOG.md`), commits, the `<goal>-followups.json` export, a summary, repair and validation. Format: `assets/chain-journal.schema.json`. |
 
 ## Checklist
@@ -89,22 +119,24 @@ Exit codes: `0` ok, `1` check failed, `2` bad input or I/O error.
 Complete these steps in order. On Standard and Deep, keep them as todo items; on Quick, one
 item for the whole checklist is enough.
 
-1. **Explore project context** — files, docs, recent commits. Restate the request in one sentence: this is the fidelity anchor for step 9. Findings mode: parse and triage the findings (`references/findings-input.md` Steps A-B). Backlog mode: `backlog-parse`, the backlog sweep (see Backlog sweep), then show the remaining unchecked items.
+1. **Explore project context** — `inputs` first (see Inputs), then files, docs, recent commits. Restate the request in one sentence with the instruction and the role of every input file: this is the fidelity anchor for step 9. Findings mode: parse and triage the findings (`references/findings-input.md` Steps A-B). Backlog mode: `backlog-parse`, the backlog sweep (see Backlog sweep), then show the remaining unchecked items. Then propose the decomposition (see Understanding the Idea): one spec or several, and the order in which they are written; the user chooses. Steps 2-10 run once per spec, one spec after the other.
 2. **Determine depth tier** — auto-classify Quick/Standard/Deep, state it, let the user confirm or adjust (`references/depth-tiers.md`). Findings mode: show the triage table in the same message.
 3. **Offer the visual companion** — only when the questions ahead are visual (layouts, flows, comparisons). Its own message (see Visual Companion); skip it otherwise.
-4. **Ask clarifying questions** — purpose, constraints, success criteria (see Asking Questions). Findings mode: first the scope question (`references/findings-input.md` Step C). Backlog mode: first the question which of the remaining items go into this spec.
+4. **Ask clarifying questions** — purpose, constraints, success criteria (see Asking Questions). Findings mode: first the scope question (`references/findings-input.md` Step C). Backlog mode: first the question which of the remaining items go into this spec. Several inputs: when the instruction leaves the role of a file open, ask about it first. Several specs: only the questions of the spec being written; the decisions of the specs before it are not asked again.
 5. **Propose approaches** — Standard/Deep: 2-3 with trade-offs, lead with your recommendation and why. Quick: one approach, unless a real fork exists.
 6. **Present the design** — in sections scaled to the tier; get approval after each section.
 7. **Close underspecified areas** — ambiguity sweep (`references/clarify-checklist.md`) until `Open Questions` can be `(none)`. If an answer changes the approved design, re-present the affected section and get approval again. Then propose the chain settings in one message (see Chain Settings) and wait for the user to confirm or adjust them.
 8. **Write the spec** — first tell the user in one line what happens next: "Design approved. Writing the spec and running the checks; project code is not changed. I will come back with the file for your approval." Then see Writing the Spec. Run `spec-check` (and `findings-coverage` in findings mode) until both exit `0`.
 9. **Self-review** — see below.
-10. **User review** — ask the user to review the spec file; on approval, append to BACKLOG.md and check off the items the spec took in (see Backlog), create the chain journal (see Chain journal), then invoke `plan-writing`.
+10. **User review** — ask the user to review the spec file; on approval, append to BACKLOG.md and check off the items the spec took in (see Backlog) and create or join the chain journal (see Chain journal). The next spec of the call starts at step 2; after the last one go to step 11.
+11. **Set consistency** — run `spec-set-check <dir> --goal <goal>` (see Set consistency): its `specs` lists the goal's specs, and `single-spec` (one spec) skips the rest of this step; with two or more specs check them together.
+12. **Goal roadmap** — write and check `<goal>-roadmap.md` (see Goal roadmap), then close with one report: the spec files, the set check's findings and what became of them, the roadmap, the BACKLOG lines, the journal and the command the user runs next. Stop.
 
-The terminal state is invoking `plan-writing` (in amend mode: the closing report, see Amend mode). Do not invoke any other skill after brainstorming.
+The terminal state is the goal roadmap and the closing report (in amend mode: the closing report, see Amend mode). Do not invoke `plan-writing`, `plan-chain-runner` or any other skill: the report names the command — `/plan-chain-runner <spec> [<spec>…]` with the specs in the roadmap's `#` order, or `/plan-writing <spec>` — and the user runs it.
 
 ## Understanding the Idea
 
-- Assess scope first. If the request covers several independent subsystems (e.g. "a platform with chat, file storage, billing, and analytics"), say so immediately and help decompose it: the pieces, how they relate, the build order. Then brainstorm the first sub-project. Each sub-project gets its own spec → plan → implementation cycle. Size counts too: one spec should become one plan of at most 40 tasks (`SIZE_BUDGET` in `brainstorm_tool.py`); a design that will not fit is decomposed the same way (Chain Settings, **Volume**).
+- Assess scope first and propose the decomposition after step 1, from three signals: the user's instruction, the rule "several independent subsystems" (e.g. "a platform with chat, file storage, billing, and analytics") and size: one spec should become one plan of at most 40 tasks (`SIZE_BUDGET` in `brainstorm_tool.py`; the estimate as in Chain Settings, **Volume**). Name the pieces, how they relate and the order in which their specs are written; the user chooses the set and the order. The specs are then brainstormed one after the other in this call (steps 2-10 each). A spec the goal already has is read, never rewritten here: amend is a separate call with that spec as the only argument.
 - **Investigate before asking.** If the code, docs, or commits answer a question, find the answer yourself.
 - **Verify claims about existing code.** When the user describes how code behaves, check it. If the code disagrees, surface the contradiction before designing on it. What you verified goes into the spec as `path:line` citations in Architecture and Components, so `plan-writing` does not rediscover it.
 - **External systems need permission.** Investigation means reading the repository and running local commands without side effects (build, offline tests, grep). Anything that reaches an external system — a database, an API, a remote service, a cloud account — even a constant query, runs only after the user explicitly allows it and names the environment. A permission covers the named environment only: never extend it to another one, and never treat an existing project script that targets another environment as permission. Production needs a separate confirmation for every action. Pre-approved reads (`read=run` in the spec's `> Environment:` line, production included) cover the plan's steps and the read-only checks of plan-iterative-revision and plan-resolver; changes on production are never pre-approved. This skill investigates before the spec exists, so it still asks. Without permission the claim stays unverified: design on the cautious reading and record how it will be verified (`references/spec-contract.md`, "Unverified claims").
@@ -146,6 +178,8 @@ Before writing the spec, send ONE message that proposes the decisions the rest o
     `<plan-root>-2-spec.md`, …; a descriptive suffix only when the user asks for it. A spec
     added to a goal that already has specs takes the next free number; existing specs are
     never renamed.
+  - Several specs in one call: each gets the next free number and its own approval (steps 8-10)
+    before the next one starts, in the order the user chose at step 1.
   - Backlog mode has no goal file: ask for the path and recommend `<section>-spec.md`, or the
     next free `<section>-N-spec.md` when specs of that section already exist.
 - First line: `> Tier: <Quick|Standard|Deep>` with the confirmed tier. `plan-writing` inherits it.
@@ -170,7 +204,7 @@ Fix issues inline. On the Deep tier, if the host supports subagents, also dispat
 
 ## User Review Gate
 
-> "Spec written to `<path>`. Please review it and let me know if you want any changes before we write the implementation plan."
+> "Spec written to `<path>`. Please review it and let me know if you want any changes; after your approval I go on with the next spec, or with the check of the goal's specs and the roadmap."
 
 Wait for the response. On changes: edit, re-run `spec-check` and the self-review, ask again.
 
@@ -178,7 +212,7 @@ Backlog mode, and amend mode when the change took in BACKLOG.md items: the same 
 items the spec covers (section, text and line, as `backlog-parse` gave them) and says that they
 will be checked off `[x]` once the file is approved. On changes that alter the list, show it again.
 
-**STOP-condition.** Invoke `plan-writing` only when ALL are true:
+**STOP-condition.** A spec is approved, and the skill goes on to the Backlog step, only when ALL are true:
 
 1. `spec-check` exits `0`; in findings mode, `findings-coverage` also exits `0`.
 2. Self-review passed.
@@ -191,14 +225,16 @@ outside git the current working directory. Format and ownership: `references/spe
 ("Artifacts and naming"). Write only through `backlog-append`, `backlog-mark` and `backlog-unmark`, never by hand; the user's
 section (`## My notes` / `## Свои заметки`) is never touched.
 
-After the user approved the spec file, before invoking `plan-writing`:
+After the user approved the spec file:
 
 1. Every `## Out of Scope` item that no other spec of the same goal covers:
    `backlog-append <root> --section <S> --source "plan-brainstorming, <spec file name>"
    --item "<item, one line>" --lang <detect-lang of the spec>`. `<S>` = the spec's
    `> Backlog:` value, else the spec file name without `-spec.md`.
 2. The goal was decomposed into several specs: one `--plain` line per spec, in build order,
-   `--item "<spec file name> — <what it covers>"` (the spec map).
+   `--item "<spec file name> — <what it covers>"` (the spec map). After the goal roadmap is written
+   (step 12), one more `--plain` line points at it: `--source "plan-brainstorming, <goal>-roadmap.md"
+   --item "<goal>-roadmap.md — order of the goal's specs"`; the map stays a pointer.
 3. Backlog mode: for each item listed in the "Spec written" message,
    `backlog-mark <root> --section <the item's section> --item "<its text as backlog-parse gave it>"`.
    `[x]` means "taken into an approved spec", not "done"; `[ ]` is open and `[-]` cancelled. `[-]`
@@ -252,12 +288,33 @@ skills record their stages, questions and findings there with the `journal-*` co
 above); their findings come back as `<goal>-followups.json`, a findings input of this skill.
 
 The journal is not a gate:
-- exit `2` `journal-corrupt` → say it, propose `journal-reconcile <journal> --rebuild`, and invoke
-  `plan-writing` anyway;
+- exit `2` `journal-corrupt` → say it, propose `journal-reconcile <journal> --rebuild`, and go on;
+  `roadmap-write` (step 12) then fails the same way: write the roadmap after the rebuild;
 - exit `1` `journal-locked` → repeat the command once; still locked → say it in one line and
   continue without the journal;
 - exit `1` `journal-write-failed` (the file system refused the write, e.g. a read-only journal) →
   say it in one line with the error text and continue without the journal.
+
+## Set consistency
+
+Step 11, for the specs of the goal's journal, this call's and the earlier ones (`spec-set-check` lists them in `specs`; with one spec it answers `single-spec` and the rest of this step is skipped). Specs written one at a time drift apart on what they share; this step finds it before any plan exists.
+
+1. `spec-set-check <dir> --goal <goal>` (`<dir>` = the specs' directory; `<goal>` = the goal of the journal, as `journal-path <spec>` gives it, i.e. the spec's `> Backlog:` value; `--goal` picks `<goal>-chain.json` when the directory holds the journals of several goals, without it several journals are `ambiguous-journal`, exit `2`). `touchpoints`: a path or symbol that two or more specs name in their Components table; `undeclared`: a touchpoint shared by two specs that do not mention each other; `numbered_items`: a file with numbered references (`§N`, `пункт N`, `step N`) from two or more specs — the spec delivered last sets the final numbering; `self_edges`: which spec mentions which, the start of the roadmap's `depends`. Warnings only. `single-spec`: go to step 12.
+2. Dispatch a reviewer subagent with `references/spec-set-reviewer-prompt.md`, the paths of all specs and the script's JSON — always with two or more specs, on every tier. Without a subagent tool, do the same review yourself by the prompt and say so in one line.
+3. One message with the findings: the script's `undeclared` and `numbered_items`, then the reviewer's lines `spec → section → what is wrong → how to reconcile`. The user accepts or rejects each.
+4. An accepted finding is applied to each affected spec by the amend rules: show the change, run `spec-check`, get the file approved on its own, append a changed Out of Scope to `BACKLOG.md`. A rejected finding goes to the roadmap's `## Notes`.
+5. After edits, once more: `spec-set-check` always, the reviewer only when the edits touched a shared point. No finding blocks the roadmap: the decision is the user's.
+
+## Goal roadmap
+
+Step 12, always — also for one spec (one row, one node): the runner gets one entry point. Format: `references/spec-contract.md`, "Goal roadmap".
+
+1. Build the roadmap JSON: `{"goal", "title", "overview", "lang", "sources": [{"path", "role"}], "instruction", "specs": [{"file", "title", "depends": [files], "group", "notes", "handoff"}], "shared": [{"name", "kind", "specs": [files], "order": [files], "note"}], "notes"}`. The goal comes from the journal (`journal-show`, field `goal`) and the specs from the `specs` of `spec-set-check`. If `<goal>-roadmap.md` already exists (an earlier call), start the JSON from `roadmap-parse` of it (on `valid: false` show the errors and ask): keep the earlier specs' `depends`, `group`, `notes` and `handoff`, the `shared` rows, `sources`, `instruction`, `overview` and `notes`, add the new specs, and change an earlier entry only on the user's word. For the new specs: `depends`, `group` (letters or digits, never the group of a dependency), `notes` (caveats such as "plan 2 is written after 3 because …") and `handoff` (what the spec hands to the next ones) from the dialogue and step 11's `self_edges`; `shared` from `touchpoints` with the delivery `order` (from `depends`, else from the dialogue) and a `note` on what the specs share and who sets the final numbering; `sources` and `instruction` from `inputs`; rejected set-check findings in `notes`. Save it in the OS temp folder, not in the project.
+2. `roadmap-write <dir> --graph <tmp>/roadmap.json`. Exit `1` lists the errors and leaves the file untouched: `specs-missing` / `spec-not-found` (propose `journal-reconcile` or restoring the file), `unknown-dependency`, `dependency-cycle`, `group-conflict`, `unknown-shared-spec`, `shared-order-conflict` (a delivery order must follow `#`), `goal-mismatch` — fix the JSON or ask, then run again. `exists-foreign` (a file of that name without `> Goal:`): ask before passing `--force`. The goal's own roadmap is rewritten without a question when a spec joins the goal.
+3. `roadmap-check <goal>-roadmap.md` must return `valid: true`.
+4. The BACKLOG line that points at the roadmap (Backlog, step 2), then the closing report (Checklist, step 12).
+
+A spec the user rejected is not written, so it is neither in the journal nor in the roadmap; the closing report names it. `Tier` and `Estimate` come from `spec-check` of each spec (`~N` = `volume.estimate_tasks`; `?` when it fails, `—` without `volume`, each with a warning). File numbers (`-N-spec.md`) are the order of writing, the column `#` the order of execution; they may differ. The roadmap is the input format of `plan-chain-runner` (`roadmap-parse`); until the runner takes it as an argument, the report names `/plan-chain-runner <spec> [<spec>…]` in `#` order.
 
 ## Amend mode
 

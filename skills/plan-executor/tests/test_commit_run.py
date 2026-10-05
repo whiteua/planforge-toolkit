@@ -154,7 +154,7 @@ class TestChainFiles(RepoCase):
 
     def test_names(self):
         for rel in ("docs/g-chain.json", "g-chain.json.lock", "a/g-diffs.md", "g-followups.json", "docs/g-spec.md",
-                    "docs/g-impl.md", "docs/g-impl-b.md", "docs/g-impl-roadmap.md", "docs/g-impl-completion.md",
+                    "docs/g-impl.md", "docs/g-impl-b.md", "docs/g-impl-roadmap.md", "docs/g-roadmap.md", "docs/g-impl-completion.md",
                     "docs/g-impl-review-2.md", "docs/g-impl-report-3.md", "docs/g-impl-report-3-final.md",
                     "BACKLOG.md"):
             self.assertTrue(self.tool._is_chain_file(rel), rel)

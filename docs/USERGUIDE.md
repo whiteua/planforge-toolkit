@@ -63,9 +63,9 @@ Each skill is an independent module with a well-defined input, output, and invar
 
 ```
 ┌──────────────────────┐
-│  plan-brainstorming  │  Idea → Design Spec
+│  plan-brainstorming  │  Idea(s) → Specs + Goal Roadmap
 └──────────┬───────────┘
-           │ *-spec.md
+           │ *-spec.md, <goal>-roadmap.md
 ┌──────────▼───────────┐
 │     plan-writing     │  Spec → Implementation Plan
 └──────────┬───────────┘
@@ -99,11 +99,12 @@ plan-chain-runner <specs>  — runs the whole chain for approved specs, by their
 
 ### plan-brainstorming
 
-**Purpose:** Turn a vague idea into a validated design spec through structured dialogue.
+**Purpose:** Turn a vague idea, or several input files with an instruction, into validated design specs and a goal roadmap through structured dialogue; the skill stops there and you start the next step.
 
 **Invoke:**
 ```
 /plan-brainstorming <goal-file-or-inline-description>
+/plan-brainstorming <file>… <free text>   # several inputs; the text says how to use them
 /plan-brainstorming <findings.json>   # JSON list of code-review findings
 /plan-brainstorming BACKLOG.md        # unchecked items of the shared backlog become the task
 /plan-brainstorming <spec.md>         # amend mode: change an approved spec in place
@@ -121,7 +122,7 @@ With a findings JSON (`file`, `line`, `summary`, `failure_scenario` per item), t
 6. Presents the design section by section, asks for approval
 7. Runs the ambiguity sweep — closes all open questions (re-presents a design section if an answer changes it)
 8. Writes the spec file, checks the contract with `brainstorm_tool.py spec-check`, runs the self-review including a fidelity check against your original request
-9. Hands off to `plan-writing` after you approve the spec (the spec is not committed)
+9. After you approve the spec: the next spec of the goal (when you chose several), then the check of two or more specs together (`spec-set-check` and a reviewer subagent), then `<goal>-roadmap.md` and one closing report with the command to run next (the specs are not committed; no later skill is started)
 
 Every message you see (questions, answer options, summaries) and the spec body follow the language of your input (goal file, findings JSON or message; `brainstorm_tool.py detect-lang`); section headings and format tokens stay in English. The same rule holds in every skill of the pipeline.
 
@@ -136,6 +137,10 @@ Every message you see (questions, answer options, summaries) and the spec body f
 **Volume estimate.** The Chain Settings message also shows how large the plan is likely to be: "Volume estimate: ~N tasks — M components × k, tier T; budget 40" (k is 1 on Quick, 2 on Standard, 3 on Deep, plus one task per Testing Strategy item; `spec-check` returns the same numbers as `volume`). Above 40 tasks the skill proposes splitting the goal into several specs (`<root>-1-spec.md`, `<root>-2-spec.md`, …) and waits for your choice. The estimate is never written into the spec.
 
 **Backlog.** After you approve the spec, its Out of Scope items (and, when one task is split into several specs, the spec map) are appended to `BACKLOG.md` at the repository root, in the section of this goal. In backlog mode the items the spec took in are listed in the "Spec written" message and checked off `[x]` after your approval (`backlog-mark`); `[x]` means "taken into an approved spec", not "done". Before the first question, backlog mode matches the unchecked items with the approved specs of their section (`backlog-sweep`) and, after you confirm, checks off the ones a spec already covers. Items marked `[-]` are cancelled by you; the skills never set or clear that mark and never append such an item again. Several specs of one goal are numbered `<root>-1-spec.md`, `<root>-2-spec.md` unless you ask for descriptive names.
+
+**Several inputs.** `/plan-brainstorming goal.md research.md review.json <text>` takes every existing file as an input and the rest of the line as the instruction. `brainstorm_tool.py inputs` classifies each file (`goal`, `markdown`, `findings`, `backlog`, `spec`, `plan`, `goal-roadmap`, `json`, `text`, `binary`, `missing`) and returns the mode of the call; the agent restates which file plays which role, and you correct it. Without an instruction the goal file and other notes are the problem statement and background, findings go to the spec that takes them, a spec or a plan is read only.
+
+**Several specs, the set check and the goal roadmap.** After the first step the skill proposes one spec or several (by size, your instruction and independent subsystems); you choose the set and the order, and the specs are written one after the other. With two or more specs of a goal, `spec-set-check` lists the files and symbols they share, the pairs that do not mention each other and the numbered sections several specs edit, and a reviewer subagent checks the set for duplicated work, contradicting decisions and order conflicts; accepted fixes go into the specs with your approval, rejected ones into the roadmap's notes. Then `roadmap-write` writes `<goal>-roadmap.md` next to the specs — also for one spec: the execution order `#`, dependencies, parallel groups, tier and size estimate per spec, shared touchpoints with their delivery order, a Mermaid graph, notes and the inputs — and `roadmap-check` validates it. The closing report names the command you run next (`/plan-chain-runner <spec>…` in the roadmap's order, or `/plan-writing <spec>`); the skill never starts it.
 
 **Output:** `*-spec.md` in the same directory as the goal file. After you approve it, the skill creates the chain journal `<goal>-chain.json` next to it (`<goal>` is the `Backlog` setting, else the spec name without `-spec.md`); the dialogue questions are not recorded there.
 
@@ -559,6 +564,7 @@ done
 ```
 /plan-brainstorming I want to add WebSocket notifications to the API
   → asks where to save the spec (inline idea, no goal file); e.g. docs/plans/plan01-spec.md
+  → after your approval writes docs/plans/plan01-roadmap.md and stops; its report names the next command
 
 /plan-writing docs/plans/plan01-spec.md
   → saves: docs/plans/plan01-impl.md
@@ -646,6 +652,7 @@ Only `plan-executor` commits on your branch, at its commit stage (`/plan-executo
 |---|---|---|
 | `<base>-spec.md` | `plan-brainstorming` | Design spec |
 | `<root>-1-spec.md`, `<root>-2-spec.md`, … | `plan-brainstorming` | Several specs of one goal |
+| `<goal>-roadmap.md` | `plan-brainstorming` (`roadmap-write`) | Goal roadmap: order of the specs, dependencies, groups, shared touchpoints, Mermaid graph; input of `plan-chain-runner` |
 | `BACKLOG.md` (repository root) | `plan-brainstorming`, `plan-executor`, `plan-resolver` | Shared backlog; skills only append |
 | `<base>-impl.md` | `plan-writing` | Implementation plan |
 | `<base>-roadmap.md` | `plan-splitter` | Part roadmap |

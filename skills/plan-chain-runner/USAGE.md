@@ -46,6 +46,7 @@ Without `<goal>` the runner finds the journals with unfinished stages; with seve
 | Chain journal | `<dir>/<goal>-chain.json` (`<goal>` = the spec's `> Backlog:` value, else the spec name without `-spec.md`) |
 | Reviews | `<dir>/<X>-impl-review-N.md`, `<X>-impl-completion.md` |
 | Roadmap and parts | `<dir>/<X>-impl-roadmap.md`, `<X>-impl-a.md`, … |
+| Goal roadmap | `<dir>/<goal>-roadmap.md`: order of the goal's specs, written by `plan-brainstorming` (`roadmap-write`) |
 | Ledger | `<repo parent>/.exec/<repo>-<plan>/state.json`, outside the repository |
 | Audit report | `<dir>/<X>-impl-report-N.md`, `<X>-impl-report-N-final.md` |
 | Diff report | `<dir>/<X>-diffs.md` |

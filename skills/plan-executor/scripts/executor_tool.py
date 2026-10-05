@@ -143,14 +143,35 @@ def validate_ledger(obj):
     return errors
 
 
+# Copy of brainstorm_tool.GOAL_ROADMAP_RE: a goal roadmap (<goal>-roadmap.md of plan-brainstorming) names
+# its goal in one of its first ten lines. It orders specs for plan-chain-runner; it is not a split roadmap.
+_GOAL_ROADMAP_RE = re.compile(r"^>\s*(?:\*\*)?Goal(?::\*\*|\*\*:|:)\s*(?P<goal>\S.*?)\s*$")
+
+
+def _is_goal_roadmap(path):
+    """True when the file's first ten lines carry the '> Goal:' line of a goal roadmap."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            head = [handle.readline() for _ in range(10)]
+    except OSError:
+        return False
+    return any(_GOAL_ROADMAP_RE.match(line.rstrip("\r\n")) for line in head)
+
+
+def _refuse_goal_roadmap(path):
+    if _is_goal_roadmap(path):
+        raise ToolError(f"not-a-split-roadmap: this is a goal roadmap; run /plan-chain-runner {path}", 2)
+
+
 def detect_input(plan_path, force_whole=False):
     plan = Path(plan_path).resolve()
     if force_whole:
         return {"input_type": "whole", "roadmap": None}
     if plan.name.endswith(ROADMAP_SUFFIX):
+        _refuse_goal_roadmap(plan)
         return {"input_type": "staged", "roadmap": str(plan)}
     candidate = plan.parent / f"{plan.stem}{ROADMAP_SUFFIX}"
-    if candidate.exists():
+    if candidate.exists() and not _is_goal_roadmap(candidate):
         return {"input_type": "staged", "roadmap": str(candidate.resolve())}
     return {"input_type": "whole", "roadmap": None}
 
@@ -238,6 +259,7 @@ def detect_cycle(graph):
 
 
 def parse_roadmap(path):
+    _refuse_goal_roadmap(path)
     rows = parse_roadmap_table(_read_text(path))
     invalid = [row["stage"] for row in rows if not _PART_ID_RE.match(row["stage"])]
     if invalid:
@@ -1787,7 +1809,7 @@ def cmd_ledger_path(args):
 # too (diffs and commits use _is_pipeline_artifact), and so does a name like api/openapi-spec.md elsewhere.
 _CHAIN_FILE_RE = re.compile(
     r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
-    r"|impl-roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
+    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
 
 
 def _is_chain_file(rel, plan_dir=None, own=()):

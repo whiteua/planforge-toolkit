@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPTS = os.path.join(os.path.dirname(__file__), "..", "scripts")
@@ -1038,6 +1039,666 @@ class PlanTasksCliTest(unittest.TestCase):
         result = ft.parse_plan_header(text)
         self.assertEqual((result["spec"], result["backlog"]), ("x-spec.md", None))
         self.assertFalse(hasattr(ft, "PLAN_TASK_RE"))
+
+
+def _put(root, name, text, encoding="utf-8"):
+    path = os.path.join(root, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(text.encode(encoding))
+    return path
+
+
+GOAL_SPEC = ("> Tier: {tier}\n> Backlog: g\n\n# Goal\n\n{goal}\n\n## Architecture\n\n{arch}\n\n"
+             "## Components\n\n| Component | Responsibility |\n|---|---|\n{rows}\n\n## Data Flow\n\n(none) — CLI.\n\n"
+             "## Error Handling\n\n- Exit 2.\n\n## Testing Strategy\n\n- Unit tests.\n\n## Out of Scope\n\n- Other.\n\n"
+             "## Open Questions\n\n(none)\n")
+
+
+def _goal_spec(goal="Do the thing. More words.", rows="| `a.py` | A |", arch="Plain.", tier="Standard"):
+    return GOAL_SPEC.format(tier=tier, goal=goal, arch=arch, rows=rows)
+
+
+class InputsHelpersTest(unittest.TestCase):
+    def test_plan_root(self):
+        for name, root in (("plan02-goal.md", "plan02"), ("plan01.md", "plan01"), ("goal.md", "goal"),
+                           ("superplan03-abstract.md", "superplan03"), ("review01.json", "review01"),
+                           ("plan-refactoring-01-goal.md", "plan-refactoring-01"), ("a-goal.md", "a-goal")):
+            self.assertEqual(ft._plan_root(name), root, name)
+
+    def test_findings_count(self):
+        self.assertEqual(ft._findings_count(json.dumps(SAMPLE)), 2)
+        self.assertEqual(ft._findings_count(json.dumps({"findings": SAMPLE})), 2)
+        self.assertIsNone(ft._findings_count('[{"file": "a.py"}]'))
+        self.assertIsNone(ft._findings_count("[]"))
+        with self.assertRaises(ValueError):
+            ft._findings_count("[not json")
+
+
+class InputsClassifyTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+
+    def kind(self, name, text, encoding="utf-8"):
+        entry, _ = ft._classify_input(_put(self.dir, name, text, encoding))
+        return entry["kind"]
+
+    def test_every_kind(self):
+        self.assertEqual(self.kind("x-spec.md", _goal_spec()), "spec")
+        self.assertEqual(self.kind("y-spec.md", "# Title\n"), "markdown")  # -spec.md without # Goal
+        self.assertEqual(self.kind("BACKLOG.md", "# Backlog\n"), "backlog")
+        self.assertEqual(self.kind("x-impl.md", "# P\n\n### Task 1: A\n"), "plan")
+        self.assertEqual(self.kind("z-impl.md", "# P\n"), "markdown")
+        self.assertEqual(self.kind("g-roadmap.md", "> Goal: g\n> Specs: 1\n"), "goal-roadmap")
+        self.assertEqual(self.kind("notes.txt", "plain text\n"), "text")
+        self.assertEqual(self.kind("data.json", '{"a": 1}'), "json")
+        self.assertEqual(self.kind("list.json", '[{"file": "a.py"}]'), "json")  # no summary
+        self.assertEqual(self.kind("bad.json", "[not json"), "text")
+        self.assertEqual(self.kind("blob.bin", "Привет", encoding="cp1251"), "binary")
+        missing = os.path.join(self.dir, "none.md")
+        self.assertEqual(ft._classify_input(missing), ({"path": missing, "exists": False, "kind": "missing"}, False))
+
+    def test_findings_count_lang_and_size(self):
+        path = _put(self.dir, "review.json", json.dumps({"findings": SAMPLE}))
+        entry, candidate = ft._classify_input(path)
+        self.assertEqual((entry["kind"], entry["count"], entry["lang"], entry["lines"]), ("findings", 2, "ru", 1))
+        self.assertEqual((entry["bytes"], candidate), (os.path.getsize(path), False))
+
+    def test_goal_candidates_are_markdown_without_spec_headings(self):
+        self.assertTrue(ft._classify_input(_put(self.dir, "idea.md", "# Idea\n\nТекст.\n"))[1])
+        self.assertFalse(ft._classify_input(_put(self.dir, "old.md", "# Goal\n\nx\n"))[1])
+
+
+class InputsReportTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.goal = _put(self.dir, "goal.md", "# Цель\n\nСделать отчёт.\n")
+        self.research = _put(self.dir, "research.md", "# Research\n\nNotes.\n")
+        self.findings = _put(self.dir, "findings.json", json.dumps(SAMPLE))
+
+    def test_multi_with_note(self):
+        code, out = ft.inputs_report([self.research, self.goal, self.findings], "research — справочно")
+        self.assertEqual((code, out["mode"], out["plan_root"], out["lang"], out["warnings"]),
+                         (0, "multi", "goal", "ru", []))
+        self.assertEqual([f["kind"] for f in out["files"]], ["markdown", "goal", "findings"])
+        self.assertEqual(out["note"], "research — справочно")
+
+    def test_single_file_modes(self):
+        spec = _put(self.dir, "x-spec.md", _goal_spec())
+        backlog = _put(self.dir, "BACKLOG.md", "# Backlog\n")
+        for paths, mode in (([spec], "amend"), ([self.findings], "findings"), ([backlog], "backlog"),
+                            ([self.research], "idea"), ([spec, self.goal], "multi")):
+            self.assertEqual(ft.inputs_report(paths, None)[1]["mode"], mode, paths)
+        out = ft.inputs_report([self.research], None)[1]
+        self.assertEqual((out["files"][0]["kind"], out["plan_root"]), ("goal", "research"))  # the only candidate
+
+    def test_note_only_is_idea(self):
+        code, out = ft.inputs_report([], "добавить поиск")
+        self.assertEqual((code, out["mode"], out["files"], out["plan_root"], out["lang"]), (0, "idea", [], None, "ru"))
+        with self.assertRaisesRegex(ft.InputError, "nothing-to-classify"):
+            ft.inputs_report([], "  ")
+
+    def test_several_goals_missing_and_binary(self):
+        first = _put(self.dir, "a-goal.md", "# A\n")
+        second = _put(self.dir, "b-goal.md", "# B\n")
+        blob = _put(self.dir, "x.bin", "Привет", encoding="cp1251")
+        missing = os.path.join(self.dir, "nope.md")
+        code, out = ft.inputs_report([first, second, blob, missing], None)
+        self.assertEqual((code, out["ok"], out["plan_root"]), (1, False, "a-goal"))
+        self.assertEqual(out["warnings"], [f"binary: {blob}", f"several-goals: plan_root from {first}"])
+        self.assertEqual(out["errors"], [f"missing: {missing}"])
+        self.assertIsNone(ft.inputs_report([self.findings, _put(self.dir, "n.txt", "text\n")], None)[1]["plan_root"])
+
+    def test_cli(self):
+        code, out = _run("inputs", self.goal, self.findings, "--note", "fix")
+        self.assertEqual((code, out["mode"], [f["kind"] for f in out["files"]]), (0, "multi", ["goal", "findings"]))
+        code, out = _run("inputs")
+        self.assertEqual((code, out["errors"]), (2, ["nothing-to-classify: give input files or --note"]))
+        self.assertEqual(_run("inputs", os.path.join(self.dir, "nope.md"))[0], 1)
+
+
+class GoalDirCase(unittest.TestCase):
+    """A goal directory: specs g-N-spec.md and, with `journal=True`, g-chain.json registering them in order."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = os.path.realpath(tmp.name)
+        self.journal = os.path.join(self.dir, "g-chain.json")
+
+    def specs(self, texts, journal=True):
+        paths = [_put(self.dir, f"g-{n}-spec.md", text) for n, text in texts]
+        if journal:
+            for path in paths:
+                ft.journal_create(self.journal, "g", "ru", path)
+        return [os.path.basename(path) for path in paths]
+
+
+class GoalJournalTest(GoalDirCase):
+    def test_specs_of_the_journal_in_its_order(self):
+        names = self.specs([(2, _goal_spec()), (1, _goal_spec())])
+        warnings = []
+        self.assertEqual((ft._set_specs(self.dir, None, warnings), warnings), ((self.journal, names), []))
+        ft._set_specs(self.dir, ["x-spec.md"], warnings)
+        self.assertEqual(warnings, ["specs-ignored: the journal lists the goal's specs"])
+
+    def test_without_a_journal(self):
+        self.specs([(10, _goal_spec()), (2, _goal_spec())], journal=False)
+        warnings = []
+        self.assertEqual(ft._set_specs(self.dir, None, warnings), (None, ["g-2-spec.md", "g-10-spec.md"]))
+        self.assertEqual(ft._set_specs(self.dir, [os.path.join(self.dir, "g-10-spec.md")], warnings),
+                         (None, ["g-10-spec.md"]))
+        self.assertEqual(warnings, ["no-journal", "no-journal"])
+
+    def test_several_journals_and_spec_number(self):
+        self.specs([(1, _goal_spec())])
+        _put(self.dir, "h-chain.json", json.dumps(ft._new_journal("h", "en")))
+        self.assertEqual(ft._goal_journal(self.dir, "g")[0], self.journal)
+        with self.assertRaisesRegex(ft.InputError, "ambiguous-journal: g-chain.json, h-chain.json"):
+            ft._goal_journal(self.dir)
+        self.assertEqual((ft._spec_number("g-12-spec.md"), ft._spec_number("g-spec.md")), (12, None))
+
+    def test_goal_picks_one_of_several_journals(self):
+        names = self.specs([(1, _goal_spec()), (2, _goal_spec())])
+        other = _put(self.dir, "h-1-spec.md", _goal_spec())
+        other_journal = os.path.join(self.dir, "h-chain.json")
+        ft.journal_create(other_journal, "h", "ru", other)
+        with self.assertRaisesRegex(ft.InputError, "ambiguous-journal"):
+            ft._set_specs(self.dir, None, [])
+        self.assertEqual(ft._set_specs(self.dir, None, [], "g"), (self.journal, names))
+        os.remove(self.journal)
+        os.remove(other_journal)
+        warnings = []
+        self.assertEqual(ft._set_specs(self.dir, None, warnings, "g"), (None, names))  # h-1-spec.md stays out
+        self.assertEqual(warnings, ["no-journal"])
+
+
+class SpecSetHelpersTest(unittest.TestCase):
+    def test_components_cells_and_names(self):
+        lines = ["## Components", "", "| Unit | Role |", "|---|---|", "| `a/b.py`: `run_x` (`:12`), `--flag` | x |",
+                 "| `c.py:40-45` `<dir>` | y |", "## Data Flow", "| `d.py` | z |"]
+        cells = ft._components_cells(lines)
+        self.assertEqual([name for cell in cells for name in ft._touch_names(cell)],
+                         [("a/b.py", "path"), ("run_x", "symbol"), ("c.py", "path")])
+        self.assertIsNone(ft._components_cells(["## Components", "- `a.py`: A"]))
+
+    def test_mentions_and_numbered_references(self):
+        names = ["g-1-spec.md", "g-2-spec.md", "g-3-spec.md", "gg-3-spec.md"]
+        text = "Спеку 1 и spec 3; после g-2-spec.md, не gg-1-spec.md."
+        self.assertEqual(ft._spec_mentions(text, "g-2-spec.md", names), ["g-1-spec.md"])
+        self.assertEqual(ft._spec_mentions("см. gg-3-spec.md", "g-1-spec.md", names), ["gg-3-spec.md"])
+        text = "`references/LOOP.md` §2, START.md (пункт 3), step 4 of it"
+        self.assertEqual([m.group("path") for m in ft.NUMBERED_REF_RE.finditer(text)], ["references/LOOP.md", "START.md"])
+
+
+class SpecSetCheckTest(GoalDirCase):
+    def test_touchpoints_undeclared_numbered_and_self_edges(self):
+        one = _goal_spec(rows="| `skills/x/chain_tool.py`: `run_status` (`:12`) | A |\n| `LOOP.md` §2 | B |")
+        two = _goal_spec(arch="Спека 1 даёт `run_status`; `LOOP.md` §2 правят обе.",
+                         rows="| `skills/x/chain_tool.py:40` | A |\n| `run_status` | B |\n| `own.py` | C |")
+        three = _goal_spec(rows="| `run_status` | A |")
+        names = self.specs([(1, one), (2, two), (3, three)])
+        out = ft.spec_set_check(self.dir)
+        self.assertEqual((out["specs"], out["warnings"], out["journal"]), (names, [], self.journal))
+        self.assertEqual(out["touchpoints"], [{"name": "skills/x/chain_tool.py", "kind": "path", "specs": names[:2]},
+                                              {"name": "run_status", "kind": "symbol", "specs": names}])
+        self.assertEqual(out["undeclared"], [{"name": "run_status", "specs": names}])  # 3 names nobody
+        self.assertEqual(out["numbered_items"], [{"file": "LOOP.md", "specs": names[:2]}])
+        self.assertEqual(out["self_edges"], [{"spec": names[1], "mentions": [names[0]]}])
+
+    def test_file_name_mention_declares_the_pair(self):
+        names = self.specs([(1, _goal_spec()), (2, _goal_spec(arch="После g-1-spec.md."))])
+        out = ft.spec_set_check(self.dir)
+        self.assertEqual((out["undeclared"], out["self_edges"]), ([], [{"spec": names[1], "mentions": [names[0]]}]))
+
+    def test_single_spec_no_journal_and_no_table(self):
+        self.specs([(1, _goal_spec())])
+        out = ft.spec_set_check(self.dir)
+        self.assertEqual((out["warnings"], out["touchpoints"]), (["single-spec"], []))
+        os.remove(self.journal)
+        table = "| Component | Responsibility |\n|---|---|\n| `a.py` | A |"
+        _put(self.dir, "g-2-spec.md", _goal_spec().replace(table, "- `a.py`: A"))
+        out = ft.spec_set_check(self.dir)
+        self.assertEqual((out["specs"], out["warnings"]),
+                         (["g-1-spec.md", "g-2-spec.md"], ["no-journal", "no-components-table: g-2-spec.md"]))
+
+    def test_cli_and_unreadable_spec(self):
+        self.specs([(1, _goal_spec()), (2, _goal_spec())])
+        code, out = _run("spec-set-check", self.dir)
+        self.assertEqual((code, len(out["touchpoints"])), (0, 1))
+        os.remove(os.path.join(self.dir, "g-2-spec.md"))
+        code, out = _run("spec-set-check", self.dir)
+        self.assertEqual(code, 2)
+        self.assertIn("g-2-spec.md", out["errors"][0])
+
+    def test_goal_option_picks_the_journal(self):
+        self.specs([(1, _goal_spec()), (2, _goal_spec())])
+        other = _put(self.dir, "h-1-spec.md", _goal_spec())
+        ft.journal_create(os.path.join(self.dir, "h-chain.json"), "h", "ru", other)
+        code, out = _run("spec-set-check", self.dir)
+        self.assertEqual(code, 2)
+        self.assertIn("ambiguous-journal", out["errors"][0])
+        code, out = _run("spec-set-check", self.dir, "--goal", "g")
+        self.assertEqual((code, out["specs"]), (0, ["g-1-spec.md", "g-2-spec.md"]))
+
+
+def _graph(**extra):
+    graph = {"title": "Цель G", "overview": "Три спеки.", "lang": "ru",
+             "sources": [{"path": "goal.md", "role": "постановка"}], "instruction": "research — справочно",
+             "specs": [{"file": "g-1-spec.md", "title": "Первая", "depends": [], "group": "A",
+                        "notes": "раньше всех", "handoff": "парсер"},
+                       {"file": "g-2-spec.md", "title": "Вторая | с чертой", "depends": [], "group": "A"},
+                       {"file": "g-3-spec.md", "title": "Третья", "depends": ["g-2-spec.md", "g-1-spec.md"],
+                        "group": "B"}],
+             "shared": [{"name": "run_status", "specs": ["g-1-spec.md", "g-3-spec.md"],
+                         "order": ["g-1-spec.md", "g-3-spec.md"], "note": "3 сохраняет поле"}]}
+    graph.update(extra)
+    return graph
+
+
+class RoadmapGraphFieldsTest(unittest.TestCase):
+    def test_fields(self):
+        self.assertEqual((ft._graph_text("  x \n", "w"), ft._graph_text("  ", "w")), ("x", None))
+        with self.assertRaisesRegex(ft.InputError, "graph-invalid: w is required"):
+            ft._graph_text(None, "w", True)
+        with self.assertRaisesRegex(ft.InputError, "graph-invalid: w must be a string"):
+            ft._graph_text(3, "w")
+        self.assertEqual(ft._graph_files(["./a-spec.md", "b\\c-spec.md"], "w"), ["a-spec.md", "b/c-spec.md"])
+        self.assertEqual(ft._graph_files(None, "w"), [])
+        with self.assertRaisesRegex(ft.InputError, "graph-invalid: w must be a list of spec files"):
+            ft._graph_files(["a", ""], "w")
+        with self.assertRaisesRegex(ft.InputError, "graph-invalid: sources must be a list of objects"):
+            ft._graph_items({"sources": ["x"]}, "sources")
+        self.assertEqual(ft._graph_items({}, "shared"), [])
+
+
+class RoadmapGraphTest(unittest.TestCase):
+    def test_shape(self):
+        graph = ft._roadmap_graph(_graph())
+        self.assertEqual((graph["goal"], graph["lang"], graph["title"], graph["notes"]), (None, "ru", "Цель G", None))
+        self.assertEqual(graph["specs"][2], {"file": "g-3-spec.md", "title": "Третья", "group": "B", "notes": None,
+                                             "depends": ["g-2-spec.md", "g-1-spec.md"], "handoff": None})
+        self.assertEqual(graph["shared"][0], dict(_graph()["shared"][0], kind=None))
+        self.assertEqual(graph["sources"], [{"path": "goal.md", "role": "постановка"}])
+
+    def test_bad_json(self):
+        one = {"file": "g-1-spec.md", "title": "T", "group": "A"}
+        for graph, message in (([], "not a JSON object"), (_graph(specs=[]), "specs must list each spec once"),
+                               (_graph(specs=[one, one]), "specs must list each spec once"),
+                               (_graph(specs=[dict(one, group="A-1")]), r"specs\[0\]\.group must be"),
+                               (_graph(specs=[dict(one, title=None)]), r"specs\[0\]\.title is required"),
+                               (_graph(lang="de"), "lang must be ru or en")):
+            with self.assertRaisesRegex(ft.InputError, "graph-invalid: " + message):
+                ft._roadmap_graph(graph)
+
+
+class RoadmapOrderTest(unittest.TestCase):
+    def specs(self, *items):
+        return [{"file": name, "depends": deps, "group": group} for name, deps, group in items]
+
+    def test_levels_then_json_order(self):
+        order, errors = ft._roadmap_order(self.specs(("b", ["a"], "B"), ("c", [], "A"), ("a", [], "A")))
+        self.assertEqual((order, errors), (["c", "a", "b"], []))
+
+    def test_errors(self):
+        self.assertEqual(ft._roadmap_order(self.specs(("a", ["x"], "A")))[1], ["unknown-dependency: a -> x"])
+        self.assertEqual(ft._roadmap_order(self.specs(("a", ["b"], "A"), ("b", ["a"], "B")))[1],
+                         ["dependency-cycle: a -> b -> a"])
+        self.assertEqual(ft._roadmap_order(self.specs(("a", [], "A"), ("b", ["a"], "A")))[1],
+                         ["group-conflict: b and its dependency a are both in group A"])
+
+    def test_shared_errors(self):
+        position = {"a": 1, "b": 2}
+        item = {"name": "x.py", "specs": ["a", "b"], "order": ["b", "a"]}
+        self.assertEqual(ft._shared_errors([item], position),
+                         ["shared-order-conflict: x.py: b → a goes against the execution order"])
+        self.assertEqual(ft._shared_errors([dict(item, specs=["a", "z"], order=[])], position),
+                         ["unknown-shared-spec: x.py: z"])
+        self.assertEqual(ft._shared_errors([dict(item, order=["a", "b"])], position), [])
+
+
+class RoadmapRenderHelpersTest(unittest.TestCase):
+    def test_refs_nodes_cells(self):
+        refs = ft._spec_refs(["g-1-spec.md", "g-2-spec.md", "h-2-spec.md", "x-spec.md"])
+        self.assertEqual(refs, {"g-1-spec.md": "1", "g-2-spec.md": "g-2-spec.md", "h-2-spec.md": "h-2-spec.md",
+                                "x-spec.md": "x-spec.md"})
+        self.assertEqual((ft._node_id("3", 1), ft._node_id("x-spec.md", 4)), ("s3", "n4"))
+        self.assertEqual((ft._cell("a |\n b"), ft._cell(None), ft._one_line("  ")), ("a \\| b", "—", "—"))
+
+    def test_fence_and_goal_phrase(self):
+        self.assertEqual(ft._fence("a ``` b", "text"), "````text\na ``` b\n````")
+        self.assertEqual(ft._fence("x", "mermaid"), "```mermaid\nx\n```")
+        self.assertEqual(ft._spec_goal_phrase(_goal_spec("Первая фраза. Вторая.")), "Первая фраза.")
+        self.assertEqual(ft._spec_goal_phrase("# Goal\n\n## Architecture\n"), "?")
+
+
+class RoadmapRenderTest(unittest.TestCase):
+    def render(self, graph, lang="ru"):
+        graph = ft._roadmap_graph(graph)
+        order = ft._roadmap_order(graph["specs"])[0]
+        facts = {name: {"goal": f"Цель {name[2]}.", "tier": "Deep", "estimate": "~4"} for name in order}
+        return ft._render_roadmap(lang, "g", graph, order, facts)
+
+    def test_full_roadmap(self):
+        text = self.render(_graph())
+        self.assertTrue(text.startswith("> Goal: g\n> Specs: 3\n> Generated: "))
+        self.assertIn("# Roadmap: Цель G\n\n## Overview\n\nТри спеки.\n", text)
+        self.assertIn("| 2 | g-2-spec.md | Вторая \\| с чертой | — | A | Deep | ~4 |", text)
+        self.assertIn("| 3 | g-3-spec.md | Третья | 2, 1 | B | Deep | ~4 |", text)
+        self.assertIn('    subgraph A\n        s1["1. Первая"]\n        s2["2. Вторая | с чертой"]\n    end', text)
+        self.assertIn("    s2 --> s3\n    s1 --> s3\n```", text)
+        self.assertIn("- A: 1, 2 — можно вести одновременно\n- B: 3 — одна спека", text)
+        self.assertIn("| `run_status` | 1, 3 | 1 → 3 | 3 сохраняет поле |", text)
+        self.assertIn("### 1. g-1-spec.md\n\n- Цель: Цель 1.\n- Зависит от: —\n- Примечания: раньше всех\n"
+                      "- Передаёт: парсер", text)
+        self.assertIn("- `goal.md` — постановка\n\nИнструкция:\n\n```text\nresearch — справочно\n```", text)
+        for heading in ft.ROADMAP_HEADINGS:
+            self.assertIn("\n" + heading + "\n", text)
+
+    def test_english_one_spec_without_shared_and_sources(self):
+        text = self.render(_graph(specs=[_graph()["specs"][0]], shared=[], sources=[], instruction=None), "en")
+        self.assertIn("- A: 1 — one spec", text)
+        self.assertIn("## Shared touchpoints\n\nnone\n", text)
+        self.assertIn("## Sources\n\n—\n\nInstruction: —\n", text)
+        self.assertIn('graph LR\n    subgraph A\n        s1["1. Первая"]\n    end\n```', text)
+        self.assertIn("## Shared touchpoints\n\nнет\n", self.render(_graph(shared=[])))
+
+
+class SpecFactsTest(GoalDirCase):
+    def test_facts(self):
+        self.specs([(1, _goal_spec("Первая цель. Ещё.", tier="Deep")), (2, "# Goal\n\nbroken\n")], journal=False)
+        one, two = (os.path.join(self.dir, f"g-{n}-spec.md") for n in (1, 2))
+        warnings = []
+        facts = ft._spec_facts(one, "g-1-spec.md", warnings)
+        self.assertEqual((facts["tier"], facts["estimate"], facts["goal"]), ("Deep", "~4", "Первая цель."))
+        self.assertEqual({k: v for k, v in ft._spec_facts(two, "g-2-spec.md", warnings).items() if k != "text"},
+                         {"goal": "broken", "tier": "?", "estimate": "?"})
+        real = ft.check_spec
+        with mock.patch.object(ft, "check_spec", lambda text: {k: v for k, v in real(text).items() if k != "volume"}):
+            self.assertEqual(ft._spec_facts(one, "g-1-spec.md", warnings)["estimate"], "—")
+        self.assertEqual(warnings, ["spec-check-failed: g-2-spec.md", "no-volume: g-1-spec.md"])
+
+    def test_own_roadmap(self):
+        own = _put(self.dir, "g-roadmap.md", "> Goal: g\n")
+        foreign = _put(self.dir, "x-roadmap.md", "# x\n")
+        binary = _put(self.dir, "y-roadmap.md", "Привет", encoding="cp1251")
+        self.assertEqual([ft._is_own_roadmap(path) for path in (own, foreign, binary)], [True, False, False])
+
+
+class RoadmapCase(GoalDirCase):
+    def setUp(self):
+        super().setUp()
+        self.specs([(1, _goal_spec("Первая цель. Вторая фраза.", tier="Deep")), (2, _goal_spec()), (3, _goal_spec())])
+        self.roadmap = os.path.join(self.dir, "g-roadmap.md")
+
+    def write(self, graph, lang=None, force=False):
+        path = _put(self.dir, "graph.json", json.dumps(graph, ensure_ascii=False))
+        return ft.roadmap_write(self.dir, path, lang, force)
+
+    def text(self):
+        with open(self.roadmap, encoding="utf-8") as fh:
+            return fh.read()
+
+
+class RoadmapWriteTest(RoadmapCase):
+    def test_writes_the_roadmap(self):
+        code, out = self.write(_graph())
+        self.assertEqual((code, out["order"], out["warnings"], out["lang"], out["journal"]),
+                         (0, ["g-1-spec.md", "g-2-spec.md", "g-3-spec.md"], [], "ru", self.journal))
+        self.assertTrue(self.text().startswith("> Goal: g\n> Specs: 3\n"))
+        self.assertIn("| 1 | g-1-spec.md | Первая | — | A | Deep | ~4 |", self.text())
+        self.assertIn("- Цель: Первая цель.\n", self.text())
+
+    def test_rewrites_its_own_roadmap_and_refuses_a_foreign_file(self):
+        self.assertEqual(self.write(_graph())[0], 0)
+        self.assertEqual(self.write(_graph(title="Новое имя"))[0], 0)
+        self.assertIn("# Roadmap: Новое имя", self.text())
+        _put(self.dir, "g-roadmap.md", "# Someone else's roadmap\n")
+        code, out = self.write(_graph())
+        self.assertEqual((code, out["errors"]),
+                         (1, [f"exists-foreign: {self.roadmap} has no '> Goal:' line; --force overwrites it"]))
+        self.assertEqual(self.text(), "# Someone else's roadmap\n")
+        self.assertEqual(self.write(_graph(), force=True)[0], 0)
+
+    def test_without_journal_in_english(self):
+        os.remove(self.journal)
+        code, out = self.write(_graph(goal="g", specs=[_graph()["specs"][0]], shared=[]), lang="en")
+        self.assertEqual((code, out["warnings"], out["lang"]), (0, ["no-journal"], "en"))
+        self.assertIn("- Goal: Первая цель.\n", self.text())
+        with self.assertRaisesRegex(ft.InputError, "graph-invalid: goal is required"):
+            self.write(_graph())
+
+
+class RoadmapWriteErrorsTest(RoadmapCase):
+    def test_every_error_leaves_the_file_untouched(self):
+        specs = _graph()["specs"]
+
+        def first(**change):
+            return [dict(s, **change) if s["file"] == "g-1-spec.md" else s for s in specs]
+
+        bad = [
+            (_graph(specs=specs[:2], shared=[]), "specs-missing: g-3-spec.md"),
+            (_graph(specs=specs + [{"file": "g-9-spec.md", "title": "X", "group": "C"}]), "spec-not-found: g-9-spec.md"),
+            (_graph(specs=first(depends=["g-7-spec.md"])), "unknown-dependency: g-1-spec.md -> g-7-spec.md"),
+            (_graph(specs=first(depends=["g-3-spec.md"])), "dependency-cycle: g-1-spec.md -> g-3-spec.md -> g-1-spec.md"),
+            (_graph(specs=[dict(s, group="A") for s in specs]),
+             "group-conflict: g-3-spec.md and its dependency g-2-spec.md are both in group A"),
+            (_graph(shared=[{"name": "x.py", "specs": ["g-1-spec.md", "g-8-spec.md"]}]), "unknown-shared-spec: x.py: g-8-spec.md"),
+            (_graph(shared=[{"name": "x.py", "specs": ["g-1-spec.md", "g-3-spec.md"], "order": ["g-3-spec.md", "g-1-spec.md"]}]),
+             "shared-order-conflict: x.py: g-3-spec.md → g-1-spec.md goes against the execution order"),
+            (_graph(goal="other"), "goal-mismatch: the journal's goal is g, the JSON says other"),
+        ]
+        for graph, error in bad:
+            code, out = self.write(graph)
+            self.assertEqual(code, 1, error)
+            self.assertIn(error, out["errors"])
+            self.assertFalse(os.path.exists(self.roadmap), error)
+
+    def test_failing_spec_check_does_not_block(self):
+        _put(self.dir, "g-2-spec.md", "# Goal\n\nbroken\n")
+        code, out = self.write(_graph())
+        self.assertEqual((code, out["warnings"]), (0, ["spec-check-failed: g-2-spec.md"]))
+        self.assertIn("| 2 | g-2-spec.md | Вторая \\| с чертой | — | A | ? | ? |", self.text())
+
+    def test_cli(self):
+        path = _put(self.dir, "graph.json", json.dumps(_graph(), ensure_ascii=False))
+        code, out = _run("roadmap-write", self.dir, "--graph", path, "--lang", "en")
+        self.assertEqual((code, out["lang"]), (0, "en"))
+        self.assertEqual(_run("roadmap-write", self.dir, "--graph", os.path.join(self.dir, "nope.json"))[0], 2)
+        _put(self.dir, "bad.json", "{not json")
+        code, out = _run("roadmap-write", self.dir, "--graph", os.path.join(self.dir, "bad.json"))
+        self.assertEqual(code, 2)
+        self.assertTrue(out["errors"][0].startswith("graph-invalid: "))
+
+
+class RoadmapBlocksTest(unittest.TestCase):
+    def test_blocks_sections_and_tables(self):
+        text = ("> Goal: g\n\n# Roadmap: T\n\n## Order\n\n| a | b \\| c |\n|---|---|\n| 1 | 2 |\n\n## Graph\n\n"
+                "````mermaid\n## not a heading\n```\n````\n\n## Notes\n\n—\n")
+        head, names, sections = ft._roadmap_sections(text)
+        self.assertEqual((names, head[-2:]), (["## Order", "## Graph", "## Notes"], ["# Roadmap: T", ""]))
+        self.assertEqual(ft._table_rows(sections["## Order"]), [["a", "b | c"], ["1", "2"]])
+        self.assertEqual([block for block in sections["## Graph"] if block[0] is not None],
+                         [("mermaid", ["## not a heading", "```"])])
+        self.assertIsNone(ft._section_text(sections["## Notes"]))
+        self.assertEqual(ft._section_text(sections["## Order"]).splitlines()[0], "| a | b \\| c |")
+
+
+ORDER_HEADER = "| # | Spec | Title | Depends on | Group | Tier | Estimate |\n|---|---|---|---|---|---|---|\n"
+
+
+def _order_blocks(rows):
+    return ft._roadmap_sections("## Order\n\n" + ORDER_HEADER + rows)[2]["## Order"]
+
+
+class RoadmapParseOrderTest(unittest.TestCase):
+    def test_rows(self):
+        errors, warnings = [], []
+        rows = "| 1 | g-1-spec.md | A \\| B | — | A | Deep | ~4 |\n| 2 | g-2-spec.md | C | 1 | B | ? | |\n"
+        specs = ft._parse_order(_order_blocks(rows), errors, warnings)
+        self.assertEqual((errors, warnings), ([], ["no-estimate: g-2-spec.md"]))
+        self.assertEqual([(s["n"], s["title"], s["depends"], s["tier"], s["estimate"]) for s in specs],
+                         [(1, "A | B", "—", "Deep", 4), (2, "C", "1", None, None)])
+
+    def test_errors(self):
+        errors = []
+        ft._parse_order(ft._roadmap_sections("## Order\n\n| # | Spec |\n|---|---|\n")[2]["## Order"], errors, [])
+        self.assertTrue(errors[0].startswith("order-table: the header must be | # | Spec |"))
+        errors = []
+        ft._parse_order(_order_blocks("| 2 | g-1-spec.md | A | — | A | Deep | ~4 |\n| 3 | x |\n"), errors, [])
+        self.assertEqual(errors, ["order-row: 3 | x", "order-numbering: # must run 1, 2, … in table order"])
+
+
+class OrderGraphErrorsTest(unittest.TestCase):
+    ROWS = "| 1 | g-1-spec.md | A | — | A | Deep | ~4 |\n| 2 | g-2-spec.md | B | 1 | B | Deep | ~4 |\n"
+    GRAPH = '## Graph\n\n```mermaid\ngraph LR\n    s1["1. A"]\n    s2["2. B"]\n    s1 --> s2\n```\n'
+
+    def errors(self, rows=ROWS, graph=GRAPH):
+        specs = ft._parse_order(_order_blocks(rows), [], [])
+        errors = ft._order_graph_errors(specs, ft._roadmap_sections(graph)[2]["## Graph"])
+        return specs, errors
+
+    def test_valid_graph_resolves_depends(self):
+        specs, errors = self.errors()
+        self.assertEqual((errors, specs[1]["depends"]), ([], ["g-1-spec.md"]))
+
+    def test_table_errors(self):
+        self.assertEqual(self.errors(self.ROWS.replace("| B | 1 |", "| B | 7 |"))[1][0], "unknown-dependency: g-2-spec.md -> 7")
+        rows = self.ROWS.replace("| A | — | A |", "| A | 2 | A |").replace("| B | 1 | B |", "| B | — | B |")
+        self.assertIn("order-violation: g-1-spec.md (#1) depends on g-2-spec.md (#2)", self.errors(rows)[1])
+        self.assertIn("group-conflict: g-2-spec.md and its dependency g-1-spec.md are both in group A",
+                      self.errors(self.ROWS.replace("| 1 | B |", "| 1 | A |"))[1])
+
+    def test_mermaid_errors(self):
+        self.assertEqual(self.errors(graph="## Graph\n\nnone\n")[1], ["graph-missing: no mermaid block in ## Graph"])
+        self.assertEqual(self.errors(graph=self.GRAPH.replace("    s1 --> s2\n", "    s2 --> s1\n"))[1],
+                         ["graph-edge-without-row: s2 --> s1", "row-edge-missing-in-graph: s1 --> s2"])
+        self.assertEqual(self.errors(graph=self.GRAPH.replace('    s2["2. B"]\n', '    s9["9. X"]\n'))[1],
+                         ["graph-node-missing: s2 (g-2-spec.md)", "graph-node-unknown: s9"])
+        self.assertEqual(self.errors(graph=self.GRAPH.replace("graph LR", "graph TD"))[1],
+                         ["graph-not-lr: the mermaid block must start with 'graph LR'"])
+
+
+class ParseSharedTest(unittest.TestCase):
+    FILES = ["g-1-spec.md", "g-2-spec.md", "g-3-spec.md"]
+
+    def parse(self, body):
+        errors = []
+        shared = ft._parse_shared(ft._roadmap_sections("## Shared touchpoints\n\n" + body)[2]["## Shared touchpoints"],
+                                  self.FILES, errors)
+        return shared, errors
+
+    def test_rows_and_none(self):
+        body = ("| File or symbol | Specs | Delivery order | Note |\n|---|---|---|---|\n"
+                "| `skills/x.py` | 1, 3 | 1 → 3 | note |\n| `run_status` | 2, 3 | — | — |\n")
+        self.assertEqual(self.parse(body), ([
+            {"name": "skills/x.py", "kind": "path", "specs": ["g-1-spec.md", "g-3-spec.md"],
+             "order": ["g-1-spec.md", "g-3-spec.md"], "note": "note"},
+            {"name": "run_status", "kind": "symbol", "specs": ["g-2-spec.md", "g-3-spec.md"], "order": [], "note": None}], []))
+        self.assertEqual(self.parse("нет\n"), ([], []))
+
+    def test_errors(self):
+        head = "| File or symbol | Specs | Delivery order | Note |\n|---|---|---|---|\n"
+        self.assertEqual(self.parse(head + "| `a.py` | 1, 5 | — | x |\n")[1], ["unknown-shared-spec: a.py: 5"])
+        self.assertEqual(self.parse(head + "| `a.py` | 1, 3 | 3 → 1 | x |\n")[1],
+                         ["shared-order-conflict: a.py: g-3-spec.md → g-1-spec.md goes against the execution order"])
+        self.assertTrue(self.parse("| File | Specs |\n|---|---|\n| a | 1 |\n")[1][0].startswith("shared-table: "))
+
+
+class ParseSpecSectionsSourcesTest(unittest.TestCase):
+    def test_spec_sections(self):
+        text = ("## Specs\n\n### 1. g-1-spec.md\n\n- Цель: X.\n- Зависит от: —\n- Примечания: после 3\n- Передаёт: —\n\n"
+                "### 2. g-2-spec.md\n\n- Goal: Y.\n- Notes: —\n- Hands off: the parser\n")
+        specs = [{"file": "g-1-spec.md"}, {"file": "g-2-spec.md"}, {"file": "g-3-spec.md"}]
+        errors = []
+        ft._parse_spec_sections(ft._roadmap_sections(text)[2]["## Specs"], specs, errors)
+        self.assertEqual([(s.get("notes"), s.get("handoff")) for s in specs],
+                         [("после 3", None), (None, "the parser"), (None, None)])
+        self.assertEqual(errors, ["spec-section-missing: g-3-spec.md"])
+
+    def test_sources(self):
+        text = "## Sources\n\n- `goal.md` — постановка\n- `r.md` — справочно\n\nИнструкция:\n\n````text\nкак ``` есть\n````\n"
+        self.assertEqual(ft._parse_sources(ft._roadmap_sections(text)[2]["## Sources"]),
+                         ([{"path": "goal.md", "role": "постановка"}, {"path": "r.md", "role": "справочно"}], "как ``` есть"))
+        self.assertEqual(ft._parse_sources(ft._roadmap_sections("## Sources\n\n—\n\nInstruction: —\n")[2]["## Sources"]),
+                         ([], None))
+
+
+class RoadmapCheckParseTest(RoadmapCase):
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.write(_graph())[0], 0)
+
+    def corrupt(self, old, new):
+        text = self.text()
+        self.assertIn(old, text)
+        _put(self.dir, "g-roadmap.md", text.replace(old, new))
+        return ft.roadmap_check(self.roadmap)[0]
+
+    def test_written_roadmap_is_valid_and_parses_back(self):
+        result, parsed = ft.roadmap_check(self.roadmap)
+        self.assertEqual((result["valid"], result["errors"], result["warnings"]), (True, [], []))
+        graph = _graph()
+        self.assertEqual((parsed["goal"], parsed["title"], parsed["instruction"], parsed["sources"]),
+                         ("g", graph["title"], graph["instruction"], graph["sources"]))
+        self.assertEqual([(s["n"], s["file"], s["title"], s["depends"], s["group"], s["tier"], s["estimate"])
+                          for s in parsed["specs"]],
+                         [(1, "g-1-spec.md", "Первая", [], "A", "Deep", 4),
+                          (2, "g-2-spec.md", "Вторая | с чертой", [], "A", "Standard", 3),
+                          (3, "g-3-spec.md", "Третья", ["g-2-spec.md", "g-1-spec.md"], "B", "Standard", 3)])
+        self.assertEqual((parsed["specs"][0]["notes"], parsed["specs"][0]["handoff"], parsed["specs"][1]["notes"]),
+                         ("раньше всех", "парсер", None))
+        self.assertEqual(parsed["groups"], {"A": ["g-1-spec.md", "g-2-spec.md"], "B": ["g-3-spec.md"]})
+        self.assertEqual(parsed["shared"], [dict(graph["shared"][0], kind="symbol")])
+        self.assertEqual((parsed["overview"], parsed["notes"]), ("Три спеки.", None))
+
+    def test_broken_roadmaps(self):
+        cases = [
+            ("    s2 --> s3\n", "    s2 --> s3\n    s2 --> s1\n", "graph-edge-without-row: s2 --> s1"),
+            ("| 1 | g-1-spec.md | Первая | — |", "| 1 | g-1-spec.md | Первая | 3 |", "dependency-cycle: "),
+            ("| 1 | g-1-spec.md |", "| 1 | g-7-spec.md |", "spec-not-found: g-7-spec.md"),
+            ("| `run_status` | 1, 3 | 1 → 3 |", "| `run_status` | 1, 5 | 1 → 3 |", "unknown-shared-spec: run_status: 5"),
+            ("> Specs: 3", "> Specs: 4", "specs-count: '> Specs:' says 4"),
+            ("## Parallelism", "## Parallel", "missing-section: ## Parallelism"),
+            ("> Goal: g\n", "", "no-goal-line"),
+        ]
+        for old, new, error in cases:
+            result = self.corrupt(old, new)
+            self.assertFalse(result["valid"], error)
+            self.assertTrue(any(e.startswith(error) for e in result["errors"]), (error, result["errors"]))
+            self.assertEqual(self.write(_graph(), force=True)[0], 0)
+
+    def test_estimate_marks(self):
+        self.assertEqual(self.corrupt("| Deep | ~4 |", "| Deep | — |")["warnings"], [])
+        self.assertEqual(self.corrupt("| Deep | — |", "| Deep |  |")["warnings"], ["no-estimate: g-1-spec.md"])
+
+
+class RoadmapCliTest(RoadmapCase):
+    def test_check_and_parse(self):
+        self.assertEqual(self.write(_graph())[0], 0)
+        code, out = _run("roadmap-check", self.roadmap)
+        self.assertEqual((code, out["valid"], out["errors"]), (0, True, []))
+        code, out = _run("roadmap-parse", self.roadmap)
+        self.assertEqual((code, out["ok"], out["goal"], [s["n"] for s in out["specs"]]), (0, True, "g", [1, 2, 3]))
+        self.assertEqual(out["specs"][2]["depends"], ["g-2-spec.md", "g-1-spec.md"])
+        _put(self.dir, "g-roadmap.md", self.text().replace("    s1 --> s3\n", ""))
+        code, out = _run("roadmap-check", self.roadmap)
+        self.assertEqual((code, out["valid"], out["errors"]), (1, False, ["row-edge-missing-in-graph: s1 --> s3"]))
+        code, out = _run("roadmap-parse", self.roadmap)
+        self.assertEqual((code, out["ok"], out["errors"]), (1, False, ["row-edge-missing-in-graph: s1 --> s3"]))
+        self.assertEqual(_run("roadmap-parse", os.path.join(self.dir, "nope.md"))[0], 2)
+
+    def test_missing_volume_is_accepted(self):
+        real = ft.check_spec
+        with mock.patch.object(ft, "check_spec", lambda text: {k: v for k, v in real(text).items() if k != "volume"}):
+            code, out = self.write(_graph())
+        self.assertEqual(out["warnings"], ["no-volume: g-1-spec.md", "no-volume: g-2-spec.md", "no-volume: g-3-spec.md"])
+        self.assertIn("| 1 | g-1-spec.md | Первая | — | A | Deep | — |", self.text())
+        self.assertEqual(ft.roadmap_check(self.roadmap)[0]["warnings"], [])
 
 
 if __name__ == "__main__":

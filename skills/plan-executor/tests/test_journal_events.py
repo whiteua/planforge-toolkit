@@ -237,6 +237,18 @@ class TestUnitFinishEvents(JournalCase):
         self.assertIn("journal-missing", done["journal_error"])
 
 
+class TestDelegatedEvents(JournalCase):
+    def test_unit_finish_event_carries_delegated_only_with_the_flag(self):
+        self.init(light="haiku")
+        self.tool.unit_begin(self.exec_dir)
+        self.tool.unit_finish(self.exec_dir, "task-1", "fail", error="boom", delegated="haiku")
+        self.tool.unit_begin(self.exec_dir)
+        self.tool.unit_finish(self.exec_dir, "task-1", "pass")
+        self.assertEqual([e["data"] for e in self.events("unit-finish")],
+                         [{"unit": "task-1", "outcome": "fail", "delegated": "haiku", "done": 0, "total": 2},
+                          {"unit": "task-1", "outcome": "pass", "done": 1, "total": 2}])
+
+
 class TestBrainstormToolLoadedOnce(JournalCase):
     """F4: brainstorm_tool.py is executed once per process, however many journal calls a run makes."""
 

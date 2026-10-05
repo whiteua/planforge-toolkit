@@ -124,7 +124,7 @@ class SettingsErrorsTest(unittest.TestCase):
         claude = ct.BUILTIN_SETTINGS["claude-code"]
         self.assertEqual(claude["parallel"], 3)
         self.assertEqual({r: (e["model"], e["effort"]) for r, e in claude["roles"].items()},
-                         {"writing": ("fable", "high"), "revision": ("fable", "high"), "split": ("opus", "medium"),
+                         {"writing": ("fable", "high"), "revision": ("fable", "high"), "split": ("sonnet", "low"),
                           "execution": ("opus", "medium"), "audit": ("fable", "high"), "commit": ("sonnet", "low")})
         copilot = ct.BUILTIN_SETTINGS["github-copilot"]["roles"]
         self.assertEqual(copilot["audit"], {"model": "claude-opus-5.5", "effort": None, "fallback": "gpt-5-mini"})
@@ -213,7 +213,7 @@ class SettingsSaveTest(HomeCase):
                          {"audit": {"model": "opus", "effort": "high"}, "split": {"model": "sonnet"}})
         self.assertEqual(data["profiles"]["fallback"], {"roles": {"commit": {"model": "x"}}})
         loaded = self.run_main("settings-load", "--profile", "claude-code")[1]
-        self.assertEqual(loaded["roles"]["split"], {"model": "sonnet", "effort": "medium"})
+        self.assertEqual(loaded["roles"]["split"], {"model": "sonnet", "effort": "low"})
 
     def test_rejects_bad_roles_and_keeps_an_invalid_file(self):
         self.assertEqual(self.run_main("settings-save", "--profile", "claude-code", "--roles", '{"design": {}}'),
@@ -1878,7 +1878,7 @@ class QualityTest(CostEstimateTest):
                                    ("x-impl-report-1.md", "## Issues\n\n1) Error 1: open | high | A\n2) Error 2: open | low | B\n"))
         quality = ct._quality(stats, folder)
         self.assertEqual(quality, {"audit_status": "open", "audit_issues": 2, "reviews": 1, "review_remaining": 4,
-                                   "unit_retries": None, "failed_stages": []})
+                                   "unit_retries": None, "failed_stages": [], "delegated": None})
         stats, folder = self.stats(("x-impl-review-1.md", "**Issues found**: 2 (…)\n"), ("x-impl-completion.md", "done\n"),
                                    ("x-impl-report-1-final.md", "## Issues\n\nNo issues found.\n"))
         quality = ct._quality(stats, folder)
@@ -2089,6 +2089,136 @@ class SplitGateRunNextTest(_T2Case):
         self.assertEqual([(a["kind"], a["plan"], a["stage"]) for a in actions],
                          [("run", "b-impl.md", "split"), ("skip", "a-impl.md", "split")])
         self.assertTrue(actions[1]["why"].startswith("gate: keep (3 tasks, "))
+
+
+class LightDefaultsTest(HomeCase):
+    """Spec 8 of plan-refactoring-01: split on sonnet/low, `light` of execution null in every profile."""
+
+    def test_builtin_light_and_split(self):
+        self.assertEqual(ct.ROLE_KEYS, ("model", "effort", "fallback", "light"))
+        for name in ct.PROFILES:
+            roles = ct.BUILTIN_SETTINGS[name]["roles"]
+            self.assertIsNone(roles["execution"]["light"])
+            self.assertEqual([role for role in roles if "light" in roles[role]], ["execution"])
+        self.assertEqual(ct.BUILTIN_SETTINGS["github-copilot"]["roles"]["split"]["model"], "claude-sonnet-5.5")
+
+    def test_settings_load_returns_light(self):
+        out = self.run_main("settings-load", "--profile", "claude-code")[1]
+        self.assertEqual(out["roles"]["split"], {"model": "sonnet", "effort": "low"})
+        self.assertEqual(out["roles"]["execution"], {"model": "opus", "effort": "medium", "light": None})
+        out = self.run_main("settings-load", "--profile", "fallback")[1]
+        self.assertEqual(out["roles"]["execution"], {"model": None, "effort": None, "light": None})
+
+
+class LightSettingsTest(HomeCase):
+    def write_settings(self, data):
+        os.makedirs(self.home, exist_ok=True)
+        with open(os.path.join(self.home, "runner.json"), "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+
+    def test_light_values_and_warnings(self):
+        self.write_settings({"profiles": {"claude-code": {"roles": {
+            "execution": {"light": "claude-haiku-4-5"}, "writing": {"light": "haiku"}}}}})
+        code, out = self.run_main("settings-load", "--profile", "claude-code")
+        self.assertEqual((code, out["ok"], out["warnings"]), (0, True, ["light-ignored: writing"]))
+        self.assertEqual(out["roles"]["execution"], {"model": "opus", "effort": "medium", "light": "claude-haiku-4-5"})
+        self.assertEqual(out["pinned"], {role: False for role in ct.ROLES})  # light is not the role's model
+        self.write_settings({"profiles": {"claude-code": {"roles": {"execution": {"light": None}}}}})
+        code, out = self.run_main("settings-load", "--profile", "claude-code")
+        self.assertEqual((code, out["roles"]["execution"]["light"], out["warnings"]), (0, None, []))
+
+    def test_light_must_be_a_string_or_null(self):
+        self.write_settings({"profiles": {"claude-code": {"roles": {"execution": {"light": 5}}}}})
+        code, out = self.run_main("settings-load", "--profile", "claude-code")
+        self.assertEqual((code, out["errors"], out["warnings"]),
+                         (2, ["profiles.claude-code.roles.execution.light: must be a non-empty string or null"], []))
+        self.assertEqual(self.run_main("settings-save", "--profile", "claude-code", "--roles", '{"execution": {"light": 5}}'),
+                         (2, {"ok": False, "errors": ["roles.execution.light: must be a non-empty string or null"]}))
+
+
+class RunInitLightTest(JournalCase):
+    def test_runner_models_carry_light_of_execution_only(self):
+        models = {"execution": {"model": "opus", "effort": "medium", "light": "haiku"},
+                  "writing": {"model": "fable", "effort": "high", "light": "haiku"},
+                  "split": {"model": "sonnet", "effort": "low", "light": None}}
+        self.assertEqual(ct._runner_models(models), {
+            "execution": {"model": "opus", "effort": "medium", "light": "haiku"},
+            "writing": {"model": "fable", "effort": "high"}, "split": {"model": "sonnet", "effort": "low"}})
+        with self.assertRaises(ct.InputError) as caught:
+            ct._runner_models({"execution": {"model": "opus", "light": 3}})
+        self.assertEqual(str(caught.exception), "--models.execution.light: must be a non-empty string or null")
+
+    def test_light_reaches_the_journal_and_validates(self):
+        folder, journal = self.make_journal("a-spec.md", "b-spec.md")
+        code, out = self.init(journal, folder, models={"execution": {"model": "opus", "effort": "medium", "light": "haiku"}})
+        self.assertEqual((code, out["runner"]["models"]),
+                         (0, {"execution": {"model": "opus", "effort": "medium", "light": "haiku"}}))
+        self.assertEqual(ct._brainstorm().journal_validate(journal), {"ok": True, "errors": []})
+        self.assertEqual(ct._runner_journal(journal)[1]["models"]["execution"]["light"], "haiku")
+
+
+class ModelPickLightTest(JournalCase):
+    def test_light_from_the_settings(self):
+        self.assertEqual(self.run_main("model-pick", "--profile", "claude-code", "--role", "execution", "--light"),
+                         (0, {"ok": True, "model": None, "effort": "medium", "fallback_used": False}))
+        self.assertEqual(self.run_main("model-pick", "--profile", "claude-code", "--role", "audit", "--light"),
+                         (2, {"ok": False, "errors": ["light-role: --light goes with --role execution, not audit"]}))
+
+    def test_light_from_the_journal(self):
+        folder, journal = self.make_journal("a-spec.md", "b-spec.md")
+        self.init(journal, folder, models={"execution": {"model": "opus", "effort": "medium", "light": "haiku"}})
+
+        def pick(*argv):
+            return self.run_main("model-pick", "--journal", journal, "--role", "execution", "--light", *argv)
+        self.assertEqual(pick(), (0, {"ok": True, "model": "haiku", "effort": "medium", "fallback_used": False}))
+        code, out = pick("--unsupported", "haiku")
+        self.assertEqual((code, out["errors"]), (1, ["no-model: execution"]))
+        self.init(journal, folder, models={"execution": {"model": "s", "effort": None, "light": "haiku",
+                                                         "fallback": "gpt-5-mini"}})
+        self.assertEqual(pick("--unsupported", "haiku"),
+                         (0, {"ok": True, "model": "gpt-5-mini", "effort": None, "fallback_used": True}))
+        self.assertEqual(self.run_main("model-pick", "--journal", journal, "--role", "execution")[1]["model"], "s")
+
+
+class DelegatedStatsTest(_T2Case):
+    EVENTS = [_t2_event("03:00:00", "a-impl", "execution", "unit-finish", unit="task-1", outcome="pass", delegated="haiku"),
+              _t2_event("03:01:00", "a-impl", "execution", "unit-finish", unit="task-2", outcome="fail", delegated="haiku"),
+              _t2_event("03:02:00", "a-impl", "execution", "unit-finish", unit="task-2", outcome="pass"),
+              _t2_event("03:03:00", "a-impl", "execution", "unit-finish", unit="task-3", outcome="pass"),
+              _t2_event("03:04:00", "b-impl", "execution", "unit-finish", unit="task-1", outcome="fail", delegated="haiku")]
+
+    def stats(self, events):
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", done=("writing",))], events=events)
+        data, runner = ct._runner_journal(path)
+        return ct._journal_stats(data, runner, ct._plan_states(path, data, runner)[0])
+
+    def test_units_and_retries_of_the_plan(self):
+        self.assertEqual(self.stats(self.EVENTS)["delegated"], {"units": 2, "retries": 1})
+        self.assertEqual(self.stats([])["delegated"], {"units": 0, "retries": 0})
+
+    def test_quality_by_mode(self):
+        with open(os.path.join(self.tmp, "a-impl.md"), "w", encoding="utf-8") as fh:
+            fh.write("# P\n\n### Task 1: One\n")
+        path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", done=("writing",))], events=self.EVENTS)
+        self.assertEqual(ct.run_stats(path, None)["plans"][0]["quality"]["delegated"], {"units": 2, "retries": 1})
+        self.assertIsNone(ct.run_stats(None, os.path.join(self.tmp, "a-impl.md"))["plans"][0]["quality"]["delegated"])
+
+
+class LightDocsTest(HomeCase):
+    EXAMPLE = Path(__file__).resolve().parents[1] / "assets" / "runner.example.json"
+    PROFILES_MD = Path(__file__).resolve().parents[1] / "references" / "PROFILES.md"
+
+    def test_example_names_light(self):
+        out = self.run_main("settings-load", "--file", str(self.EXAMPLE), "--profile", "claude-code")[1]
+        self.assertEqual((out["roles"]["execution"]["light"], out["warnings"]), ("haiku", []))
+        out = self.run_main("settings-load", "--file", str(self.EXAMPLE), "--profile", "github-copilot")[1]
+        self.assertIsNone(out["roles"]["execution"]["light"])
+
+    def test_profiles_describe_light_and_split(self):
+        text = self.PROFILES_MD.read_text(encoding="utf-8")
+        for needle in ("light-ignored", "model-pick --journal <journal> --role execution --light",
+                       "| split | `sonnet`, low |"):
+            self.assertIn(needle, text)
 
 
 if __name__ == "__main__":

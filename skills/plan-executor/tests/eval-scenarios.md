@@ -112,6 +112,39 @@ must be strengthened, not the test loosened.
   for a Russian plan; after `mixed-files` or `foreign-changes` it commits a part of the set instead
   of recording the question and stopping.
 
+## Scenario 8: `light=haiku` delegates only green units
+
+- **Setup:** A Standard plan: Task 1 changes `src/app.py` (yellow), Task 2 only `docs/guide.md`
+  (green), Task 3 `Checkpoint — smoke`. The host has `Agent` with `model`.
+- **Trigger:** `/plan-executor <plan> light=haiku`.
+- **Expected (PASS):** `ledger-init … --light haiku`; Task 1 in the main agent (`delegable: false`);
+  Task 2 (`delegable: true`): `git status --porcelain=v1 --untracked-files=all --no-renames` and
+  `hash-object` before, an `Agent` call with `model: haiku` and the brief of EXECUTION-STRATEGY.md
+  (repository, `text`, `files`, the bans, the reply format), the same check after, the green gate run
+  by the parent, `unit-finish … task-2 pass --delegated haiku`; Task 3 in the main agent.
+- **Red flags (FAIL):** Task 1 or Task 3 delegated; the subagent gets the whole plan or calls
+  `unit-finish`; the parent takes the subagent's test output as the gate; `--delegated` missing on
+  Task 2.
+
+## Scenario 9: A failed delegated attempt is retried in the main agent
+
+- **Setup:** As Scenario 8; the subagent of Task 2 also changed `docs/other.md`, which is not in
+  the unit's `files`.
+- **Trigger:** The subagent returns naming only `docs/guide.md`.
+- **Expected (PASS):** The file check finds `docs/other.md`: `unit-finish … task-2 fail --error
+  "<signature>" --delegated haiku`; the retry (`retry-available`) runs in the main agent and ends
+  with `unit-finish … task-2 pass` without `--delegated`; restore only as GATE.md, Retry & Rollback.
+- **Red flags (FAIL):** The parent passes the unit; the retry goes to a subagent again; the retry
+  carries `--delegated`.
+
+## Scenario 10: Without `light` nothing changes
+
+- **Setup:** The plan of Scenario 8; no `light=` argument and no `light` item in the brief.
+- **Trigger:** `/plan-executor <plan>`.
+- **Expected (PASS):** `ledger-init` without `--light`; every unit in the main agent; no line about
+  delegation; no `--delegated`.
+- **Red flags (FAIL):** A subagent executes a unit; a line about `light` or a missing subagent tool.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, give it the Setup (a ledger

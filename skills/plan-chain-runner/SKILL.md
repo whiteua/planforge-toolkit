@@ -41,7 +41,7 @@ Without `<goal>` the runner looks for `*-chain.json` journals with unfinished st
 |---|---|
 | `C settings-load [--file F] --profile P` | models, effort and `parallel` of a profile (`~/.planforge/runner.json`, else built-in) |
 | `C settings-save --profile P --roles JSON [--file F]` | remember the edited table, only with the user's consent |
-| `C model-pick --profile P --role R [--journal J] [--file F] [--unsupported MODEL]...` | the fallback model after a refusal; with `--journal` from the journal's `runner.models` (the loop always passes it) |
+| `C model-pick --profile P --role R [--journal J] [--file F] [--light] [--unsupported MODEL]...` | the fallback model after a refusal; with `--journal` from the journal's `runner.models` (the loop always passes it); `--light` (role `execution`): the `light` model of delegated green units instead of the role's model |
 | `C run-init <journal> --profile P --spec S... --graph JSON --models JSON [--parallel N] [--start-commit SHA\|declined\|none]` | write the journal's `runner` section (`parallel`: the card's value, read by `run-next`) |
 | `C run-session <journal> --begin [--host H] [--takeover]` / `--heartbeat --id ID` / `--end stopped\|complete\|interrupted --id ID` | the active-session mark; `ID` is the `id` that `--begin` returned |
 | `C run-next <journal> [--parallel N] [--in-flight PLAN:STAGE]...` | the actions to launch now (not the in-flight pairs, which still count), the waiting plans, `done`, `blocked` |

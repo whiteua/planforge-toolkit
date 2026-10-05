@@ -513,7 +513,23 @@ def _apply_settings(led, settings, accept_drift=False):
     return changed
 
 
-def ledger_init(exec_dir, plan_path, input_type, units, source_sha256=None, accept_drift=False, settings=None):
+def _apply_light(led, light):
+    """settings.light: the model of the green units this launch delegates (ledger-init --light, spec 8 of
+    plan-refactoring-01). A record for run-stats and the resolver hand-off only: every launch passes it again
+    and a launch without it removes it; the executor never reads it back. A ledger without a settings object
+    (plan-brainstorming not installed) keeps none. True when it changed."""
+    settings = led.get("settings")
+    if not isinstance(settings, dict) or settings.get("light") == light:
+        return False
+    if light is None:
+        del settings["light"]
+    else:
+        settings["light"] = light
+    return True
+
+
+def ledger_init(exec_dir, plan_path, input_type, units, source_sha256=None, accept_drift=False, settings=None,
+                light=None):
     raw_units = units.get("units", []) if isinstance(units, dict) else units
     path = ledger_path(exec_dir)
     if path.exists():
@@ -549,12 +565,14 @@ def ledger_init(exec_dir, plan_path, input_type, units, source_sha256=None, acce
             led["consents"] = {}  # run-scope consents last one session
             changed = True
         changed = _apply_settings(led, settings, accept_drift) or changed
+        changed = _apply_light(led, light) or changed
         if changed:
             _save(exec_dir, led)
         return led
     led = build_ledger(plan_path, input_type, raw_units, source_sha256)
     led["consents"] = {}
     _apply_settings(led, settings)
+    _apply_light(led, light)
     return _save(exec_dir, led)
 
 
@@ -911,7 +929,11 @@ def recommend_gate(weight):
     return {"gate_tier": _normalize_weight(weight), "no_tests": "escalate"}
 
 
-def recommend_strategy(weight, task_text=""):
+def recommend_strategy(weight, task_text="", external=False):
+    """isolation / model_depth / gate_tier of a unit, plus `delegable` (spec 8 of plan-refactoring-01): a
+    light unit in the main agent that is not a checkpoint (title `Checkpoint …`) and has no **External:**
+    line may go to a subagent on the launch's `light` model. The agent never overrides the flag, but it
+    may keep a delegable unit in the main agent."""
     gate_tier = recommend_gate(weight)["gate_tier"]
     base = {
         "green": ("main", "light"),
@@ -922,7 +944,9 @@ def recommend_strategy(weight, task_text=""):
     if _HEAVY_KEYWORDS_RE.search(task_text or ""):
         isolation = "subagent"
         model_depth = "deep"
-    return {"isolation": isolation, "model_depth": model_depth, "gate_tier": gate_tier}
+    delegable = (model_depth == "light" and isolation == "main" and not external
+                 and not _CHECKPOINT_TITLE_RE.match(task_text or ""))
+    return {"isolation": isolation, "model_depth": model_depth, "gate_tier": gate_tier, "delegable": delegable}
 
 
 def _clean_path(value):
@@ -1155,7 +1179,7 @@ def unit_begin(exec_dir):
                 "expected_tree": check["expected_tree"], "current_tree": check["current_tree"]}
     unit = nxt["unit"]
     text = unit_text(unit) or ""
-    strategy = recommend_strategy(unit["weight"], unit["title"])
+    strategy = recommend_strategy(unit["weight"], unit["title"], external=bool(_external_lines(text)))
     running = ledger_mark(exec_dir, unit["id"], "running")
     result = {
         "reason": nxt["reason"],
@@ -1628,8 +1652,16 @@ def _git_ignored(root, rels):
     return sorted(_z_list(result.stdout))
 
 
-def unit_finish(exec_dir, unit_id, outcome, error=None, note=None):
+def unit_finish(exec_dir, unit_id, outcome, error=None, note=None, delegated=None):
+    if delegated is not None and not str(delegated).strip():
+        raise ToolError("delegated-invalid: --delegated needs the subagent's model", 2)
     led = _load(exec_dir)
+    if delegated and _find_unit(led, unit_id)["status"] == "running":
+        # The attempt a subagent made on the light model (spec 8 of plan-refactoring-01). Later attempts in the
+        # main agent keep the mark: the resolver hand-off lists every unit the light model touched.
+        _find_unit(led, unit_id)["delegated"] = delegated
+        _save(exec_dir, led)
+    extra = {"delegated": delegated} if delegated else {}
     workdir = led.get("workdir")
     if outcome == "pass":
         checkpoint = None
@@ -1647,7 +1679,7 @@ def unit_finish(exec_dir, unit_id, outcome, error=None, note=None):
                 unit = _add_note(exec_dir, unit_id, text)
             progress = render_progress(exec_dir)
             result = {"status": "done", "unit": unit, "checkpoint_id": checkpoint, "progress": progress["path"]}
-            return _journal_progress(exec_dir, "unit-finish", unit_id, result, outcome="pass")
+            return _journal_progress(exec_dir, "unit-finish", unit_id, result, outcome="pass", **extra)
     unit = ledger_mark(exec_dir, unit_id, "failed", error=error or "gate failed")
     if workdir:
         # The failed attempt's files are the run's own state: a retry must not see them as foreign.
@@ -1665,7 +1697,7 @@ def unit_finish(exec_dir, unit_id, outcome, error=None, note=None):
         "restore_to": _restore_target(led, unit_id),
         "progress": progress["path"],
     }
-    return _journal_progress(exec_dir, "unit-finish", unit_id, result, outcome="fail")
+    return _journal_progress(exec_dir, "unit-finish", unit_id, result, outcome="fail", **extra)
 
 
 def cmd_detect_input(args):
@@ -2106,6 +2138,9 @@ def _resolve_settings(plan_path):
 
 
 def cmd_ledger_init(args):
+    light = getattr(args, "light", None)
+    if light is not None and not light.strip():
+        raise ToolError("light-invalid: --light needs a model name", 2)
     detected = detect_input(args.plan_path, force_whole=args.whole)
     staged_warnings = []
     if detected["input_type"] == "staged":
@@ -2149,7 +2184,7 @@ def cmd_ledger_init(args):
         warnings.append(f"settings-unavailable: {problems}; Chain defaults apply")
     led = ledger_init(args.exec_dir, args.plan_path, detected["input_type"], units,
                       source_sha256=source_sha256, accept_drift=getattr(args, "accept_drift", False),
-                      settings=settings)
+                      settings=settings, light=light)
     if workdir and fresh:
         led["workdir"] = os.path.abspath(workdir)
         led["baseline_checkpoint"] = checkpoint_create(workdir, "baseline", led["run_id"],
@@ -2197,7 +2232,8 @@ def cmd_unit_begin(args):
 
 
 def cmd_unit_finish(args):
-    return unit_finish(args.exec_dir, args.unit_id, args.outcome, error=args.error, note=args.note)
+    return unit_finish(args.exec_dir, args.unit_id, args.outcome, error=args.error, note=args.note,
+                       delegated=getattr(args, "delegated", None))
 
 
 def cmd_consent(args):
@@ -2317,6 +2353,8 @@ def _configure_ledger_init(parser):
     parser.add_argument("--workdir", help="project working tree; enables baseline and per-unit snapshots")
     parser.add_argument("--allow-dirty", action="store_true", default=False)
     parser.add_argument("--accept-drift", action="store_true", default=False)
+    parser.add_argument("--light", metavar="MODEL",
+                        help="model of the green units this launch delegates to a subagent (stored as settings.light)")
     parser.add_argument("--allow-temp", action="store_true", default=False,
                         help="accept an exec_dir inside the OS temp dir (the ledger will not survive the session)")
 
@@ -2348,6 +2386,8 @@ def _configure_unit_finish(parser):
     parser.add_argument("--error")
     parser.add_argument("--note", action="append",
                         help="deviation agreed with the engineer, or a per-task External confirmation (pass only; repeatable)")
+    parser.add_argument("--delegated", metavar="MODEL",
+                        help="this attempt was made by a subagent on MODEL (units[].delegated, journal event)")
 
 
 def _configure_consent(parser):

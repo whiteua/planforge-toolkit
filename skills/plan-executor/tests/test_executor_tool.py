@@ -715,15 +715,27 @@ class TestRecommendStrategy(unittest.TestCase):
         self.tool = load_tool()
 
     def test_base_weight_mapping(self):
-        self.assertEqual(self.tool.recommend_strategy("green"), {"isolation": "main", "model_depth": "light", "gate_tier": "green"})
-        self.assertEqual(self.tool.recommend_strategy("yellow"), {"isolation": "main", "model_depth": "medium", "gate_tier": "yellow"})
-        self.assertEqual(self.tool.recommend_strategy("red"), {"isolation": "subagent", "model_depth": "deep", "gate_tier": "red"})
+        self.assertEqual(self.tool.recommend_strategy("green"),
+                         {"isolation": "main", "model_depth": "light", "gate_tier": "green", "delegable": True})
+        self.assertEqual(self.tool.recommend_strategy("yellow"),
+                         {"isolation": "main", "model_depth": "medium", "gate_tier": "yellow", "delegable": False})
+        self.assertEqual(self.tool.recommend_strategy("red"),
+                         {"isolation": "subagent", "model_depth": "deep", "gate_tier": "red", "delegable": False})
 
     def test_keywords_escalate_strategy_but_not_gate(self):
         self.assertEqual(
             self.tool.recommend_strategy("green", "security sensitive migration"),
-            {"isolation": "subagent", "model_depth": "deep", "gate_tier": "green"},
+            {"isolation": "subagent", "model_depth": "deep", "gate_tier": "green", "delegable": False},
         )
+
+    def test_delegable_only_for_plain_green_units(self):
+        rs = self.tool.recommend_strategy
+        self.assertTrue(rs("green", "Update the user guide")["delegable"])
+        self.assertFalse(rs("green", "Checkpoint — docs build")["delegable"])
+        self.assertFalse(rs("green", "Checkpoint — часть a")["delegable"])
+        self.assertFalse(rs("green", "Migrate the docs index")["delegable"])
+        self.assertFalse(rs("yellow", "Update the user guide")["delegable"])
+        self.assertFalse(rs("green", "Update the user guide", external=True)["delegable"])
 
 
 class TestScopeContext(unittest.TestCase):
@@ -2025,6 +2037,95 @@ class TestStagedLedger(_SplitCase):
         with self.assertRaises(ValueError) as ctx:
             self.init(roadmap)
         self.assertIn("plan-drift", str(ctx.exception))
+
+
+class TestDelegableUnitBegin(PlanTestCase):
+    PLAN = ("# P\n\n**Spec:** plan01-spec.md\n\n**Tier:** Quick\n\n"
+            "### Task 1: Guide\n\n**Files:**\n- Modify: `docs/guide.md`\n\n- [ ] **Step 1:** x\n\n"
+            "### Task 2: Smoke\n\n**Files:**\n- Modify: `docs/notes.md`\n\n"
+            "**External:** `test_db` (read) — smoke\n\n- [ ] **Step 1:** x\n\n"
+            "### Task 3: Checkpoint — docs\n\n- [ ] **Step 1:** x\n")
+
+    def test_unit_begin_marks_only_plain_green_units(self):
+        self.plan(TestSettingsConsent.SPEC, name="plan01-spec.md")
+        self.init(self.plan(self.PLAN))
+        seen = []
+        for unit in ("task-1", "task-2", "task-3"):
+            begun = self.tool.unit_begin(self.exec_dir)
+            seen.append((begun["unit"]["id"], begun["strategy"]["model_depth"], begun["strategy"]["delegable"]))
+            self.tool.unit_finish(self.exec_dir, unit, "pass")
+        self.assertEqual(seen, [("task-1", "light", True), ("task-2", "light", False), ("task-3", "light", False)])
+
+
+class TestLightSetting(PlanTestCase):
+    PLAN = "# P\n\n**Spec:** plan01-spec.md\n\n**Tier:** Quick\n\n### Task 1: Guide\n\n- [ ] **Step 1:** x\n"
+
+    def write(self):
+        self.plan("> Tier: Quick\n\n# Goal\n\nЦель.\n", name="plan01-spec.md")
+        return self.plan(self.PLAN)
+
+    def test_light_is_stored_per_launch(self):
+        plan = self.write()
+        self.assertEqual(self.init(plan, light="haiku")["settings"]["light"], "haiku")
+        self.assertEqual(self.tool._load(self.exec_dir)["settings"]["light"], "haiku")
+        self.assertEqual(self.init(plan, light="sonnet")["settings"]["light"], "sonnet")
+        self.assertNotIn("light", self.init(plan)["settings"])  # read from the launch, never from the ledger
+        self.assertEqual(self.tool.validate_ledger(self.tool._load(self.exec_dir)), [])
+
+    def test_without_a_settings_object_nothing_is_stored(self):
+        plan = self.write()
+        self.tool._load_brainstorm_tool = lambda: None
+        self.assertIsNone(self.init(plan, light="haiku")["settings"])
+
+    def test_cli_light_and_empty_name(self):
+        plan = self.write()
+        run = lambda *extra: subprocess.run([sys.executable, str(TOOL_PATH), "ledger-init", self.exec_dir, plan, *extra],
+                                            capture_output=True, text=True, encoding="utf-8", check=False)
+        proc = run("--light", "haiku")
+        self.assertEqual((proc.returncode, json.loads(proc.stdout)["settings"]["light"]), (0, "haiku"))
+        proc = run("--light", " ")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("light-invalid", json.loads(proc.stdout)["errors"][0])
+
+
+class TestDelegatedFinish(PlanTestCase):
+    PLAN = "# P\n\n**Tier:** Quick\n\n### Task 1: Guide\n\n- [ ] **Step 1:** x\n\n### Task 2: Notes\n\n- [ ] **Step 1:** x\n"
+
+    def test_the_unit_keeps_the_delegated_model(self):
+        self.init(self.plan(self.PLAN))
+        self.assertNotIn("delegated", self.tool._load(self.exec_dir)["units"][0])
+        self.tool.unit_begin(self.exec_dir)
+        done = self.tool.unit_finish(self.exec_dir, "task-1", "pass", delegated="haiku")
+        self.assertEqual((done["status"], done["unit"]["delegated"]), ("done", "haiku"))
+        self.tool.unit_begin(self.exec_dir)
+        failed = self.tool.unit_finish(self.exec_dir, "task-2", "fail", error="boom", delegated="haiku")
+        self.assertEqual((failed["decision"], failed["unit"]["delegated"]), ("retry", "haiku"))
+        self.tool.unit_begin(self.exec_dir)
+        self.tool.unit_finish(self.exec_dir, "task-2", "pass")  # the retry in the main agent: no flag
+        led = self.tool._load(self.exec_dir)
+        self.assertEqual([unit.get("delegated") for unit in led["units"]], ["haiku", "haiku"])
+        self.assertEqual(self.tool.validate_ledger(led), [])
+
+    def test_empty_and_missing_model(self):
+        self.init(self.plan(self.PLAN))
+        self.tool.unit_begin(self.exec_dir)
+        with self.assertRaises(ValueError) as ctx:
+            self.tool.unit_finish(self.exec_dir, "task-1", "pass", delegated=" ")
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("delegated-invalid", str(ctx.exception))
+        proc = subprocess.run([sys.executable, str(TOOL_PATH), "unit-finish", self.exec_dir, "task-1", "pass", "--delegated"],
+                              capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--delegated", proc.stderr)
+
+
+class TestDelegationSchema(unittest.TestCase):
+    def test_schema_declares_delegated_and_light(self):
+        schema = json.loads((ROOT / "assets" / "ledger.schema.json").read_text(encoding="utf-8"))
+        unit = schema["properties"]["units"]["items"]
+        self.assertEqual(unit["properties"]["delegated"]["type"], "string")
+        self.assertNotIn("delegated", unit["required"])
+        self.assertIn("light", schema["properties"]["settings"]["description"])
 
 
 if __name__ == "__main__":

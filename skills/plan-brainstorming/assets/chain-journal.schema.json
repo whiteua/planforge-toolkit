@@ -69,7 +69,8 @@
           "additionalProperties": {"type": "array", "items": {"type": "string"}}},
         "models": {"type": "object", "propertyNames": {"enum": ["writing", "revision", "split", "execution", "audit", "commit"]},
           "additionalProperties": {"type": "object", "required": ["model", "effort"], "properties": {
-            "model": {"type": ["string", "null"], "minLength": 1}, "effort": {"type": ["string", "null"], "minLength": 1}}}},
+            "model": {"type": ["string", "null"], "minLength": 1}, "effort": {"type": ["string", "null"], "minLength": 1},
+            "light": {"type": ["string", "null"], "minLength": 1, "description": "optional, execution only: the model plan-executor delegates green units to (run-init copies it from settings-load; absent = no delegation)"}}}},
         "start_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{7,64}|declined|none)$"},
         "parallel": {"type": "integer", "minimum": 1, "description": "optional; run-init --parallel, read by run-next first"},
         "sessions": {"type": "array", "items": {"type": "object", "required": ["id", "started_at", "ended_at", "end"],

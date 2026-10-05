@@ -8,7 +8,7 @@ outside any working copy. Stdlib only, Python 3.8+.
 Commands:
   settings-load  [--file F] --profile P
   settings-save  --profile P --roles JSON [--file F]
-  model-pick     (--profile P [--file F] | --journal J [--profile P]) --role R [--unsupported MODEL]...
+  model-pick     (--profile P [--file F] | --journal J [--profile P]) --role R [--light] [--unsupported MODEL]...
   run-init       <journal> --profile P --spec S... --graph JSON --models JSON [--start-commit SHA|declined|none] [--parallel N]
   run-session    <journal> (--begin [--host H] [--takeover] | --heartbeat --id ID | --end stopped|complete|interrupted --id ID)
   run-next       <journal> [--parallel N] [--in-flight PLAN_ID:STAGE]...
@@ -299,7 +299,7 @@ _OPUS, _SONNET, _MINI = "claude-opus-5.5", "claude-sonnet-5.5", "gpt-5-mini"
 BUILTIN_SETTINGS: Dict[str, Dict[str, Any]] = {
     "claude-code": {"parallel": 3, "roles": {
         "writing": {"model": "fable", "effort": "high"}, "revision": {"model": "fable", "effort": "high"},
-        "split": {"model": "opus", "effort": "medium"}, "execution": {"model": "opus", "effort": "medium"},
+        "split": {"model": "sonnet", "effort": "low"}, "execution": {"model": "opus", "effort": "medium"},
         "audit": {"model": "fable", "effort": "high"}, "commit": {"model": "sonnet", "effort": "low"}}},
     "github-copilot": {"parallel": 3, "roles": {
         role: {"model": model, "effort": None, "fallback": _MINI}
@@ -307,7 +307,11 @@ BUILTIN_SETTINGS: Dict[str, Dict[str, Any]] = {
                             ("execution", _SONNET), ("audit", _OPUS), ("commit", _MINI))}},
     "fallback": {"parallel": 1, "roles": {role: {"model": None, "effort": None} for role in ROLES}},
 }
-ROLE_KEYS = ("model", "effort", "fallback")
+# `light` (spec 8 of plan-refactoring-01): the model of the green units plan-executor may delegate to a
+# subagent. Meaningful only for the execution role; null, the default of every profile, = no delegation.
+for _builtin in BUILTIN_SETTINGS.values():
+    _builtin["roles"]["execution"]["light"] = None
+ROLE_KEYS = ("model", "effort", "fallback", "light")
 # Claude Code model aliases: each points at the current model of its family and cannot be pinned;
 # a full model id (claude-sonnet-5-5) pins the version (PROFILES.md, Pinned models).
 MODEL_ALIASES = ("sonnet", "opus", "haiku", "fable")
@@ -393,9 +397,12 @@ def load_settings(path: str, profile: str) -> Dict[str, Any]:
     roles = {role: dict(entry) for role, entry in builtin["roles"].items()}
     for role, entry in ((body or {}).get("roles") or {}).items():
         roles[role].update(entry)
+    # `light` is accepted on any role but means something only for execution (spec 8 of plan-refactoring-01).
+    warnings = [f"light-ignored: {role}" for role, entry in roles.items()
+                if role != "execution" and entry.get("light") is not None]
     return {"ok": not errors, "source": "file" if body is not None or errors else "builtin", "profile": profile,
             "parallel": (body or {}).get("parallel", builtin["parallel"]), "roles": roles,
-            "pinned": _pinned(roles), "errors": errors}
+            "pinned": _pinned(roles), "errors": errors, "warnings": warnings}
 
 
 def cmd_settings_load(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
@@ -437,13 +444,16 @@ def cmd_settings_save(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     return 0, save_settings(_settings_path(args.file), args.profile, roles)
 
 
-def pick_model(settings: Dict[str, Any], role: str, unsupported: List[str]) -> Dict[str, Any]:
-    """The role's model; a refused (`unsupported`) model gives way to its fallback, else no-model.
-    A null model (fallback profile, inherited model) is returned as null."""
+def pick_model(settings: Dict[str, Any], role: str, unsupported: List[str], light: bool = False) -> Dict[str, Any]:
+    """The role's model; with `light` (execution only) its `light` model, the model of delegated green units
+    (spec 8 of plan-refactoring-01). A refused (`unsupported`) model gives way to the role's fallback, else
+    no-model. A null model (fallback profile, inherited model, no `light`) is returned as null."""
     if role not in ROLES:
         raise InputError(f"unknown-role: {role}")
+    if light and role != "execution":
+        raise InputError(f"light-role: --light goes with --role execution, not {role}")
     entry = settings["roles"][role]
-    model, fallback = entry["model"], entry.get("fallback")
+    model, fallback = (entry.get("light") if light else entry["model"]), entry.get("fallback")
     if model is None or model not in unsupported:
         return {"ok": True, "model": model, "effort": entry["effort"], "fallback_used": False}
     if fallback and fallback not in unsupported:
@@ -460,21 +470,21 @@ def cmd_model_pick(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         journal = os.path.abspath(args.journal)
         models = _runner_journal(journal)[1].get("models") or {}  # runner.models validated there
         roles = {role: dict({"model": None, "effort": None}, **(models.get(role) or {})) for role in ROLES}
-        return 0, pick_model({"roles": roles}, args.role, args.unsupported)
+        return 0, pick_model({"roles": roles}, args.role, args.unsupported, args.light)
     if not args.profile:
         raise InputError("--profile is required without --journal")
     settings = load_settings(_settings_path(args.file), args.profile)
     if not settings["ok"]:
         return 2, {"ok": False, "errors": settings["errors"]}
-    return 0, pick_model(settings, args.role, args.unsupported)
+    return 0, pick_model(settings, args.role, args.unsupported, args.light)
 
 
 START_COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$")
 
 
 def _runner_models(models: Any) -> Dict[str, Dict[str, Any]]:
-    """`--models` (settings-load roles) as {role: {"model", "effort", "fallback"?}}: the fallback stays
-    for model-pick --journal."""
+    """`--models` (settings-load roles) as {role: {"model", "effort", "fallback"?, "light"?}}: the fallback
+    stays for model-pick --journal; `light` only for execution (the executor's brief names it)."""
     errors = _roles_errors("--models", models)
     if errors:
         raise InputError("; ".join(errors))
@@ -483,6 +493,8 @@ def _runner_models(models: Any) -> Dict[str, Dict[str, Any]]:
         runner_models[role] = {"model": entry.get("model"), "effort": entry.get("effort")}
         if entry.get("fallback"):
             runner_models[role]["fallback"] = entry["fallback"]
+        if role == "execution" and entry.get("light"):
+            runner_models[role]["light"] = entry["light"]
     return runner_models
 
 
@@ -1247,9 +1259,15 @@ def _journal_stats(data: Dict[str, Any], runner: Dict[str, Any], state: Dict[str
                          "actual_tokens": _int_or_none(artifacts.get("cost_tokens")),
                          "actual_source": artifacts.get("cost_source")}
     begun = [(event.get("data") or {}).get("unit") for event in own["events"] if event.get("kind") == "unit-begin"]
+    # unit-finish --delegated (spec 8 of plan-refactoring-01): attempts a subagent on the light model made;
+    # a failed one is always retried in the main agent, so its fails are the delegated retries.
+    delegated = [event.get("data") or {} for event in own["events"]
+                 if event.get("kind") == "unit-finish" and (event.get("data") or {}).get("delegated")]
     audit = (_record(state, "audit").get("artifacts") or {})
     return {"stages": stages,
             "units": {"begun": len(begun), "distinct": len(set(begun)), "retries": len(begun) - len(set(begun))},
+            "delegated": {"units": len({item.get("unit") for item in delegated}),
+                          "retries": sum(1 for item in delegated if item.get("outcome") == "fail")},
             "audit": {"status": audit.get("status"), "issues": _int_or_none(audit.get("issues"))},
             "failed_stages": [stage for stage, item in stages.items() if item["status"] in ("failed", "stopped")]}
 
@@ -1458,7 +1476,8 @@ def _quality(stats: Dict[str, Any], folder: str) -> Dict[str, Any]:
             "reviews": len(reviews),
             "review_remaining": 0 if completion else (int(found.group(1)) if found else None),
             "unit_retries": (stats.get("units") or {}).get("retries"),
-            "failed_stages": list(stats.get("failed_stages") or [])}
+            "failed_stages": list(stats.get("failed_stages") or []),
+            "delegated": stats.get("delegated")}  # null without a journal (--plan), like unit_retries
 
 
 _STATS_DELTA_KEYS = ("bytes_read_est", "bytes_written", "effective_tokens_est", "minutes")
@@ -1585,7 +1604,8 @@ def _plan_stats(plan_path: str, journal_layer: Optional[Dict[str, Any]], warning
     if journal_layer:
         for stage, item in journal_layer["stages"].items():
             stats["stages"].setdefault(stage, {"status": "pending", "files": [], "bytes_written": 0}).update(item)
-        stats.update(units=journal_layer["units"], failed_stages=journal_layer["failed_stages"])
+        stats.update(units=journal_layer["units"], failed_stages=journal_layer["failed_stages"],
+                     delegated=journal_layer["delegated"])
     else:  # --plan: no journal, so no durations; every stage still carries the key
         for item in stats["stages"].values():
             item.setdefault("minutes", None)
@@ -1691,6 +1711,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_pick.add_argument("--role", required=True, help=", ".join(ROLES))
     p_pick.add_argument("--file", help="settings file, default $PLANFORGE_HOME/runner.json or ~/.planforge/runner.json")
     p_pick.add_argument("--unsupported", action="append", default=[], help="a model the host refused (repeatable)")
+    p_pick.add_argument("--light", action="store_true",
+                        help="the light model of the execution role (delegated green units) instead of its model")
     p_pick.set_defaults(func=cmd_model_pick)
 
     p_init = sub.add_parser("run-init", help="write the runner section of the chain journal")

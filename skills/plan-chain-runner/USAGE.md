@@ -62,7 +62,7 @@ Without `<goal>` the runner finds the journals with unfinished stages; with seve
 
 ## Settings
 
-`~/.planforge/runner.json` holds the model and effort of each role (`writing`, `revision`, `split`, `execution`, `audit`, `commit`) per profile (`claude-code`, `github-copilot`, `fallback`) and `parallel`. Without the file the built-in defaults apply. The runner writes the file only when you agree to remember an edited table.
+`~/.planforge/runner.json` holds the model and effort of each role (`writing`, `revision`, `split`, `execution`, `audit`, `commit`) per profile (`claude-code`, `github-copilot`, `fallback`) and `parallel`. Without the file the built-in defaults apply; `split` runs on `sonnet` with low effort, because it reads only the plan's task list. The `execution` role may also name `light`, a cheaper model for green tasks (documentation, test-only, Quick-tier tasks without `External`, not checkpoints) that the executor hands to a subagent; the default is none (no delegation), in `claude-code` it is an alias such as `"light": "haiku"`. A host that refuses it turns delegation off for the run without a question. The runner writes the file only when you agree to remember an edited table.
 
 ## Cost
 

@@ -8,6 +8,10 @@
 
 A checkpoint task (`### Task N: Checkpoint — …`) is gated by running its command and comparing the output with its `Expected:` line.
 
+## Delegated Units
+
+A unit a subagent executed (EXECUTION-STRATEGY.md, Delegation) is gated by the parent, never by the subagent: first the file check (the changed files against `files` and against the files the subagent named; a mismatch is `fail`), then the 🟢 green checks above, run by the parent itself: the subagent's command output is not evidence. Finish with `unit-finish <exec_dir> <unit> pass|fail [--error "<signature>"] --delegated <model>`. A `fail` goes to Retry & Rollback; the retry runs in the main agent without `--delegated`.
+
 ## External Units
 
 `unit-begin` returns `external`: one entry per environment named before the description dash of each `**External:**` line (`` `a` (read), `b` (write) — … `` gives two entries), `{env, access, kind, consent, confirmed, source}`, also recorded on the unit in the ledger. `consent` is the setting for that access (`run`, `task`, `deny`) from the settings `ledger-init` stored (the spec, or the header of an old plan); settings stored with errors grant nothing (`consent: null`). `confirmed` is true for `run` or for a run-scope consent given earlier with `consent`, never for a write on production; `source` says whose permission it is (`spec` / `session`).

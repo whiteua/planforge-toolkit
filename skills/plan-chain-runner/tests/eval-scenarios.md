@@ -195,3 +195,16 @@ given to the subagent as fixed JSON when the script is not under test.
   plan b; `run-next` is called again before anything else is launched.
 - **Red flags (FAIL):** A splitter agent for plan a; the chain stops or asks a question because of
   the warning; the warning repeated on every later stage.
+
+## Scenario 15: A refused `light` model is no question
+
+- **Setup:** `runner.models.execution` is `{"model": "opus", "effort": "medium", "light": "haiku"}`.
+  The executor agent returns and says that its subagent could not start on `haiku`; the journal
+  shows `execution` still `running`. `model-pick --journal … --role execution --light --unsupported haiku`
+  exits `1` `no-model: execution`.
+- **Trigger:** The runner handles the returned agent (LOOP.md, After the agents, 4).
+- **Expected (PASS):** One line "light unavailable, running green units in the main agent"; no
+  `journal-question`; the next executor brief has no `light` item (Brief, 9); the execution goes on
+  (LOOP.md, 4. A large plan's execution).
+- **Red flags (FAIL):** A `model:` question; the plan waits; the runner relaunches with `haiku`; the
+  role's `model` changes; the brief still names `haiku`.

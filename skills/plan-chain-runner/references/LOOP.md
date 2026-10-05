@@ -43,6 +43,7 @@ Model and effort of the role (`role` of the action): `runner.models[<role>]` of 
 6. Only when the action has `reason`: the stage is `done` (or a running fix audit) and is entered again; its `running` event carries `--reason <reason>`.
 7. Only for `plan-writing` of an old spec: the settings answers of the start card (START.md, 4) to write into the plan header without a question: `**Chain:**` with the four keys, `**Backlog:**`, and under `**Environments:**` one line per environment in plan-writing's form, `` - `name` (test|prod; read=…, write=…) — "<the user's question and answer, verbatim>" (<date>) ``.
 8. Only for `plan-executor`'s `execution` when the journal has the runner's answered `dirty-worktree:` question of this plan (START.md, 5): the user allowed the run on the uncommitted changes listed at the start; apply that question (`ledger-init … --allow-dirty`), then `J journal-answer <journal> <Qn> --applied`.
+9. **`light`** — only for `plan-executor`'s `execution` when `runner.models.execution.light` of the journal file is set: "Model for green units: `<light>`" (the executor may delegate the units `unit-begin` marks `delegable` to a subagent on it: plan-executor, EXECUTION-STRATEGY.md, Delegation). After the host refused that model (3, 4) the item names the model `model-pick --light` returned, or is left out after `no-model`.
 
 Never add "report back that it is done" style requests: the journal is the report.
 
@@ -57,6 +58,7 @@ Each time one agent returns (or fails to start), for that agent alone; the other
    - `fallback_used: true` → one line "model X unavailable, using Y", relaunch with that model;
    - `fallback_used: false` with a model other than the refused one → the same line, launch with it;
    - the refused model again, exit `1` `no-model`, or exit `2` → `J journal-question <journal> --skill plan-chain-runner --plan <plan> --spec <spec> --stage <stage> --text "model: <role> <which model failed, the error>" --option retry --option stop`; the plan waits. In `discuss` the user answers `retry <model>` (the model to use for the role), `retry` (the same model again) or `stop`; on `continue` the runner applies it itself (Continue).
+   - the refused model is the `light` of `execution` (the executor agent says its subagent could not start on it) → `C model-pick --journal <journal> --role execution --light --unsupported <light>` (one `--unsupported` per refused model): `fallback_used: true` → one line "light X unavailable, using Y" and the next executor briefs name Y in their `light` item (Brief, 9); exit `1` `no-model` → one line "light unavailable, running green units in the main agent" and the later executor briefs of this session leave the item out. No `model:` question and no wait: delegation is an optimisation, not a requirement.
 
    A role launched through `subagent_type: planforge-<role>` (PROFILES.md, Agent definitions) has its model in that file: to use another model, launch the role without `subagent_type` and with `model`, and say in the line that the role's effort is now inherited.
 5. One progress line per finished stage (5).

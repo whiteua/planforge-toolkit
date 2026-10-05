@@ -152,6 +152,10 @@
                 "source": {"enum": ["spec", "session", null]}
               }
             }
+          },
+          "delegated": {
+            "type": "string",
+            "description": "Model of the subagent that made an attempt of this unit (unit-finish --delegated); kept by later attempts in the main agent; absent when the unit was never delegated"
           }
         }
       },
@@ -223,7 +227,7 @@
     },
     "settings": {
       "type": ["object", "null"],
-      "description": "plan-brainstorming resolve_settings output at ledger-init (chain, environments with read/write rights, backlog); null when plan-brainstorming is not installed alongside"
+      "description": "plan-brainstorming resolve_settings output at ledger-init (chain, environments with read/write rights, backlog), plus the optional light: the model of the green units this launch delegated (ledger-init --light; a record for run-stats, never read back); null when plan-brainstorming is not installed alongside"
     },
     "settings_source": {
       "type": ["object", "null"],

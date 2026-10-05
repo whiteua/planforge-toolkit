@@ -36,9 +36,10 @@ When the profile's capability fails at run time (the tool refuses to start agent
 
 ## Models and effort
 
-- The settings file `~/.planforge/runner.json` (`PLANFORGE_HOME` replaces `~/.planforge`) holds per profile `parallel` and per role `model`, `effort` and an optional `fallback`; `assets/runner.example.json` shows the format, with full model ids for `claude-code` (they pin the version; Pinned models). `C settings-load --profile <profile>` fills the roles the file does not name from the built-in defaults.
+- The settings file `~/.planforge/runner.json` (`PLANFORGE_HOME` replaces `~/.planforge`) holds per profile `parallel` and per role `model`, `effort` and an optional `fallback`, and for `execution` an optional `light`; `assets/runner.example.json` shows the format, with full model ids for `claude-code` (they pin the version; Pinned models). `C settings-load --profile <profile>` fills the roles the file does not name from the built-in defaults.
 - The confirmed table (with each role's `fallback`) and `parallel` are written to the journal by `run-init` (`runner.models`, `runner.parallel`); the loop launches with them.
 - A refused model or effort: `C model-pick --journal <journal> --profile <profile> --role <role> --unsupported <model>`, which reads the journal's table (LOOP.md, After the agents).
+- **`light`** (role `execution` only): the model plan-executor gives the units `unit-begin` marks `delegable` (green, in the main agent, not a checkpoint, no `**External:**`; plan-executor EXECUTION-STRATEGY.md, Delegation). `null`, the default of every profile, means no delegation: the executor works as before. In `claude-code` it is an alias (`haiku`): the executor passes it as the `model` of its `Agent` call, which takes only aliases (Verified). `settings-load` returns it in the `execution` entry; on another role it is accepted, has no effect and gives the warning `light-ignored: <role>`. `run-init` copies it into `runner.models.execution.light`, and every executor brief names it (LOOP.md, Brief, 9). A host that refuses it: `C model-pick --journal <journal> --role execution --light --unsupported <light>` (LOOP.md, After the agents, 4), no question. Making `light: haiku` the default of `claude-code` is a separate decision after the measurement in `docs/COST.md` (Delegation).
 
 ## Built-in defaults
 
@@ -46,13 +47,16 @@ When the profile's capability fails at run time (the tool refuses to start agent
 |---|---|---|---|
 | writing | `fable`, high | `claude-opus-5.5`, inherited | none |
 | revision | `fable`, high | `claude-opus-5.5`, inherited | none |
-| split | `opus`, medium | `claude-sonnet-5.5`, inherited | none |
+| split | `sonnet`, low | `claude-sonnet-5.5`, inherited | none |
 | execution | `opus`, medium | `claude-sonnet-5.5`, inherited | none |
+| execution `light` | none | none | none |
 | audit | `fable`, high | `claude-opus-5.5`, inherited | none |
 | commit | `sonnet`, low | `gpt-5-mini`, inherited | none |
 | `parallel` | 3 | 3 | 1 |
 
 This table mirrors the built-in values of `chain_tool.py`; the script is the authority. With an invalid settings file (`settings-load` exit `2`) the runner offers this table for the run.
+
+`split` runs on `sonnet` with low effort: the role reads the plan's task list (`plan-tasks`) and writes the boundaries JSON, and when the splitter's gate keeps the plan whole no agent starts at all.
 
 **Unverified:** the `github-copilot` column (model names, inherited effort, fallback) is an assumption until the Copilot CLI profile probe passes (Verified).
 

@@ -52,6 +52,7 @@ Journal errors never block the run's own work:
 5. Re-running `ledger-init` on an existing ledger resumes it: `running` units go back to `pending`. If the plan file changed, `plan-drift` returns the `added`/`removed` unit ids — STOP and ask. Continue only with a new `exec_dir` or `--accept-drift` (units are rebuilt; `done` units with the same id are kept). When a unit was still `running` (the session ended mid-unit), its files become the expected tree, so the next `unit-begin` does not report them as foreign changes.
 6. `ledger-init` reads the chain settings by the shared rule (`resolve_settings` of `plan-brainstorming`: the plan header when it has settings, else the spec named by `**Spec:**`; a roadmap goes through its `Source` link to the master plan) and stores them as `settings` and `settings_source` (path and SHA-256). Show the result's `warnings`. Without `plan-brainstorming` alongside, `settings` is `null` and every External unit is asked. `settings-unavailable` (the spec cannot be read and the plan has External units): STOP and ask; without a confirmation channel, stop with a report. A resume clears the run-scope `consents` and compares the source's SHA-256: a change is `settings-drift` with `changed_keys` — STOP and ask; continue only with a new `exec_dir` or `--accept-drift` (the new settings are adopted). A source that can no longer be read on resume is not a drift: the stored settings stay and `settings-unavailable` applies as above.
 7. `ledger-init` also stores the chain journal (`journal`: its path and the master plan's id) and `baseline_head` (the `HEAD` of the first `ledger-init`, `""` for a repository without commits; the COMMIT stage needs it), and moves the journal's `execution` stage to `running` with the artifact `exec_dir` (relative to the journal's directory, forward slashes; absolute only on another drive). `unit-begin` and `unit-finish` write the unit events with `done`/`total`, `unit-finish` keeps the stage's artifacts `units_done` and `units_total` current, and `unit-begin` ends the stage: `done` at `all-done`, `failed` at `exhausted`, `stagnated` or `blocked`. A `journal_error` in a result: say it in one line and continue.
+8. `light=<model>` (the argument, or the runner brief's `light` item) → `ledger-init … --light <model>` on every launch, a resume included: the model is read from the launch, never from the ledger (`settings.light` is a record for `run-stats`; a launch without `--light` removes it). An empty name is `light-invalid` (exit `2`). How units are delegated: EXECUTION-STRATEGY.md, Delegation.
 
 ## LOOP
 
@@ -76,7 +77,7 @@ A failed unit is always handled before any other unit, so later units never run 
 
 ## Subagents
 
-Subagents may inspect code and return diff/status/logs. Only the parent session calls `unit-finish`, marks units, or decides the gate.
+Subagents may inspect code and return diff/status/logs. A subagent executes a unit only when the unit is delegated (EXECUTION-STRATEGY.md, Delegation: `delegable: true`, a `light` model given, a subagent tool present); it then changes only the unit's files and returns the changed files and the commands' output. The file check, the gate, `unit-finish` and every ledger change stay with the parent session, always.
 
 ## FINALIZE
 

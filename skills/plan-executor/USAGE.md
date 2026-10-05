@@ -9,6 +9,7 @@ In VS Code Copilot chat, type:
 ```
 /plan-executor <plan-or-roadmap-path>
 /plan-executor <plan-or-roadmap-path> commit     # after the audit: commit the run's result
+/plan-executor <plan-or-roadmap-path> light=haiku  # green tasks go to a subagent on haiku (off by default)
 /plan-executor help                              # show this quick reference in the dialogue language, nothing else
 ```
 
@@ -34,6 +35,7 @@ In VS Code Copilot chat, type:
 |---|---|---|
 | Plan/Roadmap path | **Yes** | Plan `.md` with task headings, or a `-roadmap.md` from plan-splitter |
 | `--whole` | No | Treat the plan as whole even if a roadmap exists; a plan without task headings becomes one unit |
+| `light=<model>` | No | Delegate green tasks (documentation, test-only and Quick-tier tasks without `External`, not checkpoints) to a subagent on this model; the executor checks the files, runs the gate itself and retries a failure in the main agent. Off by default; a chain passes the runner's `light` setting |
 | `commit` | No | Commit mode, a separate call after the audit: rebuilds the diff report with the audit's fixes and commits the run's files plus those fixes; asks before committing audit fixes |
 
 ## Input Types
@@ -61,6 +63,7 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 - 3 attempts per unit (1 primary + 2 retries); the same error signature twice → immediate STOP
 - A gate cannot pass silently if tests are missing → escalation, not fake success
 - Gate depth follows the plan tier, lowered for checkpoint tasks, documentation-only tasks (light) and test-only tasks (one step down)
+- With `light=<model>` a green task may be done by a subagent on that model with the task's text and files only; the ledger (`delegated`), the journal and `run-stats` (`quality.delegated`) record it, so its quality can be measured before it becomes a default
 - A task marked `**External:** <environment> (read|write)` runs without a question only when the spec allows that access for the whole run (`read=run` / `write=run`); otherwise you are asked: only this task / the whole run / stop ("the whole run" only when the task names `(read)` or `(write)` and the environment is in the settings). `deny` stops the run, changes on prod are confirmed task by task, and the executor never runs a step on an environment the plan does not list
 - Work beyond a task's text (a defect the gate found) is done only with your consent and recorded as a note in the ledger
 - Snapshots are stored in hidden git refs `refs/plan-executor/<run>/<unit>`: no commits on your branch during the run. Only the `commit` mode commits, after the audit: the run's files and the audit's fixes, with your hooks; never push, amend or force. Files you changed before the run that the run also changed are not committed (`mixed-files`)

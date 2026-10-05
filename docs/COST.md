@@ -125,6 +125,29 @@ files of 1.34 MB, more than the plan (551 KB), so until the model counts only th
 (BACKLOG, section `plan-refactoring-01`) `bytes_read_est` overstates an incremental pass, and the
 comparison uses `bytes_written` and the output tokens.
 
+## Delegation (`light`)
+
+`/plan-executor <plan> light=<model>` (or `runner.models.execution.light` of a chain) hands the units
+`unit-begin` marks `delegable` (green, in the main agent, not a checkpoint, no `**External:**`) to a
+subagent on that model; the parent checks the files, runs the gate and records `unit-finish
+--delegated`. `run-stats` reports per plan `quality.delegated`: `units` (distinct units with a
+delegated `unit-finish` event) and `retries` (delegated attempts that failed; each is retried in the
+main agent). Without a journal (`--plan`) it is `null`.
+
+**Criterion for a default.** `light` stays an option, off in every profile, until on real goals both
+hold: the failed share of delegated attempts (`delegated.retries / delegated.units`) is no higher than
+the retried share of the other units (`(unit_retries − delegated.retries) / (tasks − delegated.units)`),
+and the resolver's issues on delegated tasks (RESOLVER-PROPOSAL lists them) do not grow. Making
+`light: haiku` the `claude-code` default is a separate decision, not spec 8.
+
+**Price.** The `split` role costs 3–5 times less per token on `sonnet`/low and nothing when the gate
+keeps the plan whole; a delegated green unit costs about ¼ per token plus a second context (the
+subagent gets only the unit's text and files, no skill instructions).
+
+| Date | Goal | Model | `delegated.units` | `delegated.retries` | Notes |
+|---|---|---|---|---|---|
+| 2026-10-05 | demo (2 green tasks, OS temp) | haiku | 2 | 1 | control check of spec 8: delegation works end to end; not a quality measurement |
+
 ## How to compare
 
 1. Before a change: `run-stats <journal> --json-out before.json` on a finished run of a reference

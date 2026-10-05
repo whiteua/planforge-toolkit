@@ -30,9 +30,9 @@ Do not use it to invent a plan. Use `plan-writing` or `plan-splitter` first when
 
 ```bash
 T="python <SKILL_DIR>/scripts/executor_tool.py"
-$T ledger-init <exec_dir|auto> <plan_path> --workdir <repo> [--whole] [--allow-dirty] [--accept-drift]
+$T ledger-init <exec_dir|auto> <plan_path> --workdir <repo> [--whole] [--allow-dirty] [--accept-drift] [--light <model>]  # --light: light=<model> of this launch
 $T unit-begin  <exec_dir>
-$T unit-finish <exec_dir> <unit_id> pass|fail [--error "<signature>"] [--note "<agreed deviation or External confirmation>"]...  # --note repeats: one note per entry
+$T unit-finish <exec_dir> <unit_id> pass|fail [--error "<signature>"] [--note "<agreed deviation or External confirmation>"]... [--delegated <model>]  # --note repeats: one note per entry; --delegated: a subagent made this attempt
 $T consent     <exec_dir> <env> read|write  # the engineer chose "the whole run"; refused for prod write and deny
 $T run-diff    <exec_dir> [--markdown <file> [--include-fixes <journal>]]   # what this run changed: baseline vs last unit snapshot; --markdown writes the diff report
 $T accept-changes <exec_dir> [--note "<why>"]   # the engineer keeps files changed outside the run
@@ -46,12 +46,12 @@ Other commands (`ledger-next`, `ledger-mark`, `ledger-status`, `parse-tasks`, �
 
 ## Workflow
 
-1. **BOOTSTRAP** — the journal first (Chain journal below), then `ledger-init auto …`: the ledger goes to `<repo parent>/.exec/<repo>-<plan>/`, outside the repository and stable across sessions (a temp directory is refused as `exec-dir-ephemeral`). Tell the engineer the `exec_dir` from the result in one line before the first unit. Show the result's `warnings`. Stop and ask the engineer on these errors: `no-units`, `dirty-worktree`, `plan-drift`, `settings-drift`, `settings-unavailable`, `exec-dir-inside-workdir`. Details: [INPUT-DETECTION.md](references/INPUT-DETECTION.md).
+1. **BOOTSTRAP** — the journal first (Chain journal below), then `ledger-init auto …`: the ledger goes to `<repo parent>/.exec/<repo>-<plan>/`, outside the repository and stable across sessions (a temp directory is refused as `exec-dir-ephemeral`). Tell the engineer the `exec_dir` from the result in one line before the first unit. With `light=<model>` in the arguments or the brief's `light` item, pass `--light <model>` on every launch ([EXECUTION-STRATEGY.md](references/EXECUTION-STRATEGY.md), Delegation). Show the result's `warnings`. Stop and ask the engineer on these errors: `no-units`, `dirty-worktree`, `plan-drift`, `settings-drift`, `settings-unavailable`, `exec-dir-inside-workdir`. Details: [INPUT-DETECTION.md](references/INPUT-DETECTION.md).
 2. **LOOP** — `unit-begin` → act on `reason`:
 
    | `reason` | Action |
    |---|---|
-   | `ready`, `retry-available` | For every `external` entry: `confirmed` → one line, no question; otherwise ask (only this task / the whole run / stop; "the whole run" only for an entry with `access` and a known environment) or STOP on `deny` ([GATE.md](references/GATE.md)). Execute exactly this unit using `text` and `files` from the result (do not re-read the whole plan), then gate it with `strategy` ([EXECUTION-STRATEGY.md](references/EXECUTION-STRATEGY.md)) and call `unit-finish`. |
+   | `ready`, `retry-available` | For every `external` entry: `confirmed` → one line, no question; otherwise ask (only this task / the whole run / stop; "the whole run" only for an entry with `access` and a known environment) or STOP on `deny` ([GATE.md](references/GATE.md)). Execute exactly this unit using `text` and `files` from the result (do not re-read the whole plan), then gate it with `strategy` ([EXECUTION-STRATEGY.md](references/EXECUTION-STRATEGY.md)) and call `unit-finish`. With `strategy.delegable: true` and a `light` model, the unit may go to a subagent on that model (EXECUTION-STRATEGY.md, Delegation); the file check, the gate and `unit-finish … --delegated <model>` stay with you, and a retry always runs in the main agent. |
    | `in-progress` | A previous attempt was not finished: gate the current state and call `unit-finish`. |
    | `foreign-changes` | Files changed outside the run since the last unit (`foreign_changes`: `{path, status}`); nothing is marked running. Ask the engineer: accept / restore these files / stop ([GATE.md](references/GATE.md)). Without a confirmation channel, STOP with a stop-report listing the files. |
    | `exhausted`, `stagnated`, `blocked` | STOP with a stop-report. |
@@ -107,4 +107,4 @@ In this skill: `executor_tool.py detect-lang <plan>`; the stop reports below use
 
 ## Stop Reports
 
-Use [stop-report.en.md](assets/stop-report.en.md) or [stop-report.ru.md](assets/stop-report.ru.md) according to `executor_tool.py detect-lang <plan>` (`ru` when more than 5% of the plan's letters are Cyrillic, otherwise `en`). Put `git diff --stat` and at most ~80 lines of diff into the report, not the full diff. Without a confirmation channel, record the decision the stop needs first (`journal-question`, then `journal-export-findings`, Chain journal) and fill the report's journal section with the question id and text, the journal path and the exported follow-ups path; without a journal, leave that section out.
+Use [stop-report.en.md](assets/stop-report.en.md) or [stop-report.ru.md](assets/stop-report.ru.md) according to `executor_tool.py detect-lang <plan>` (`ru` when more than 5% of the plan's letters are Cyrillic, otherwise `en`). Put `git diff --stat` and at most ~80 lines of diff into the report, not the full diff. Fill `{{delegated}}` with the unit's `delegated` model and whether that attempt failed, or "no" (in the plan's language). Without a confirmation channel, record the decision the stop needs first (`journal-question`, then `journal-export-findings`, Chain journal) and fill the report's journal section with the question id and text, the journal path and the exported follow-ups path; without a journal, leave that section out.

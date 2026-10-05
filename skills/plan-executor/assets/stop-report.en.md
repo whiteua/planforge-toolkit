@@ -9,6 +9,7 @@
 Unit: `{{unit_id}}`
 Reason: `{{stop_reason}}`
 Restore to: `{{restore_to}}`
+Delegated: {{delegated}}
 
 ## Last error
 

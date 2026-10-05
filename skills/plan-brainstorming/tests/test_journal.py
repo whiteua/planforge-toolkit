@@ -1450,5 +1450,22 @@ class RunnerSchemaTest(unittest.TestCase):
         self.assertEqual(tuple(props["sessions"]["items"]["properties"]["end"]["enum"]), j2.RUNNER_SESSION_ENDS + (None,))
 
 
+class RunnerLightTest(unittest.TestCase):
+    """Spec 8 of plan-refactoring-01: runner.models.execution.light is optional and validates."""
+
+    def test_execution_light_validates(self):
+        models = {"execution": {"model": "opus", "effort": "medium", "light": "haiku"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = RunnerValidateTest._journal(self, tmp, _jr_runner(models=models))  # its helper uses no state
+            self.assertEqual(j2.journal_validate(path), {"ok": True, "errors": []})
+
+    def test_schema_documents_light(self):
+        path = os.path.join(os.path.dirname(_J2_TOOL), "..", "assets", "chain-journal.schema.json")
+        with open(path, encoding="utf-8") as fh:
+            entry = json.load(fh)["definitions"]["runner"]["properties"]["models"]["additionalProperties"]
+        self.assertEqual(entry["properties"]["light"]["type"], ["string", "null"])
+        self.assertEqual(entry["required"], ["model", "effort"])
+
+
 if __name__ == "__main__":
     unittest.main()

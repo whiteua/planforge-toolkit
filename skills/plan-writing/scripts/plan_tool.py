@@ -7,14 +7,22 @@
   unique ids, Files / steps / done-state per tier, no commit steps, no
   placeholders), optionally checking Modify paths against the workspace.
   Also returns `journal`: the chain journal path when that file exists, else null.
+- skeleton: prints the plan without code bodies for plan-resolver's full passes: the
+  header whole, per task its heading, Files, Pre/Postconditions, Done when, Constraints,
+  If stuck, External, Size, step headings, Run:/Expected:, one `[code <lang>, <N> lines:
+  <signatures>]` line per code block. Text, not JSON; warnings go to stderr.
+- task: prints one task byte for byte (lines line_start..line_end of parse_plan_tasks).
 
 Stdlib only. Python 3.8+.
 
 Commands:
   plan-path  <spec.md>
   plan-check <plan.md> [--root DIR] [--max-tasks N] [--max-bytes N]
+  skeleton   <plan.md> [--tasks ID,ID] [--code none|signatures]
+  task       <plan.md> <id>
 
-Exit codes: 0 ok, 1 contract violation, 2 usage or I/O error.
+Exit codes: 0 ok, 1 contract violation, 2 usage or I/O error (skeleton/task: the error JSON
+goes to stderr, stdout stays empty).
 """
 from __future__ import annotations
 
@@ -76,6 +84,20 @@ LANG_THRESHOLD = 0.05
 # alongside, else these equal values (a contract test compares them); --max-tasks/--max-bytes win.
 SIZE_BUDGET_DEFAULT = {"tasks": 40, "bytes": 150000}
 SMALL_PLAN_TASKS = 15
+# Plan skeleton (`skeleton`): the lines a task keeps outside code blocks. `block` starts a block kept up
+# to the next blank line (Files, Preconditions, …); `line` keeps one line (step headings, Run:, Expected:).
+SKELETON_KEEP_RE = re.compile(
+    r"^\s*(?:(?P<block>\*\*(?:Files|Preconditions|Postconditions|Done when|Constraints|If stuck|External|Size):\*\*"
+    r"|Done when:)|(?P<line>- \[[ xX]\] \*\*Step\b|(?:\*\*)?(?:Run|Expected)(?:\*\*)?:))"
+)
+# Signature lines of a code block, kept in its `[code <lang>, <N> lines: …]` line.
+SIGNATURE_RE = re.compile(r"^\s*(?:async\s+def|def|class|function|export|func|interface|type|const)\s+\S")
+FENCE_INFO_RE = re.compile(r"^\s*(?:`{3,}|~{3,})\s*(?P<lang>[^\s`]*)")
+SKELETON_PLAIN_LANGS = ("markdown", "text", "json", "yaml", "")
+MAX_SIGNATURES = 5
+SKELETON_HEADING_RE = re.compile(r"^#{1,6}\s")
+TASK_NOT_FOUND = "task-not-found"
+PLAN_UNREADABLE = "plan-unreadable"
 
 
 class InputError(Exception):
@@ -159,6 +181,128 @@ def _read(path: str) -> str:
             return fh.read()
     except OSError as exc:
         raise InputError(f"cannot read {path}: {exc}") from exc
+
+
+def _parse_tasks(text: str) -> List[Dict[str, Any]]:
+    """Tasks by brainstorm_tool.parse_plan_tasks; `skeleton` and `task` have no local fallback (exit 2)."""
+    parse = getattr(_load_brainstorm_tool(), "parse_plan_tasks", None)
+    if parse is None:
+        raise InputError(BRAINSTORM_MISSING)
+    return parse(text)["tasks"]
+
+
+def _code_blocks(lines: List[str]) -> Tuple[Dict[int, Tuple[int, str]], List[str]]:
+    """{opening fence line: (closing fence line, language)}, 1-based, by the fence toggle of parse_plan_tasks.
+    An unclosed block runs to the end of the plan (closing line len(lines) + 1) with the warning `unclosed-fence`."""
+    blocks: Dict[int, Tuple[int, str]] = {}
+    start: Optional[int] = None
+    lang = ""
+    for number, line in enumerate(lines, start=1):
+        if not FENCE_RE.match(line):
+            continue
+        if start is None:
+            start, lang = number, FENCE_INFO_RE.match(line).group("lang")
+        else:
+            blocks[start] = (number, lang)
+            start = None
+    if start is None:
+        return blocks, []
+    blocks[start] = (len(lines) + 1, lang)
+    return blocks, [f"unclosed-fence: the code block at line {start} is not closed; the rest of the plan counts as code"]
+
+
+def _code_line(body: List[str], lang: str, code_mode: str) -> str:
+    """`[code <lang>, <N> lines: <signatures>]`; signatures only with `signatures` and a language of code."""
+    head = f"[code {lang}, {len(body)} lines" if lang else f"[code, {len(body)} lines"
+    if code_mode == "signatures" and lang.lower() not in SKELETON_PLAIN_LANGS:
+        found = [line.strip().rstrip(":{ ") for line in body if SIGNATURE_RE.match(line)]
+        if found:
+            shown = found[:MAX_SIGNATURES] + (["…"] if len(found) > MAX_SIGNATURES else [])
+            return f"{head}: {'; '.join(shown)}]"
+    return head + "]"
+
+
+def _render_task(lines: List[str], task: Dict[str, Any], blocks: Dict[int, Tuple[int, str]], code_mode: str,
+                 emit: Any) -> None:
+    """One task of the skeleton: heading, kept blocks and lines (SKELETON_KEEP_RE), one line per code block."""
+    emit("")
+    emit(lines[task["line_start"] - 1].rstrip())
+    emit("")
+    number, in_block = task["line_start"] + 1, False
+    while number <= task["line_end"]:
+        if number in blocks:
+            end, lang = blocks[number]
+            emit(_code_line(lines[number:end - 1], lang, code_mode))
+            number, in_block = end + 1, False
+            continue
+        line = lines[number - 1].rstrip()
+        keep = SKELETON_KEEP_RE.match(line)
+        if keep:
+            emit(line)
+            in_block = bool(keep.group("block"))
+        elif in_block:
+            emit(line)  # a blank line closes the block
+            in_block = bool(line)
+        number += 1
+
+
+def _render_skeleton(text: str, tasks: Optional[List[str]] = None,
+                     code_mode: str = "signatures") -> Tuple[str, List[str]]:
+    """The plan without code bodies: the header (lines before the first task) whole; per task its heading,
+    the Files/Preconditions/Postconditions/Done when/Constraints/If stuck blocks up to a blank line,
+    External, Size, step headings, Run:/Expected: and one `[code …]` line per code block; headings
+    between tasks stay. `tasks` (ids as written) keeps the header and those tasks in plan order.
+    Returns (text, warnings); an unknown id is exit 2 `task-not-found: <id>`."""
+    all_tasks = _parse_tasks(text)
+    lines = text.splitlines()
+    blocks, warnings = _code_blocks(lines)
+    if not all_tasks:
+        return "\n".join(lines) + "\n", ["no-tasks: the plan has no '### Task N:' headings; printed whole"] + warnings
+    known = {task["id"] for task in all_tasks}
+    unknown = [task_id for task_id in tasks or [] if task_id not in known]
+    if unknown:
+        raise InputError(f"{TASK_NOT_FOUND}: {', '.join(unknown)}")
+    chosen = {task["line_start"]: task for task in all_tasks if tasks is None or task["id"] in tasks}
+    in_task = {n for task in all_tasks for n in range(task["line_start"], task["line_end"] + 1)}
+    out = [line.rstrip() for line in lines[:all_tasks[0]["line_start"] - 1]]
+
+    def emit(line: str) -> None:
+        if line or (out and out[-1]):  # never two blank lines in a row
+            out.append(line)
+
+    number = all_tasks[0]["line_start"]
+    while number <= len(lines):
+        if number in chosen:
+            _render_task(lines, chosen[number], blocks, code_mode, emit)
+            number = chosen[number]["line_end"] + 1
+        elif number in blocks and number not in in_task:
+            number = blocks[number][0] + 1  # a code block between tasks is dropped with the prose
+        else:
+            if tasks is None and number not in in_task and SKELETON_HEADING_RE.match(lines[number - 1]):
+                emit("")
+                emit(lines[number - 1].rstrip())
+                emit("")
+            number += 1
+    while out and not out[-1]:
+        out.pop()
+    return "\n".join(out) + "\n", warnings
+
+
+def _task_text(text: str, task_id: str) -> str:
+    """Lines line_start..line_end of the first task `task_id`, line endings as in the file."""
+    found = next((task for task in _parse_tasks(text) if task["id"] == task_id), None)
+    if found is None:
+        raise InputError(f"{TASK_NOT_FOUND}: {task_id}")
+    return "".join(text.splitlines(keepends=True)[found["line_start"] - 1:found["line_end"]])
+
+
+def _read_plan(path: str) -> str:
+    """The plan as written: `newline=""` keeps CRLF, so `task` prints the task's own bytes."""
+    try:
+        with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InputError(f"{PLAN_UNREADABLE}: {path}: {exc}") from exc
 
 
 def plan_path(spec_path: str) -> Dict[str, str]:
@@ -533,6 +677,18 @@ def cmd_plan_check(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     return (0 if result["ok"] else 1), result
 
 
+def cmd_skeleton(args: argparse.Namespace) -> Tuple[int, str]:
+    tasks = None if args.tasks is None else [item.strip() for item in args.tasks.split(",") if item.strip()]
+    text, warnings = _render_skeleton(_read_plan(args.plan), tasks, args.code)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    return 0, text
+
+
+def cmd_task(args: argparse.Namespace) -> Tuple[int, str]:
+    return 0, _task_text(_read_plan(args.plan), args.id)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command")
@@ -547,6 +703,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--max-tasks", help="plan size budget in tasks (default: brainstorm_tool.SIZE_BUDGET, 40)")
     p_check.add_argument("--max-bytes", help="plan size budget in bytes (default: brainstorm_tool.SIZE_BUDGET, 150000)")
     p_check.set_defaults(func=cmd_plan_check)
+
+    p_skel = sub.add_parser("skeleton", help="print the plan without code bodies (text, not JSON)")
+    p_skel.add_argument("plan")
+    p_skel.add_argument("--tasks", help="comma-separated task ids as written (default: every task)")
+    p_skel.add_argument("--code", choices=("none", "signatures"), default="signatures",
+                        help="code block lines: language and line count, plus signatures (default)")
+    p_skel.set_defaults(func=cmd_skeleton, text_output=True)
+
+    p_task = sub.add_parser("task", help="print one task byte for byte (text, not JSON)")
+    p_task.add_argument("plan")
+    p_task.add_argument("id")
+    p_task.set_defaults(func=cmd_task, text_output=True)
     return parser
 
 
@@ -563,6 +731,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         code, result = args.func(args)
     except InputError as exc:
         code, result = 2, {"ok": False, "errors": [str(exc)]}
+        if getattr(args, "text_output", False):  # stdout carries the plan text only
+            print(json.dumps(result), file=sys.stderr)
+            return code
+    if isinstance(result, str):  # skeleton, task: UTF-8 bytes as they are, no newline translation
+        stream = getattr(sys.stdout, "buffer", None)
+        if stream is None:
+            sys.stdout.write(result)
+        else:
+            sys.stdout.flush()
+            stream.write(result.encode("utf-8"))
+            stream.flush()
+        return code
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return code
 

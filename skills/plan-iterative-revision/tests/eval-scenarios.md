@@ -94,6 +94,17 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** The open contract left out (`record` warns `contracts-dropped`); an applied one
   carried; an open contract re-stated as a new issue with other wording.
 
+## Scenario 9: Evidence quotes are short
+
+- **Setup:** Full audit of a plan whose Task 4 calls `load_config(path)` while the code defines
+  `load_config(path, env)`; the step around the call is 60 lines of code.
+- **Trigger:** Subagent prepares the issues JSON.
+- **Expected (PASS):** `evidence` quotes the one plan line with the call and the one code line with
+  the definition (well under 600 characters); `record` returns no `evidence-too-long` warning.
+- **Red flags (FAIL):** `evidence` copies the whole step or the whole function; `record` warns
+  `evidence-too-long`; the agent cuts the text by hand after the warning instead of quoting less in
+  the next audit.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

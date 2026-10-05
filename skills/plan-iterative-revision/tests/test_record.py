@@ -518,5 +518,28 @@ class DecideGatesIncremental(unittest.TestCase):
                 self.assertEqual((d["result"], d["stop_reason"]), expected, (scope, expected))
 
 
+class RecordEvidenceLength(RecordBase):
+    """`evidence` over 600 characters: a warning from `record`; the review keeps the text whole."""
+
+    def test_long_evidence_warns_and_stays_whole(self):
+        long = "x" * 601
+        out = self.ok([issue("Fix A", evidence=long)])
+        self.assertEqual(
+            out["warnings"],
+            ["issue #1: evidence-too-long: 601 characters (limit 600); quote only the lines that prove the problem"],
+        )
+        self.assertIn(long, Path(out["review_path"]).read_text(encoding="utf-8"))
+
+    def test_evidence_at_the_limit_does_not_warn(self):
+        out = self.ok([issue("Fix A", evidence="x" * 600)])
+        self.assertEqual(out["warnings"], [])
+
+    def test_limit_is_checked_after_merging_duplicates(self):
+        out = self.ok([issue("Fix A", evidence="a" * 400), issue("Fix A", evidence="b" * 400)])
+        self.assertEqual(len(out["issues"]), 1)
+        self.assertEqual(len(out["warnings"]), 1)
+        self.assertIn("evidence-too-long: 801 characters", out["warnings"][0])
+
+
 if __name__ == "__main__":
     unittest.main()

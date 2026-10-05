@@ -190,6 +190,10 @@ directory (never inside the repository) or on stdin.
   `code-plan-mismatch`. (`unfulfilled-contract` exists only in old reviews; use `carry` instead.)
 - `code_cross_check` must start with one of the four statuses.
 - `location_in_code` and `evidence` are optional; every other field is required.
+- `evidence` quotes only the lines that prove the problem (the plan line and the code line that
+  disagree), not the whole step, task or function. `record` warns `evidence-too-long` above 600
+  characters (counted after duplicates are merged) and keeps the text whole: quote less in the
+  next audit; the review file is not rewritten for it.
 - `location_in_plan` names the task as `Task N` (`Task 3, Step 2`) whenever the issue sits in a task:
   the next audit maps each contract to its task by this field, and a contract whose location names no
   task (`## 3. Data model`, the plan header) makes the next audit full.

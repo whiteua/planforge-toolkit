@@ -1748,5 +1748,51 @@ class IncrementalPassE2ETests(IncrementalFixture, unittest.TestCase):
                 self.assertEqual(chain._audit_scope(report1.read_text(encoding="utf-8"), frontmatter=True), ("full", None))
 
 
+class CompactClosedLineTests(unittest.TestCase):
+    """REPORT-FORMAT.md: a closed leaf is one line with one anchor; validate-report warns, never fails."""
+
+    def validate(self, stages: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "main-plan-report-2.md"
+            write(report, valid_report().replace("- ✅ 1. Подготовка evidence_anchor: src/app.py#L1-L3", stages))
+            process = run_tool("validate-report", str(report))
+            data = read_json(process)
+        self.assertEqual(process.returncode, 0, data)
+        self.assertTrue(data["valid"], data)
+        return data
+
+    @staticmethod
+    def compact_warnings(data: dict) -> list:
+        return [w for w in data["warnings"] if "verbose-closed-task" in w or "too-many-anchors" in w]
+
+    def test_two_detail_lines_on_a_closed_task_warn(self) -> None:
+        data = self.validate(
+            "- ✅ 1. Phase\n  - ✅ 1.1 Done\n    - evidence_anchor: src/app.py#L1-L3\n    - Реализовано в main."
+        )
+        self.assertEqual(self.compact_warnings(data), ["[WARNING] verbose-closed-task: 1.1 has 2 detail lines"])
+
+    def test_three_anchors_warn(self) -> None:
+        data = self.validate(
+            "- ✅ 1. Phase\n  - ✅ 1.1 Done evidence_anchor: src/a.py#L1-L3, src/b.py#L2-L4, tests/test_a.py#L5-L9"
+        )
+        self.assertEqual(self.compact_warnings(data), ["[WARNING] too-many-anchors: 1.1 has 3 anchors"])
+
+    def test_compact_line_and_open_details_do_not_warn(self) -> None:
+        data = self.validate(
+            "- ⚠️ 1. Phase\n"
+            "  - ✅ 1.1 Done evidence_anchor: src/a.py#L1-L3 tests/test_a.py#L5-L9\n"
+            "  - ✅ 1.2 Done\n    - evidence_anchor: src/c.py#L4-L8\n"
+            "  - ⚠️ 1.3 Partial\n    - evidence_anchor: src/b.py#L1-L2\n"
+            "    - Нет ветки для пустого ввода.\n    - Тест не покрывает ошибку."
+        )
+        self.assertEqual(self.compact_warnings(data), [])
+
+    def test_parse_report_counts_detail_lines(self) -> None:
+        phases, tasks, _ = load_resolver().parse_stage_items(
+            "## Основные стадии плана\n\n- ✅ 1. Phase\n  - ✅ 1.1 Done\n    - evidence_anchor: a.py#L1-L2\n    - note\n"
+        )
+        self.assertEqual(([p["details"] for p in phases], [t["details"] for t in tasks]), ([0], [2]))
+
+
 if __name__ == "__main__":
     unittest.main()

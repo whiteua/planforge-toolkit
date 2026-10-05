@@ -6,10 +6,22 @@ from `bootstrap.pass_type`: `first`, `subsequent` (incremental or full, by `resc
 
 ## First pass (`first`)
 
-1. Read `MASTER_PLAN` in full. Code blocks and quotes are context, not actionable tasks.
+1. Read the plan's skeleton, not the plan: `PT skeleton MASTER_PLAN` ([WORKFLOW.md](WORKFLOW.md),
+   Notation). Redirect its stdout to a UTF-8 file in the OS temp dir (outside the workspace, never
+   in the plan's folder) and Read that file in chunks (offset and limit) to its end: shell output
+   is cut at about 30000 characters and the skeleton of a large plan is longer, so a skeleton
+   taken straight from stdout may miss tasks. It keeps the header, every task heading, `Files`,
+   `Preconditions`/`Postconditions`/`Done when`, `External`, `Size`, the step headings and
+   `Run:`/`Expected:` lines, and puts one `[code <lang>, <N> lines: <signatures>]` line in place of
+   each code block: the plan's code is context, not an actionable task, and the code that counts
+   is read in the repository. Open a task in full with `PT task MASTER_PLAN <id>` (one task is
+   short: print it directly) when its verdict comes out `partial`, `ambiguous` or `deviates`, and
+   for a task without a `Files` block. Without `plan-writing` next to this skill (no `PT`, or `PT`
+   exits `2` with `plan-brainstorming not installed alongside`), read `MASTER_PLAN` in full and
+   say so in one line of the human gate.
 2. Enumerate phases and tasks: `##`/`###` headings such as `Phase 1`, `Stage 1`, `Task 1.2`,
    `1.` become units; nested lists and sub-headings become tasks `<phase>.<sub>`; a plain-text plan
-   becomes phase `1` with line tasks. Keep line numbers so evidence stays checkable. `task-census`
+   becomes phase `1` with line tasks. On a skeleton there are no plan line numbers: identify a unit by its id and heading, and take its exact lines with `PT task MASTER_PLAN <id>`; when the plan is read in full, keep line numbers so evidence stays checkable. `task-census`
    applies the same rule: in plans with `Task` headings or a roadmap table, numbered prose lines are
    steps, not units.
 3. Trace every actionable task to the code (below) and give it a verdict.
@@ -88,7 +100,8 @@ A. Re-audit the known issues of `LAST_REPORT` (`parse-report`):
 - anchors from past reports are advisory: verify the lines before reusing them; a shifted or
   mismatching anchor is invalid and the verdict is derived again.
 
-B. Re-scan the whole plan against the current code (first-pass steps 1-4) and merge: vanished old
+B. Re-scan the whole plan against the current code (first-pass steps 1-4: the skeleton, `PT task`
+for a disputed task) and merge: vanished old
 issues stay in the report as `✅ fixed`; persisting ones stay carry-over; new ones follow in
 discovery order; regressions are reopened. Renumber issues from 1 in that order and keep carry-over
 titles verbatim (`cycle-check` matches issues by title). Recompute phase and task statuses.
@@ -97,6 +110,10 @@ If the plan's SHA differs from `master_plan_sha256` in `LAST_REPORT`, continue a
 `## Additional Context` that the plan changed between passes, so statuses were recomputed.
 
 ## Code tracing
+
+On a first or full pass the items are the skeleton's lines: `Files`, the conditions, the step
+headings, `Run:`/`Expected:` and the signatures of `[code …]` lines say what to look for; a
+signature is a search hint, the evidence is the code in the repository.
 
 From each item extract paths and directory names, `CamelCase`/`snake_case`/`kebab-case`
 identifiers and constants, routes (`/api/...`), table/column/migration names, config and env names.

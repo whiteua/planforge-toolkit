@@ -45,7 +45,9 @@ class TemplateContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for language in ("ru", "en"):
                 template_path = ASSETS / f"report-template.{language}.md"
-                rendered = render(template_path.read_text(encoding="utf-8"), language)
+                template = template_path.read_text(encoding="utf-8")
+                self.assertIn("evidence_anchor: path#Lx-Ly", template)  # the compact line example
+                rendered = render(template, language)
                 report_path = Path(tmp) / f"main-plan-report-1-final-{language}.md"
                 # The validator recognizes final reports by the exact suffix, so use a per-language folder.
                 language_dir = Path(tmp) / language

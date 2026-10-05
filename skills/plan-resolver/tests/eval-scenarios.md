@@ -43,8 +43,8 @@ must be strengthened, not the test loosened.
   writes report 2; the agent reads tasks 7, 12 and 12.1 by their `line_ranges` (Read with offset
   and limit) and the code of `src/a.py`, replaces the three stubs and re-verifies issue 1;
   `evidence-fingerprint`, `task-census` and `validate-report --root --plan` pass.
-- **Red flags (FAIL):** Reads the whole plan; edits or retypes carried lines; writes report 2 by
-  hand instead of `carry-forward`; leaves a `<!-- reaudit -->` marker.
+- **Red flags (FAIL):** Reads the whole plan or calls `PT skeleton`; edits or retypes carried
+  lines; writes report 2 by hand instead of `carry-forward`; leaves a `<!-- reaudit -->` marker.
 
 ## Scenario 4: No `-final` after an incremental pass
 
@@ -62,7 +62,7 @@ must be strengthened, not the test loosened.
   subagents.
 - **Trigger:** Subagent continues the loop.
 - **Expected (PASS):** A fresh subagent runs `/plan-resolver <plan> <reports…> full`: `bootstrap …
-  --full` (`pass_type: subsequent-full`), the whole plan, `-final` allowed; `cycle-check` after it
+  --full` (`pass_type: subsequent-full`), the whole plan through `PT skeleton`, `-final` allowed; `cycle-check` after it
   gives `complete`, `continue` or `stop-limit`.
 - **Red flags (FAIL):** Runs the closing full pass inline although subagents are available; runs
   another incremental pass; stops with `stop-stalled` after the full pass.
@@ -76,6 +76,40 @@ must be strengthened, not the test loosened.
   nor `carry-forward`; a full pass by AUDIT.md with `audit_scope: full`.
 - **Red flags (FAIL):** Passes `full` to `bootstrap` as a report (`bootstrap-bad-report-name`);
   runs `rescan-scope` and audits incrementally.
+
+## Scenario 7: The first pass reads the skeleton
+
+- **Setup:** English plan of 30 tasks, more than half of its bytes in code blocks; `plan-writing`
+  is installed next to `plan-resolver`; no earlier report. `/plan-resolver <plan>`.
+- **Trigger:** Subagent runs the first audit pass.
+- **Expected (PASS):** `PT skeleton <plan>` instead of a Read of the whole plan, its stdout sent to
+  a file in the OS temp dir and that file read in chunks to its end (the skeleton is longer than a
+  shell tool shows); the code is read in the repository; `PT task <plan> <id>` only for tasks whose
+  verdict is `partial`, `ambiguous` or `deviates` or that have no `Files`; every closed task is one line
+  `- ✅ <id> <title> evidence_anchor: path#Lx-Ly` (a second anchor only on the task's test file);
+  `validate-report` gives no `verbose-closed-task` or `too-many-anchors` warning.
+- **Red flags (FAIL):** Reads the whole plan; calls `PT task` for every task; writes detail lines
+  under `✅` tasks; treats code quoted in the plan as evidence instead of the repository; judges
+  tasks from a skeleton cut by the shell output limit (no file, no chunked Read to the end).
+
+## Scenario 8: The closing full pass reads the skeleton, the incremental one does not
+
+- **Setup:** As in scenario 4, then `/plan-resolver <plan> <report-1> <report-2> full`.
+- **Trigger:** Subagent runs the incremental pass of scenario 4, then the closing full pass.
+- **Expected (PASS):** The incremental pass reads its tasks by `line_ranges` and never calls
+  `PT skeleton`; the closing full pass (`bootstrap … --full`) calls `PT skeleton <plan>` and opens
+  single tasks with `PT task` only for disputed verdicts.
+- **Red flags (FAIL):** The incremental pass calls `PT skeleton`; the full pass reads the whole plan
+  while `plan-writing` is installed.
+
+## Scenario 9: Without `plan-writing` alongside
+
+- **Setup:** Only `plan-brainstorming` and `plan-resolver` are installed; `/plan-resolver <plan>`.
+- **Trigger:** Subagent starts the first audit pass.
+- **Expected (PASS):** `PT` is missing (or exits `2`); the subagent reads the plan in full and the
+  human gate says so in one line; the report is written as usual.
+- **Red flags (FAIL):** Stops the audit; writes its own skeleton by hand; hides that the plan was
+  read in full.
 
 ## How To Run
 

@@ -49,6 +49,9 @@ EVIDENCE_ANCHOR_RE = re.compile(r"evidence_anchor\s*[:=]\s*(?P<anchor>\S+)", re.
 EVIDENCE_PROBE_RE = re.compile(r"evidence_probe\s*[:=]\s*\S", re.IGNORECASE)
 # A task closed on the executor's word (e.g. it needs an external system the audit may not touch).
 EXECUTOR_REPORTED_RE = re.compile(r"verification\s*[:=]\s*executor-reported", re.IGNORECASE)
+# Compact closed lines (REPORT-FORMAT.md): a `✅` leaf with more detail lines or anchors gets a warning.
+MAX_CLOSED_DETAILS = 1
+MAX_CLOSED_ANCHORS = 2
 PLAN_CODE_FILE_RE = re.compile(r"^\s*[-*]\s*(?:Create|Modify|Delete|Move|Создать|Изменить)\s*:", re.IGNORECASE)
 # Files actions of a code task in the shared parser's `files` (the actions PLAN_CODE_FILE_RE matches).
 PLAN_CODE_ACTIONS = {"create", "modify", "delete", "move", "создать", "изменить"}
@@ -883,6 +886,7 @@ def parse_stage_items(text: str) -> Tuple[List[Dict[str, object]], List[Dict[str
             owner = tasks[-1] if tasks and tasks[-1]["line_end"] > phases[-1]["line_end"] else phases[-1]
             owner["raw_text"] = f"{owner['raw_text']} {stripped.lstrip('-*+ ').strip()}"
             owner["line_end"] = line_number
+            owner["details"] = int(owner["details"]) + 1
             continue
         is_explicit_task = "." in item_id if item_id else indent > 0
 
@@ -911,6 +915,7 @@ def parse_stage_items(text: str) -> Tuple[List[Dict[str, object]], List[Dict[str
                     "raw_text": stripped,
                     "line_start": line_number,
                     "line_end": line_number,
+                    "details": 0,
                 }
             )
         else:
@@ -924,6 +929,7 @@ def parse_stage_items(text: str) -> Tuple[List[Dict[str, object]], List[Dict[str
                     "actionable": status != "not-applicable",
                     "line_start": line_number,
                     "line_end": line_number,
+                    "details": 0,
                 }
             )
         stages.append({"status": status, "line": stripped})
@@ -1286,6 +1292,18 @@ def validate_report(
             errors.append(message)
         else:
             warnings.append(f"[WARNING] {message}")
+
+    # A closed leaf is one line with one anchor (a second only on the task's test file, which the
+    # validator does not tell apart): warnings, not errors, so older verbose reports stay valid.
+    for task in gate_tasks:
+        if task["status"] != "✅":
+            continue
+        details = int(task["details"])
+        if details > MAX_CLOSED_DETAILS:
+            warnings.append(f"[WARNING] verbose-closed-task: {task['id']} has {details} detail lines")
+        anchors = len(ANCHOR_RE.findall(str(task["raw_text"])))
+        if anchors > MAX_CLOSED_ANCHORS:
+            warnings.append(f"[WARNING] too-many-anchors: {task['id']} has {anchors} anchors")
 
     executor_reported = [
         str(task["id"]) for task in gate_tasks if EXECUTOR_REPORTED_RE.search(str(task["raw_text"]))

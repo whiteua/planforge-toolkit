@@ -402,7 +402,7 @@ Before a resolver report is accepted, a tool parses the plan and extracts every 
 
 ### Evidence anchors (`path#Lx-Ly`)
 
-Every `✅` verdict in a resolver report must be backed by a concrete code reference in `path#Lx-Ly` format, and `validate-report --root` checks that the file exists and the line range is inside it, for closed tasks and for issue evidence alike: a report that cites code that is not there is invalid. On subsequent passes, the agent re-reads the referenced lines before reusing an anchor; if the lines have shifted or the content changed, the anchor is treated as stale and the verdict is re-derived from fresh evidence. An incremental pass carries an anchor over without re-reading it only while the file's hash in the evidence fingerprint is unchanged; an anchor on a changed file sends its task to the re-audit.
+Every `✅` verdict in a resolver report must be backed by a concrete code reference in `path#Lx-Ly` format, and `validate-report --root` checks that the file exists and the line range is inside it, for closed tasks and for issue evidence alike: a report that cites code that is not there is invalid. On subsequent passes, the agent re-reads the referenced lines before reusing an anchor; if the lines have shifted or the content changed, the anchor is treated as stale and the verdict is re-derived from fresh evidence. An incremental pass carries an anchor over without re-reading it only while the file's hash in the evidence fingerprint is unchanged; an anchor on a changed file sends its task to the re-audit. A closed task is one compact line with one anchor (a second only on the task's test file); detail lines belong to open tasks, and `validate-report` warns `verbose-closed-task` and `too-many-anchors` instead of failing older reports.
 
 **Used in:** `plan-resolver`
 
@@ -565,6 +565,14 @@ Every review ends with a `## Task digest` table: the id and an 8-hex SHA-1 of ea
 `brainstorm_tool.py plan-tasks` (`parse_plan_tasks`) is the one parser of plan tasks: for each `### Task N: <title>` outside code fences it returns the id, title, 1-based line range (a task ends at the next task heading or a heading of its level or higher), the `**Files:**` entries, the task ids named in `**Preconditions:**`, the body's size, code line count and SHA-1, plus malformed and duplicate headings. `plan-check`, the executor's units, the resolver's `task-census`, the splitter's task count and the runner's `run-stats` read this result, so every stage sees the same tasks and boundaries; plans outside the contract and installations without `plan-brainstorming` keep each script's own parser. A contract test in `plan-writing/tests` runs all consumers on a reference plan and a fixture of tricky cases.
 
 **Used in:** `plan-brainstorming`, `plan-writing`, `plan-executor`, `plan-resolver`, `plan-splitter`, `plan-chain-runner`
+
+---
+
+### Plan skeleton
+
+`plan_tool.py skeleton <plan>` prints the plan without code bodies: the header whole, and per task its heading, `**Files:**`, the conditions, `**External:**`, `**Size:**`, the step headings and `Run:`/`Expected:` lines, with one `[code <lang>, <N> lines: <signatures>]` line in place of each code block; `plan_tool.py task <plan> <id>` prints one task byte for byte. plan-resolver's first and closing full passes read the skeleton, because they check the code in the repository, not the code quoted in the plan, and open a task in full only for a disputed verdict. The skeleton is generated on demand and never stored, so it cannot go stale; plan-iterative-revision keeps reading the plan (it checks the plan's code), and the incremental passes read their tasks by line range.
+
+**Used in:** `plan-writing`, `plan-resolver`
 
 ---
 

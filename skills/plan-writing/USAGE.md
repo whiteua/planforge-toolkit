@@ -77,6 +77,17 @@ Language: the plan body follows the spec's language; the parsed markers (`### Ta
 - [ ] Spec has been reviewed and approved by the user
 - [ ] Workspace is accessible for file structure analysis
 
+## Helper Commands
+
+`scripts/plan_tool.py` also serves plan-resolver, which calls these on its first and closing full passes:
+
+| Command | Output |
+|---|---|
+| `python scripts/plan_tool.py skeleton <plan> [--tasks 1,7.1] [--code none\|signatures]` | The plan without code bodies: the header whole; per task its heading, `**Files:**`, `**Preconditions:**`/`**Postconditions:**`/`**Done when:**`/`**Constraints:**`/`**If stuck:**`, `**External:**`, `**Size:**`, step headings and `Run:`/`Expected:` lines; headings between tasks stay. Each code block becomes `[code <lang>, <N> lines: <signatures>]` (lines starting with `def`, `async def`, `class`, `function`, `export`, `func`, `interface`, `type`, `const`; at most five, then `…`); `--code none` and `markdown`/`text`/`json`/`yaml`/unlabelled blocks give only the language and the line count. `--tasks` keeps the header and the named tasks in plan order. |
+| `python scripts/plan_tool.py task <plan> <id>` | One task byte for byte (its lines `line_start..line_end` from `plan-tasks`). |
+
+Unlike every other command these two print text, not JSON: stdout is plan text, warnings (`no-tasks`, `unclosed-fence`) go to stderr, and an error is one JSON line on stderr with exit `2` (`plan-unreadable`, `task-not-found: <id>`, `plan-brainstorming not installed alongside`, an unknown `--code`). Nothing is stored: the skeleton is generated on demand, so it never goes stale.
+
 ## Common Errors
 
 | Symptom | Cause | Fix |

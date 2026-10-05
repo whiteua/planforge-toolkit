@@ -71,9 +71,14 @@ Rules:
   `- ✅ 1. Title evidence_anchor: …` and `- ✅ 1.1 Title evidence_anchor: …`; a plan with phases
   and nested items gives phase lines (`1`) with tasks `<phase>.<n>` under them. `plan-splitter` part ids
   (`a`, `b`) are written as `- ✅ a: Title`.
-- Every closed leaf (`✅` task, or `✅` phase without tasks of its own) needs an
-  `evidence_anchor: path#Lx-Ly` (inline or on an indented detail line; several anchors are
-  fine). Missing anchor: warning in an open report, error in `-final`. With `--root`, every anchor
+- Every closed leaf (`✅` task, or `✅` phase without tasks of its own) is one compact line with one
+  `evidence_anchor: path#Lx-Ly`: `- ✅ 1.2 Title evidence_anchor: src/x.py#L10-L42`. A second anchor
+  is allowed only on the test file of the same task; no detail lines (the anchor may stand on one
+  indented detail line instead). Detail lines belong to `⚠️`, `⭕️`, `‼️` and `⚠️ ambiguous`.
+  `validate-report` warns `[WARNING] verbose-closed-task: <id> has N detail lines` (more than one)
+  and `[WARNING] too-many-anchors: <id> has N anchors` (more than two): warnings, not errors, so
+  older reports stay valid; the test-file rule is the agent's, the validator cannot tell a test
+  file. Missing anchor: warning in an open report, error in `-final`. With `--root`, every anchor
   on `✅`/`⚠️` items and in issue `evidence` must point at an existing file and line range;
   otherwise the report is invalid. `evidence: not found` has no anchor and is not checked.
 - A task that leaves no code (a checkpoint, a manual verification) is closed with

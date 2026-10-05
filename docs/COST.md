@@ -106,8 +106,13 @@ and the closing full audit against two full audits); the saving starts with the 
 `fix-03` audits 2 and 3 would read about 25–40 thousand input tokens each instead of about 160 thousand,
 with a third of the cross-checks, and the reviews' output shrinks from the first incremental pass on.
 `run-stats` counts an incremental review as the plan's header plus the tasks of `**Audit tasks**`; the
-resolver's issue counts on the next goals (`quality`) show whether the quality held. Spec 7 (skeleton)
-records the skeleton's share of the plan here (expected ≤ 45 % on `fix-03`).
+resolver's issue counts on the next goals (`quality`) show whether the quality held. Spec 7 (skeleton):
+`plan_tool.py skeleton docs/.plans/fix-02/fix-03-impl.md` is 43.1 % of the plan in characters (209519
+of 486598; the research report counts characters) and 47.6 % in UTF-8 bytes (262390 of 550955: the
+prose it keeps is Cyrillic, two bytes a letter, while the code it drops is mostly ASCII); with
+`--code none` 40.7 % and 45.6 %. `run-stats` models a full resolver pass as `plan × (1 − code_share)`,
+46.5 % of the bytes on `fix-03`, close to the measured 47.6 %. `validate-report` keeps the old
+`fix-03-impl-report-1.md` valid and warns 55 × `verbose-closed-task` and 53 × `too-many-anchors`.
 
 Spec 6 (incremental resolver) is judged the same way: on goals with two or more resolver passes and on
 output tokens. With one FIX cycle the incremental audit after the fix comes on top of the closing full

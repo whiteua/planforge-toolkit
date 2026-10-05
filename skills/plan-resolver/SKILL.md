@@ -63,7 +63,7 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
 | When | Read |
 |---|---|
 | Always | [references/WORKFLOW.md](references/WORKFLOW.md), [references/REPORT-FORMAT.md](references/REPORT-FORMAT.md) |
-| Before the audit pass | [references/AUDIT.md](references/AUDIT.md) |
+| Before the audit pass | [references/AUDIT.md](references/AUDIT.md); the plan itself as `PT skeleton` on a first or full pass, not in full ([references/WORKFLOW.md](references/WORKFLOW.md), Notation) |
 | Modes `fix`/`next`/`auto` | [references/FIX-LOOP.md](references/FIX-LOOP.md) |
 
 ## AUDIT phase (summary; WORKFLOW.md is authoritative)
@@ -75,12 +75,13 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
    Then the journal start (WORKFLOW.md, Chain journal): stage `audit` → `running`.
 3. Start fingerprint: `TOOL fingerprint-workspace <workspace-root> <start-json>` (temp file outside
    the workspace).
-4. One audit pass (AUDIT.md) by `bootstrap.pass_type`: `first` over the whole plan;
+4. One audit pass (AUDIT.md) by `bootstrap.pass_type`: `first` over the whole plan, read as
+   `PT skeleton <plan>` (`PT task <plan> <id>` for a disputed task);
    `subsequent` → `TOOL rescan-scope <plan> <last-report> --snapshot <start-json>` decides:
    `incremental` → `TOOL carry-forward` writes the new report's draft (closed lines copied by the
    script) and the pass re-audits only its `<!-- reaudit -->` tasks, read by their plan line
-   ranges, and its `<!-- re-verify -->` issues; `full` → the whole plan against the last report,
-   as `subsequent-full` always does. Every closed item and every issue carries an evidence anchor
+   ranges, and its `<!-- re-verify -->` issues; `full` → the whole plan (its skeleton too) against
+   the last report, as `subsequent-full` always does. Every closed item and every issue carries an evidence anchor
    `path#Lx-Ly` that points at real code; probes are read-only.
 5. Report name: `-final` only after a full pass (`audit_scope: full`) with no open issue and every
    task `✅` or `not-applicable`. An incremental pass that closes everything keeps the open name

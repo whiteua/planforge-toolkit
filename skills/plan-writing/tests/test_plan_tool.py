@@ -838,5 +838,203 @@ class SplitWriteContractTest(unittest.TestCase):
             self.assertEqual((code, out["task_lines"]), (0, {"original": 2, "missing": []}))
 
 
+class SkeletonHelperTest(unittest.TestCase):
+    def test_code_blocks_and_unclosed_fence(self):
+        lines = ["a", "```python", "x = 1", "```", "~~~", "y"]
+        blocks, warnings = pt._code_blocks(lines)
+        self.assertEqual(blocks, {2: (4, "python"), 5: (7, "")})
+        self.assertEqual(len(warnings), 1)
+        self.assertTrue(warnings[0].startswith("unclosed-fence: the code block at line 5"))
+
+    def test_code_line(self):
+        body = ["class Bar:", "    def foo(self, a) -> int:", "        return a", "x = 1"]
+        self.assertEqual(pt._code_line(body, "python", "signatures"),
+                         "[code python, 4 lines: class Bar; def foo(self, a) -> int]")
+        self.assertEqual(pt._code_line(body, "python", "none"), "[code python, 4 lines]")
+        self.assertEqual(pt._code_line(body, "markdown", "signatures"), "[code markdown, 4 lines]")
+        self.assertEqual(pt._code_line(body, "", "signatures"), "[code, 4 lines]")
+        many = [f"def f{i}():" for i in range(7)]
+        self.assertEqual(pt._code_line(many, "python", "signatures"),
+                         "[code python, 7 lines: def f0(); def f1(); def f2(); def f3(); def f4(); …]")
+
+    def test_parse_tasks_needs_the_shared_parser(self):
+        self.assertEqual([t["id"] for t in pt._parse_tasks(VALID)], ["1", "1.1", "2"])
+        for module in (None, object()):
+            with mock.patch.object(pt, "_load_brainstorm_tool", return_value=module):
+                with self.assertRaises(pt.InputError) as ctx:
+                    pt._parse_tasks(VALID)
+            self.assertEqual(str(ctx.exception), "plan-brainstorming not installed alongside")
+
+
+class SkeletonTest(unittest.TestCase):
+    def test_reference_plan(self):
+        text, warnings = pt._render_skeleton(VALID)
+        self.assertEqual(warnings, [])
+        header = VALID[:VALID.index("### Task 1:")]
+        self.assertTrue(text.startswith(header))
+        for kept in ("### Task 1: Parse the verbose flag", "- Modify: `cli.py:4-6`", "**Preconditions:**",
+                     "- Output without `--verbose` is unchanged.", "- [ ] **Step 2: Run the test to verify it fails**",
+                     "Run: `python -m pytest tests/test_cli.py -q`", "Expected: PASS",
+                     "[code python, 5 lines: def test_verbose_prints_path(tmp_path)]", "[code python, 1 lines]",
+                     "[code markdown, 2 lines]", "**Done when:** both lines appear as expected."):
+            self.assertIn(kept, text)
+        self.assertNotIn("target.write_text", text)
+        self.assertNotIn("## Task 9", text)
+        self.assertNotIn("\n\n\n", text)
+
+    def test_tasks_filter(self):
+        text, _ = pt._render_skeleton(VALID, ["1.1"])
+        self.assertIn("### Task 1.1: Document the flag", text)
+        self.assertNotIn("### Task 1: Parse", text)
+        self.assertNotIn("### Task 2:", text)
+        self.assertTrue(text.startswith("# Verbose Flag Implementation Plan"))
+        with self.assertRaises(pt.InputError) as ctx:
+            pt._render_skeleton(VALID, ["1.1", "7"])
+        self.assertEqual(str(ctx.exception), "task-not-found: 7")
+
+
+class TaskTextTest(unittest.TestCase):
+    def test_task_bytes(self):
+        lines = VALID.splitlines(keepends=True)
+        self.assertEqual(pt._task_text(VALID, "1.1"), "".join(lines[55:73]))
+        crlf = VALID.replace("\n", "\r\n")
+        self.assertEqual(pt._task_text(crlf, "1.1"), "".join(lines[55:73]).replace("\n", "\r\n"))
+        with self.assertRaises(pt.InputError) as ctx:
+            pt._task_text(VALID, "9")
+        self.assertEqual(str(ctx.exception), "task-not-found: 9")
+        with mock.patch.object(pt, "_load_brainstorm_tool", return_value=None):
+            with self.assertRaises(pt.InputError) as ctx:
+                pt._task_text(VALID, "1")
+        self.assertEqual(str(ctx.exception), "plan-brainstorming not installed alongside")
+
+    def test_no_tasks_and_unclosed_fence(self):
+        text, warnings = pt._render_skeleton("# Notes\n\nplain text\n")
+        self.assertEqual(text, "# Notes\n\nplain text\n")
+        self.assertTrue(warnings[0].startswith("no-tasks"))
+        tail = VALID + "\n```python\ndef dangling():\n"
+        text, warnings = pt._render_skeleton(tail)
+        self.assertTrue(text.endswith("[code python, 1 lines: def dangling()]\n"), text[-80:])
+        self.assertTrue(any(w.startswith("unclosed-fence") for w in warnings))
+
+
+SYNTHETIC = """# Demo Implementation Plan
+
+**Spec:** demo-spec.md
+
+**Tier:** Standard
+
+---
+
+### Task 1: Tool
+
+**Files:**
+- Create: `src/tool.ts`
+
+**Preconditions:**
+- none
+
+**Postconditions:**
+- `run()` returns 0.
+
+**If stuck:**
+- read the tool docs.
+
+- [ ] **Step 1: Implement**
+
+This prose explains the step and is dropped.
+
+@@@ts
+export function run(): number {
+  return helper();
+}
+function helper(): number {
+  return 0;
+}
+@@@
+
+@@@json
+{"def": "not a signature"}
+@@@
+
+@@@
+def plain(): pass
+@@@
+
+Run: `npm test`
+Expected: PASS
+""".replace("@@@", "`" * 3)
+
+
+class SkeletonRulesTest(unittest.TestCase):
+    def test_synthetic_plan(self):
+        text, warnings = pt._render_skeleton(SYNTHETIC)
+        self.assertEqual(warnings, [])
+        self.assertIn("[code ts, 6 lines: export function run(): number; function helper(): number]", text)
+        self.assertIn("[code json, 1 lines]", text)
+        self.assertIn("[code, 1 lines]", text)
+        self.assertIn("**If stuck:**\n- read the tool docs.", text)
+        self.assertNotIn("This prose explains", text)
+        self.assertIn("Run: `npm test`\nExpected: PASS", text)
+        bare, _ = pt._render_skeleton(SYNTHETIC, code_mode="none")
+        self.assertIn("[code ts, 6 lines]", bare)
+
+    def test_headings_between_tasks_stay(self):
+        with open(os.path.join(HERE, "fixtures", "tricky-impl.md"), encoding="utf-8") as fh:
+            text, _ = pt._render_skeleton(fh.read())
+        for heading in ("## Phase 1: Основа", "### Notes", "## Phase 2: Проверка", "#### Task 3: Вложенная задача",
+                        "## Итог"):
+            self.assertIn(heading, text)
+        self.assertNotIn("Подзаголовок уровня задачи", text)
+
+    def test_skeleton_of_a_large_plan_is_small(self):
+        task = SYNTHETIC[SYNTHETIC.index("### Task 1:"):]
+        code = "\n".join(f"    value_{i} = compute({i})" for i in range(30))
+        task = task.replace("  return 0;\n", "  return 0;\n" + code + "\n")
+        plan = SYNTHETIC[:SYNTHETIC.index("### Task 1:")] + "\n".join(
+            task.replace("### Task 1:", f"### Task {n}:") for n in range(1, 41))
+        text, _ = pt._render_skeleton(plan)
+        self.assertEqual(text.count("### Task "), 40)
+        self.assertLessEqual(len(text.encode("utf-8")), 0.6 * len(plan.encode("utf-8")))
+
+
+def _run_text(*args):
+    """plan_tool.py as a subprocess: (exit code, stdout bytes, stderr text)."""
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    proc = subprocess.run([sys.executable, TOOL, *args], capture_output=True, env=env)
+    return proc.returncode, proc.stdout, proc.stderr.decode("utf-8")
+
+
+class SkeletonCliTest(unittest.TestCase):
+    def test_skeleton_and_task_cli(self):
+        code, out, err = _run_text("skeleton", FIXTURE)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.decode("utf-8"), pt._render_skeleton(VALID)[0])
+        code, out, _ = _run_text("skeleton", FIXTURE, "--tasks", "1.1", "--code", "none")
+        self.assertEqual(code, 0)
+        self.assertIn(b"### Task 1.1:", out)
+        with open(FIXTURE, "rb") as fh:
+            raw = fh.read()
+        code, out, _ = _run_text("task", FIXTURE, "1.1")
+        self.assertEqual((code, out), (0, b"".join(raw.splitlines(keepends=True)[55:73])))
+
+    def test_cli_errors(self):
+        for args, needle in ((("skeleton", FIXTURE, "--tasks", "1,42"), "task-not-found: 42"),
+                             (("task", FIXTURE, "42"), "task-not-found: 42"),
+                             (("skeleton", os.path.join(HERE, "missing-impl.md")), "plan-unreadable"),
+                             (("skeleton", FIXTURE, "--code", "x"), "invalid choice")):
+            code, out, err = _run_text(*args)
+            self.assertEqual((code, out), (2, b""), args)
+            self.assertIn(needle, err, args)
+
+    def test_cli_warnings_go_to_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "notes-impl.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("# Notes\n\nplain text\n")
+            code, out, err = _run_text("skeleton", path)
+        self.assertEqual((code, out), (0, b"# Notes\n\nplain text\n"))
+        self.assertIn("warning: no-tasks", err)
+
+
 if __name__ == "__main__":
     unittest.main()

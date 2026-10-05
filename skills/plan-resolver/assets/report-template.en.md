@@ -15,6 +15,7 @@ audit_tasks: {{audit_tasks}}
 
 ## Plan Stages
 
+<!-- A closed task is one line with one anchor (a second only on the task's test file): - ✅ 1. Title evidence_anchor: path#Lx-Ly; detail lines only under ⚠️, ⭕️, ‼️ -->
 {{plan_stages}}
 
 ## Issues

@@ -47,6 +47,8 @@ skill's directory, absolute). Exit codes: `0` ok, `1` check failed, `2` bad inpu
 |---|---|
 | `plan-path <spec>` | Plan path: `<X>-spec.md` → `<X>-impl.md` next to the spec (user preference overrides). |
 | `plan-check <plan> --root <project>` | Plan format contract, after writing the plan. Also returns `settings` (read by the shared rule: plan header, else the spec at `**Spec:**`), `task_count`, `plan_bytes`, and `journal`: the chain journal the plan leads to, `null` when there is none. |
+| `skeleton <plan> [--tasks ids] [--code none\|signatures]` | The plan without code bodies, for plan-resolver's first and closing full passes (this skill does not call it): the header, task headings, `Files`, conditions, `External`, `Size`, step headings, `Run:`/`Expected:`, one `[code <lang>, <N> lines: <signatures>]` line per code block. Text, not JSON; warnings on stderr. |
+| `task <plan> <id>` | One task byte for byte, for the same callers. Text, not JSON. |
 
 ## Chain journal
 

@@ -166,6 +166,8 @@ Every message you see (questions, answer options, summaries) and the spec body f
 
 **Output:** `<X>-impl.md` next to `<X>-spec.md`. The header carries `**Spec:**`, `**Tier:**` and `**Baseline:**` (the test command and result before planning); tasks use `### Task N: <title>` headings, the format `plan-executor` and `plan-resolver` parse. `scripts/plan_tool.py plan-check --root <project>` verifies that contract and that the files and paths the plan relies on exist (`Create:` targets must be new).
 
+`scripts/plan_tool.py skeleton <plan>` prints the plan without code bodies (the header, task headings, `Files`, conditions, step headings, `Run:`/`Expected:`, one `[code <lang>, <N> lines: <signatures>]` line per code block) and `scripts/plan_tool.py task <plan> <id>` one task byte for byte. plan-resolver reads them on its first and closing full passes; both print text, not JSON.
+
 Each task in the plan specifies:
 - Files to touch
 - Exact steps (2–5 min each)
@@ -299,6 +301,8 @@ In a chain, the preset and the stop policy come from the `Chain` setting of the 
 In audit mode, always provide the full list of previous reports for delta analysis. `fix`/`next`/`auto` discover the reports next to the plan. The fix phase records each outcome (`applied` / `needs-user` / `skipped`) in the report's "Fix Log" section; only the following audit can mark an issue `✅ fixed`. Code changes are left uncommitted: the files the fix phase changed are recorded in the chain journal (`fix_files`), and the closing gate names `/plan-executor <plan> commit` to commit them with the run. The resolver itself never runs a git command that changes anything.
 
 **Incremental re-audit.** Every report ends with an evidence fingerprint: the SHA-256 of each file its anchors and the plan tasks' `Files` name, taken at the start of the audit. The next pass (`rescan-scope`) re-audits only the tasks whose evidence changed, the tasks not yet `✅` and the tasks of open issues; `carry-forward` copies the other lines of the last report by script, so the agent reads only those tasks (by their plan line ranges) and the changed code. A changed plan, an older report without a fingerprint or more than half of the tasks touched give a full pass. An incremental pass never writes `-final`: when it closes everything, a full pass follows (in `auto` by a fresh subagent when the host has them; by hand `/plan-resolver <plan> <reports…> full`).
+
+**Skeleton and compact report.** The first and the closing full pass read the plan's skeleton (`plan_tool.py skeleton` of `plan-writing`) instead of the whole plan and open a task in full (`plan_tool.py task`) only for a `partial`, `ambiguous` or `deviates` verdict or a task without `Files`; the code itself is read in the repository either way. Without `plan-writing` installed alongside, the resolver reads the plan in full and says so. A closed task is one report line with one anchor (a second only on the task's test file); detail lines are written for open tasks only, and `validate-report` warns `verbose-closed-task` and `too-many-anchors` without failing older reports.
 
 **Report types:**
 

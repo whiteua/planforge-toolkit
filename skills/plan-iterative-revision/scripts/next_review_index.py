@@ -1089,6 +1089,8 @@ STATUS_LINES = {
 }
 REVIEW_TITLE = {"ru": "Ревизия", "en": "Revision"}
 REQUIRED_INPUT_FIELDS = ("title", "location_in_plan", "code_cross_check", "problem", "required_fix", "acceptance")
+# An issue's `evidence` quotes only the lines that prove it (PHASE-A-AUDIT.md); longer: a warning, never a cut.
+MAX_EVIDENCE_CHARS = 600
 
 
 def pop_since(args: List[str]) -> Tuple[List[str], Optional[int]]:
@@ -1439,7 +1441,16 @@ def normalize_input_issues(
             extra = issue.get(key, "").strip()
             if extra and extra not in kept.get(key, ""):
                 kept[key] = (kept.get(key, "").strip() + sep + extra).strip()
-    return sorted(merged.values(), key=lambda it: (SEVERITY_RANK[it["severity"]], int(it["_order"])))
+    result = sorted(merged.values(), key=lambda it: (SEVERITY_RANK[it["severity"]], int(it["_order"])))
+    if warnings is not None:  # after the merge: merged evidence counts as one text
+        for issue in result:
+            length = len(issue.get("evidence", ""))
+            if length > MAX_EVIDENCE_CHARS:
+                warnings.append(
+                    f"issue #{issue['_order']}: evidence-too-long: {length} characters (limit {MAX_EVIDENCE_CHARS}); "
+                    "quote only the lines that prove the problem"
+                )
+    return result
 
 
 def consecutive_presence(history: List[set], current: set) -> Dict[str, int]:

@@ -11,6 +11,16 @@ the invariants below hold for every AUDIT pass.
   `LAST_REPORT` the newest one; `NEXT_REPORT` the report this pass writes.
 - `plans-list`: `MASTER_PLAN` followed by `REPORTS[]` in order (audit mode: given by the user;
   other modes: from `discover`).
+- `PT`: `python "<SKILL_DIR>/../plan-writing/scripts/plan_tool.py"`, the tool of `plan-writing`
+  installed side by side (like `../plan-brainstorming/scripts/brainstorm_tool.py`). `PT skeleton
+  <plan>` prints the plan without code bodies and `PT task <plan> <id>` one task byte for byte;
+  both print text, not JSON (exit `2` with a JSON line on stderr: `task-not-found`,
+  `plan-unreadable`, `plan-brainstorming not installed alongside`). The first and the full pass
+  read the skeleton; the incremental pass does not. A skeleton of a large plan is longer than a
+  shell tool shows (output is cut at about 30000 characters): send `PT skeleton` stdout to a
+  UTF-8 file in the OS temp dir (outside the workspace) and Read it in chunks to its end; `PT task`
+  prints one task directly. Without `plan-writing` alongside, the pass reads the plan in full and
+  says so in one line.
 
 ## Invariants
 
@@ -43,6 +53,7 @@ fingerprint-workspace <workspace-root> <start-json>
 # subsequent: rescan-scope <plan> <LAST_REPORT> --snapshot <start-json>   → <tmp>/scope.json
 #   incremental: carry-forward <LAST_REPORT> --scope <tmp>/scope.json --header <tmp>/bootstrap.json --out <NEXT_REPORT>
 # audit pass (AUDIT.md): first | incremental | full
+#   first | full: PT skeleton <plan>; PT task <plan> <id> for a disputed task
 # write NEXT_REPORT (incremental: fill the draft)
 evidence-fingerprint <NEXT_REPORT> --snapshot <start-json> --plan <plan>
 task-census <plan> <NEXT_REPORT>

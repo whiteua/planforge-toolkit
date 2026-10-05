@@ -19,8 +19,9 @@ Run the approved specs of one goal through the whole pipeline: plan, revision, s
 ### Typical scenarios
 
 - **From idea to commit:** `/plan-brainstorming <goal>` → approve the spec → `/plan-chain-runner <spec>` → confirm the start card → wait for the summary.
-- **Several specs of one goal:** `/plan-chain-runner <spec-1> <spec-2>`; the runner proposes the dependency graph, independent specs are planned in parallel, code stages run for one plan at a time.
-- **Continue:** `/plan-chain-runner continue` after an interruption or after answering questions; finished stages are not repeated.
+- **From roadmap to commit:** `/plan-brainstorming <goal>` → approve the specs → its closing report names `/plan-chain-runner <goal>-roadmap.md` → the card shows the roadmap's order, groups and notes → confirm → wait for the summary. The writing and revision agents get the roadmap's notes for their spec.
+- **Several specs of one goal:** `/plan-chain-runner <spec-1> <spec-2>`; with `<goal>-roadmap.md` next to the journal the run takes its order and its edges between these specs and names a missing dependency; without it the runner proposes the dependency graph. Independent specs are planned in parallel, code stages run for one plan at a time.
+- **Continue:** `/plan-chain-runner continue` after an interruption or after answering questions; finished stages are not repeated; a changed goal roadmap is shown first (`roadmap-changed`: apply it or keep the old graph).
 - **Discuss:** the run stopped on questions → `/plan-chain-runner discuss` goes through them one by one with options and a recommendation; an answer that changes a spec sends you to `/plan-brainstorming <spec>` (amend mode).
 - **One step by hand:** call the skill directly, e.g. `/plan-iterative-revision <plan>` or `/plan-resolver <plan> fix`; it records its stage in the same journal, so a later `continue` takes it into account.
 - **The chain stopped:** `/plan-chain-runner status` shows where and why; then `discuss`, then `continue`. A corrupt journal: `brainstorm_tool.py journal-reconcile <journal> --rebuild`, then `continue` (the start card is shown again).
@@ -29,10 +30,11 @@ Run the approved specs of one goal through the whole pipeline: plan, revision, s
 
 | Command | What it does |
 |---|---|
-| `/plan-chain-runner <spec> [<spec>…]` | new run: start dialogue, then the loop |
-| `/plan-chain-runner continue [<goal>]` (`продолжить`) | resume from the journal |
-| `/plan-chain-runner discuss [<goal>]` (`обсудить`) | answer the open questions one by one |
-| `/plan-chain-runner status [<goal>]` (`статус`) | plans, stages, progress, questions, ETA; changes nothing |
+| `/plan-chain-runner <goal>-roadmap.md` | new run from the goal roadmap: its order, dependencies, groups and notes, then the loop |
+| `/plan-chain-runner <spec> [<spec>…]` | new run of these specs: start dialogue, then the loop |
+| `/plan-chain-runner continue [<goal>\|<roadmap>]` (`продолжить`) | resume from the journal |
+| `/plan-chain-runner discuss [<goal>\|<roadmap>]` (`обсудить`) | answer the open questions one by one |
+| `/plan-chain-runner status [<goal>\|<roadmap>]` (`статус`) | plans in `#` order with their groups, stages, progress, questions, ETA; changes nothing |
 | `/plan-chain-runner help` | this quick reference, the map first |
 
 Without `<goal>` the runner finds the journals with unfinished stages; with several it asks which.
@@ -46,7 +48,7 @@ Without `<goal>` the runner finds the journals with unfinished stages; with seve
 | Chain journal | `<dir>/<goal>-chain.json` (`<goal>` = the spec's `> Backlog:` value, else the spec name without `-spec.md`) |
 | Reviews | `<dir>/<X>-impl-review-N.md`, `<X>-impl-completion.md` |
 | Roadmap and parts | `<dir>/<X>-impl-roadmap.md`, `<X>-impl-a.md`, … |
-| Goal roadmap | `<dir>/<goal>-roadmap.md`: order of the goal's specs, written by `plan-brainstorming` (`roadmap-write`) |
+| Goal roadmap | `<dir>/<goal>-roadmap.md`: order of the goal's specs, written by `plan-brainstorming` (`roadmap-write`); the runner's argument, recorded in the journal with its hash (`runner.roadmap`, `runner.roadmap_sha256`) |
 | Ledger | `<repo parent>/.exec/<repo>-<plan>/state.json`, outside the repository |
 | Audit report | `<dir>/<X>-impl-report-N.md`, `<X>-impl-report-N-final.md` |
 | Diff report | `<dir>/<X>-diffs.md` |
@@ -56,7 +58,7 @@ Without `<goal>` the runner finds the journals with unfinished stages; with seve
 
 ## What Happens
 
-1. **Start** — every spec is checked (`spec-check`); the runner names the host profile in one line, proposes the dependency graph and shows one start card: graph and order, models and effort per role, the specs' chain settings, environments with their rights, volume and ETA. You confirm or edit it once. A dirty working tree: the runner lists the files and asks whether to make a start commit.
+1. **Start** — every spec is checked (`spec-check`); the runner names the host profile in one line; from a goal roadmap it takes the roadmap's order, dependencies, groups and notes (no graph proposal), otherwise it proposes the dependency graph; then it shows one start card: graph and order, models and effort per role, the specs' chain settings, environments with their rights, volume and ETA. You confirm or edit it once. A dirty working tree: the runner lists the files and asks whether to make a start commit.
 2. **Loop** — `chain_tool.py run-next` says what may run now; each stage runs as an agent of its skill with the model of its role, in silent mode. Planning (writing, revision, split) of independent specs runs in parallel; execution, audit and commit run for one plan at a time; the audit runs alone. With `split=auto` the splitter's numeric gate runs first: a plan it keeps whole skips the split stage without an agent.
 3. **Progress** — one line per stage start and end, during execution every 10 tasks or 10 minutes, with the remaining time.
 4. **Stops** — a decision is recorded as a question in the journal; that plan and the plans depending on it wait, the others go on. At the end: one summary and all questions together.
@@ -80,6 +82,9 @@ Without `<goal>` the runner finds the journals with unfinished stages; with seve
 |---|---|---|
 | Refused at the start: specs of different goals | One run is one goal | Run each goal separately |
 | `graph-cycle: a -> b -> a` | The edited graph has a cycle | Remove an edge in the start card |
+| `roadmap-mismatch` | The roadmap is not in the journal's folder, or its `> Goal:` names another goal | Start from the roadmap of this goal, in its own folder |
+| A `roadmap-changed` card on `continue` | The goal roadmap changed after the run started | Apply the change, or keep the old graph and amend the roadmap later |
+| `roadmap-missing` | The run's roadmap file is gone | Nothing: the run goes on with the journal's graph; restore the file to get the notes back |
 | "Another runner session is active" | A session mark younger than 30 minutes, or an older one while a stage is still `running` (`session-stale-running`) | Continue here (takes it over) or stop |
 | The runner stops: "the run was continued in another window" | Another session took the run over (`session-taken-over`) | Nothing: the other window goes on |
 | `journal-corrupt` | The journal file is broken | `brainstorm_tool.py journal-reconcile <journal> --rebuild`, then `continue` |

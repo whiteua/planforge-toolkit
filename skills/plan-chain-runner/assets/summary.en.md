@@ -2,6 +2,7 @@
 
 Result: {{result}}
 Journal: `{{journal_path}}`
+Goal roadmap: {{goal_roadmap_path}}
 Profile: {{profile}}; time: {{duration}}
 Volume: {{cost_line}}
 

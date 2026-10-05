@@ -42,7 +42,7 @@ Each skill is an independent, installable module. Together they form a coherent 
 | [`plan-executor`](skills/plan-executor/) | Execute a plan one unit at a time with ledger-backed progress tracking | `plan-brainstorming` (chain settings, `BACKLOG.md`) | Persistent progress ledger with resume, plan-drift and settings-drift detection, strictly ordered units with retry-first policy (a split plan runs task by task with one checkpoint per part), risk-scaled gates, read/write consent per external system, foreign-change detection against an expected tree with per-file restore, rollback snapshots in hidden git refs (no branch commits), run diff, findings to `BACKLOG.md` |
 | [`plan-iterative-revision`](skills/plan-iterative-revision/) | Iteratively audit and patch a plan (or every part of a split plan) until it is error-free | `plan-brainstorming` (chain settings, task hashes for incremental re-audits) | Set-algebraic flow analysis (new/resolved/persisted/reintroduced), SHA-1 issue fingerprinting, two-phase separation (audit ≠ implement), single gate authority (regression/churn/unchanged/stuck/limit), 10-class error taxonomy, immutable append-only review trail, batch mode over split parts, preset and stop policy from the chain settings, incremental re-audit by task hash |
 | [`plan-resolver`](skills/plan-resolver/) | Audit implementation against the plan and produce a structured report; optionally fix the code and re-audit (`fix` / `auto`) | `plan-brainstorming` (chain settings, `BACKLOG.md`) | task-census completeness gate, evidence anchors (`path#Lx-Ly`) verified against the workspace, confidence calibration, probe-gate (whitelist), self-consistency check, SHA-256 fingerprint, read-only audit invariant (report and `BACKLOG.md` only), separated fix → re-audit loop with protected plan, snapshot diff and bounded cycles |
-| [`plan-chain-runner`](skills/plan-chain-runner/) | Run the approved specs of one goal through writing → revision → [split] → execution → audit → commit after one start dialogue; questions are collected in the chain journal | all six pipeline skills (`plan-brainstorming` for the journal and settings) | Dependency-graph scheduler (`run-next`), host profiles (`claude-code`, `github-copilot`, `fallback`) with a model per role, artifact trust through `journal-reconcile`, session mark with heartbeat outside the working tree, ETA from the journal's history, `continue` / `discuss` / `status`, `help` |
+| [`plan-chain-runner`](skills/plan-chain-runner/) | Run the approved specs of one goal through writing → revision → [split] → execution → audit → commit after one start dialogue; questions are collected in the chain journal | all six pipeline skills (`plan-brainstorming` for the journal and settings) | Dependency-graph scheduler (`run-next`) fed by the goal roadmap (`<goal>-roadmap.md`: order, groups, notes in the planning briefs), host profiles (`claude-code`, `github-copilot`, `fallback`) with a model per role, artifact trust through `journal-reconcile`, session mark with heartbeat outside the working tree, ETA from the journal's history, `continue` / `discuss` / `status`, `help` |
 | [`writing-skills`](skills/writing-skills/) | Create, test, and deploy new agent skills using TDD methodology | — | Red-green-refactor for skills, subagent-based behavioural testing |
 
 ---
@@ -75,7 +75,7 @@ Each skill is an independent, installable module. Together they form a coherent 
   └───────────────────────────────────────────┘
 
   plan-iterative-revision  ← use at any stage to clean up a plan; on a roadmap it verifies every part
-  plan-chain-runner        ← runs the whole chain for approved specs, by their dependencies
+  plan-chain-runner        ← runs the whole chain from the goal roadmap (or approved specs), by their dependencies
 ```
 
 ---
@@ -295,7 +295,7 @@ The CLI does not currently display commit hashes or dates. To verify you are on 
 /plan-brainstorming BACKLOG.md        # next cycle: the unchecked items of the shared backlog
 ```
 
-The skill guides you from the idea to approved specs and the goal roadmap `<goal>-roadmap.md`, then stops; its closing report names the next command (`/plan-chain-runner <spec>…` or `/plan-writing <spec>`).
+The skill guides you from the idea to approved specs and the goal roadmap `<goal>-roadmap.md`, then stops; its closing report names the next command (`/plan-chain-runner <goal>-roadmap.md` or `/plan-writing <spec>`).
 
 ### Executing an existing plan
 
@@ -331,6 +331,7 @@ The skill guides you from the idea to approved specs and the goal roadmap `<goal
 ### Running the whole chain
 
 ```
+/plan-chain-runner docs/plans/plan01-roadmap.md      # from the goal roadmap: its order, groups and notes
 /plan-chain-runner docs/plans/plan01-1-spec.md docs/plans/plan01-2-spec.md   # launch card, then the chain without questions
 /plan-chain-runner continue      # resume from the journal (also: продолжить)
 /plan-chain-runner discuss       # answer the open questions one by one (also: обсудить)
@@ -659,6 +660,8 @@ Everything the user sees — questions, answer options, status lines, gates, sum
 ### Dependency-graph scheduler
 
 `chain_tool.py run-next` decides what runs now from the journal alone. The stages of one plan go strictly in order (writing → revision → split → execution → diffs → audit → commit). Independent specs are written, revised and split in parallel, up to `parallel`. Execution, diffs, audit and commit run for one plan at a time, and nothing else is issued while an audit runs, because the resolver fingerprints the whole working tree and the executor stops on foreign changes. A spec that depends on another starts only after that spec's commit; when its audit stayed open, the dependent spec waits for your `accept` or `fix`. A plan with an open question waits with the specs that depend on it, and the rest go on; a failed stage is retried once, then asked about. The runner handles each agent as it returns and tells `run-next` which agents are still in flight (`--in-flight`), so a fast plan is not held up by a long execution of another. A plan stopped inside the code stages keeps them (its changes are uncommitted in the shared tree): the other plans' execution waits as `code-busy`, and `status` and `discuss` show such waits. After a `rewrite` answer on a `drift:` question, the later stages of that plan are redone without asking again. Questions the scheduler acts on carry fixed prefixes (`open-audit:`, `not-confirmed:`, `stage-failed:`, `drift:`) and are answered with fixed tokens.
+
+Given the goal roadmap (`/plan-chain-runner <goal>-roadmap.md`), the run's order and dependencies come from that checked file, not from a guess in the dialogue: `run-init --roadmap` stores the specs in the roadmap's `#` order with the file's name and SHA-256, `subset-check` cuts the graph to the specs chosen and names missing dependencies and plans that would leave the run with uncommitted changes, and `run-status` compares the hash on every `continue`: a changed roadmap is shown as a `roadmap-changed` card and applied only after you confirm it. Groups stay documentation; the width is still `parallel`. The roadmap's notes reach the writing and revision agents of their spec.
 
 **Used in:** `plan-chain-runner`
 

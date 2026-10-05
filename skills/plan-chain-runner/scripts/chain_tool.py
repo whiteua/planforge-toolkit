@@ -10,6 +10,8 @@ Commands:
   settings-save  --profile P --roles JSON [--file F]
   model-pick     (--profile P [--file F] | --journal J [--profile P]) --role R [--light] [--unsupported MODEL]...
   run-init       <journal> --profile P --spec S... --graph JSON --models JSON [--start-commit SHA|declined|none] [--parallel N]
+                 [--roadmap R]
+  subset-check   <journal> --roadmap R [--spec S]...
   run-session    <journal> (--begin [--host H] [--takeover] | --heartbeat --id ID | --end stopped|complete|interrupted --id ID)
   run-next       <journal> [--parallel N] [--in-flight PLAN_ID:STAGE]...
   run-eta        <journal>
@@ -17,8 +19,8 @@ Commands:
   run-stats      (<journal> | --plan PLAN) [--baseline JSON] [--json-out FILE]
 
 Exit codes: 0 ok, 1 contract (graph-cycle, session-active, session-stale-running, session-taken-over,
-runner-missing, no-model) or scheduler-bug (run-next, run-eta, run-status, run-stats), 2 usage or I/O error
-(journal-corrupt included).
+runner-missing, no-model) or scheduler-bug (run-next, run-eta, run-status, run-stats, subset-check), 2 usage or
+I/O error (journal-corrupt, roadmap-mismatch and not-in-roadmap included).
 """
 from __future__ import annotations
 
@@ -498,11 +500,33 @@ def _runner_models(models: Any) -> Dict[str, Dict[str, Any]]:
     return runner_models
 
 
+def _goal_roadmap(journal: str, roadmap: str, goal: Any) -> Tuple[str, str, Dict[str, Any]]:
+    """(name relative to the journal, absolute path, brainstorm_tool.parse_goal_roadmap result) of the goal
+    roadmap `roadmap`, a path relative to CWD like --spec (spec 10 of plan-refactoring-01). roadmap-mismatch
+    (exit 2) when it is not a file name in the journal's directory or its '> Goal:' is not `goal`."""
+    bt = _brainstorm()
+    rel = bt._journal_rel(journal, roadmap)
+    if "/" in rel or rel in ("", ".", ".."):
+        raise InputError(f"roadmap-mismatch: {rel} is not a file in the journal's directory")
+    path = os.path.join(os.path.dirname(os.path.abspath(journal)), rel)
+    try:
+        text = bt._read_source(path)
+    except bt.InputError as exc:
+        raise InputError(str(exc)) from exc
+    parsed = bt.parse_goal_roadmap(text)[0]
+    if parsed["goal"] != goal:
+        raise InputError(f"roadmap-mismatch: {rel} names the goal {parsed['goal']!r}, the journal's goal is {goal!r}")
+    return rel, path, parsed
+
+
 def run_init(journal: str, profile: str, specs: List[str], graph: Any, models: Any,
-             start_commit: Optional[str] = None, parallel: Optional[int] = None) -> Dict[str, Any]:
+             start_commit: Optional[str] = None, parallel: Optional[int] = None,
+             roadmap: Optional[str] = None) -> Dict[str, Any]:
     """Write the journal's `runner` section. Spec paths are taken relative to CWD and stored relative
     to the journal; every one must be registered in journal.specs. Sessions of an earlier run-init stay;
-    without --start-commit (--parallel) the earlier value stays, else the key is left out."""
+    without --start-commit (--parallel, --roadmap) the earlier value stays, else the key is left out.
+    With --roadmap the specs are stored in the roadmap's # order (not-in-roadmap for a spec it does not
+    name), with runner.roadmap and runner.roadmap_sha256."""
     _check_profile(profile)
     if parallel is not None and parallel < 1:
         raise InputError(f"--parallel must be at least 1, got {parallel}")
@@ -530,7 +554,15 @@ def run_init(journal: str, profile: str, specs: List[str], graph: Any, models: A
         if missing:
             raise InputError("unknown-spec: " + ", ".join(missing) + " (not registered in the journal)")
         old = data.get("runner") if isinstance(data.get("runner"), dict) else {}
-        runner = {"version": bt.RUNNER_VERSION, "profile": profile, "specs": rels, "graph": rel_graph,
+        ordered, source = rels, None
+        if roadmap is not None:
+            name, path, parsed = _goal_roadmap(journal, roadmap, data.get("goal"))
+            position = {row["file"]: index for index, row in enumerate(parsed["specs"])}
+            outside = [rel for rel in rels if rel not in position]
+            if outside:
+                raise InputError("not-in-roadmap: " + ", ".join(outside))
+            ordered, source = sorted(rels, key=position.__getitem__), (name, bt._sha256(path))
+        runner = {"version": bt.RUNNER_VERSION, "profile": profile, "specs": ordered, "graph": rel_graph,
                   "models": runner_models,
                   "sessions": old.get("sessions") if isinstance(old.get("sessions"), list) else []}
         kept = start_commit or old.get("start_commit")
@@ -539,6 +571,10 @@ def run_init(journal: str, profile: str, specs: List[str], graph: Any, models: A
         width = parallel if parallel is not None else old.get("parallel")
         if width is not None:
             runner["parallel"] = width
+        if source is None and old.get("roadmap") and old.get("roadmap_sha256"):
+            source = (old["roadmap"], old["roadmap_sha256"])
+        if source is not None:
+            runner["roadmap"], runner["roadmap_sha256"] = source
         errors = bt._runner_errors(runner)
         if errors:
             raise InputError("runner-invalid: " + "; ".join(errors))
@@ -550,7 +586,7 @@ def run_init(journal: str, profile: str, specs: List[str], graph: Any, models: A
 
 def cmd_run_init(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     return 0, run_init(args.journal, args.profile, args.spec, _json_arg(args.graph, "--graph"),
-                       _json_arg(args.models, "--models"), args.start_commit, args.parallel)
+                       _json_arg(args.models, "--models"), args.start_commit, args.parallel, args.roadmap)
 
 
 SESSION_STALE_SECONDS = 1800
@@ -825,6 +861,16 @@ def _derived_plan(spec: str) -> str:
     return f"{directory}/{impl}" if directory else impl
 
 
+def _journal_entry(data: Dict[str, Any], spec: str) -> Optional[Dict[str, Any]]:
+    """The journal's plan entry of `spec`: by its spec, else an entry created without --spec
+    (journal-question before plan-writing) by the plan id derived from the spec; None when there is none."""
+    entry = next((item for item in data["plans"] if item.get("spec") == spec), None)
+    if entry is None:
+        plan_id = _brainstorm()._journal_plan_id(_derived_plan(spec))
+        entry = next((item for item in data["plans"] if not item.get("spec") and item.get("id") == plan_id), None)
+    return entry
+
+
 def _plan_states(journal: str, data: Dict[str, Any], runner: Dict[str, Any]) -> List[Dict[str, Any]]:
     """One record per runner spec, in runner order: its plan entry (a pending one before plan-writing),
     the chain settings (of the plan when it exists, else of the spec), the plan's questions and the
@@ -834,10 +880,7 @@ def _plan_states(journal: str, data: Dict[str, Any], runner: Dict[str, Any]) -> 
     states: List[Dict[str, Any]] = []
     for spec in runner.get("specs") or []:
         plan = _derived_plan(spec)
-        entry = next((item for item in data["plans"] if item.get("spec") == spec), None)
-        if entry is None:  # an entry created without --spec (journal-question before plan-writing)
-            entry = next((item for item in data["plans"]
-                          if not item.get("spec") and item.get("id") == bt._journal_plan_id(plan)), None)
+        entry = _journal_entry(data, spec)
         if entry is None:
             entry = {"id": bt._journal_plan_id(plan), "spec": spec, "plan": plan,
                      "stages": {stage: {"status": "pending"} for stage in bt.STAGES}}
@@ -1560,10 +1603,29 @@ def _session_state(journal: str) -> Optional[Dict[str, Any]]:
     return {"active": age < SESSION_STALE_SECONDS, "age_seconds": age}
 
 
+def _roadmap_state(journal: str, data: Dict[str, Any], runner: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The run's goal roadmap (runner.roadmap) as it is on disk now: `path`, `sha_matches` (its sha256 is
+    runner.roadmap_sha256), `missing` (no readable file), `not_in_roadmap` (journal specs it does not name)
+    and `rows` {spec: (#, group)}; None without runner.roadmap. Reads only (spec 10 of plan-refactoring-01)."""
+    name = runner.get("roadmap")
+    if not name:
+        return None
+    bt = _brainstorm()
+    path = os.path.join(os.path.dirname(os.path.abspath(journal)), name)
+    try:
+        text, digest = bt._read_source(path), bt._sha256(path)
+    except (bt.InputError, OSError):
+        return {"path": name, "sha_matches": False, "missing": True, "not_in_roadmap": [], "rows": {}}
+    rows = {row["file"]: (row["n"], row["group"]) for row in bt.parse_goal_roadmap(text)[0]["specs"]}
+    registered = [entry.get("path") for entry in data["specs"] if isinstance(entry, dict)]
+    return {"path": name, "sha_matches": digest == runner.get("roadmap_sha256"), "missing": False,
+            "not_in_roadmap": [spec for spec in registered if spec not in rows], "rows": rows}
+
+
 def run_status(journal: str) -> Dict[str, Any]:
     """Per plan: stage statuses, the next stage (rules 7 and 9), unit progress; open questions, waits
     without a question of their own (stage-failed: stop, not-confirmed: stop, model: stop, code-busy),
-    ETA and the session mark. Reads only."""
+    ETA, the session mark, the cost totals, the goal roadmap's state and the plans' # order. Reads only."""
     bt = _brainstorm()
     data, runner = _runner_journal(journal)
     states = _plan_states(journal, data, runner)
@@ -1586,11 +1648,59 @@ def run_status(journal: str) -> Dict[str, Any]:
     waits = [item for item in waiting
              if item["reason"] in ("stage-failed: stop", "not-confirmed: stop", "model: stop") or item["reason"].startswith("code-busy: ")]
     totals = run_stats(journal, None)["totals"]
+    roadmap = _roadmap_state(journal, data, runner)
+    rows = roadmap.pop("rows") if roadmap is not None else {}
+    if roadmap is None or not roadmap["sha_matches"]:  # # and groups only of the file run-init read
+        rows = {}
+    order = []
+    for index, state in enumerate(states):
+        n, group = rows.get(state["spec"], (index + 1, None))
+        order.append({"plan": state["entry"]["plan"], "n": n, "group": group})
     return {"ok": True, "goal": data.get("goal"), "profile": runner.get("profile"), "plans": plans,
             "open_questions": questions, "waits": waits, "eta_minutes": _eta(data, states)["eta_minutes"],
             "session": _session_state(journal),
             "cost": {"effective_tokens_est": totals["effective_tokens_est"], "bytes_total": totals["bytes_written"],
-                     "basis": totals["basis"]}}
+                     "basis": totals["basis"]},
+            "roadmap": roadmap, "order": order}
+
+
+def subset_check(journal: str, roadmap: str, specs: Optional[List[str]] = None) -> Dict[str, Any]:
+    """The run the goal roadmap allows for `specs` (relative to CWD; none = every spec of the roadmap), for
+    the start card and roadmap-changed (spec 10 of plan-refactoring-01): `specs` in the roadmap's # order;
+    `not_in_roadmap`, the specs of the call or the journal it does not name; `missing_dependencies`, the
+    roadmap dependencies outside the set whose commit is not done or skipped; `graph`, the roadmap edges
+    inside the set (run-init accepts no other); `dropped_uncommitted`, the journal's specs outside the set
+    whose execution started and is not committed. Reads only; the journal needs no runner section."""
+    bt = _brainstorm()
+    journal = os.path.abspath(journal)
+    try:
+        data = bt.journal_load(journal)
+    except bt.InputError as exc:
+        raise InputError(str(exc)) from exc
+    errors = bt._journal_structure_errors(data) or _time_errors(data)
+    if errors:
+        raise InputError(f"journal-corrupt: {journal}: " + "; ".join(errors))
+    name, _, parsed = _goal_roadmap(journal, roadmap, data.get("goal"))
+    rows = [row["file"] for row in parsed["specs"]]
+    depends = {row["file"]: row["depends"] for row in parsed["specs"]}
+    given = list(dict.fromkeys(bt._journal_rel(journal, spec) for spec in specs)) if specs else rows
+    chosen = [spec for spec in rows if spec in given]
+    registered = [entry.get("path") for entry in data["specs"] if isinstance(entry, dict)]
+
+    def state(spec: str) -> Dict[str, Any]:  # what _record and _uncommitted read
+        return {"entry": {"stages": (_journal_entry(data, spec) or {}).get("stages") or {}}}
+
+    committed = {spec for spec in rows if _record(state(spec), "commit").get("status") in ("done", "skipped")}
+    return {"ok": True, "journal": journal, "roadmap": name, "specs": chosen,
+            "not_in_roadmap": [spec for spec in dict.fromkeys(given + registered) if spec not in rows],
+            "missing_dependencies": list(dict.fromkeys(dep for spec in chosen for dep in depends[spec]
+                                                       if dep not in chosen and dep not in committed)),
+            "graph": {spec: [dep for dep in depends[spec] if dep in chosen] for spec in chosen},
+            "dropped_uncommitted": [spec for spec in registered if spec not in chosen and _uncommitted(state(spec))]}
+
+
+def cmd_subset_check(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    return 0, subset_check(args.journal, args.roadmap, args.spec)
 
 
 def _plan_stats(plan_path: str, journal_layer: Optional[Dict[str, Any]], warnings: List[str]) -> Dict[str, Any]:
@@ -1723,7 +1833,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--models", required=True, help='JSON {role: {"model", "effort"}} (settings-load roles)')
     p_init.add_argument("--start-commit", help="sha of the start commit, declined or none")
     p_init.add_argument("--parallel", type=int, help="most agents at once for this run (read by run-next first)")
+    p_init.add_argument("--roadmap", help="the goal roadmap <goal>-roadmap.md, relative to CWD: the specs in its # order, "
+                                          "runner.roadmap and runner.roadmap_sha256")
     p_init.set_defaults(func=cmd_run_init)
+
+    p_subset = sub.add_parser("subset-check", help="the run a goal roadmap allows for some of its specs: order, "
+                                                   "missing dependencies, graph, dropped uncommitted plans")
+    p_subset.add_argument("journal", help="path to <goal>-chain.json")
+    p_subset.add_argument("--roadmap", required=True, help="the goal roadmap <goal>-roadmap.md, relative to CWD")
+    p_subset.add_argument("--spec", action="append", default=[],
+                          help="a spec of the run, relative to CWD (repeatable; none = every spec of the roadmap)")
+    p_subset.set_defaults(func=cmd_subset_check)
 
     p_session = sub.add_parser("run-session", help="session mark outside the working copy and the journal's session history")
     p_session.add_argument("journal", help="path to <goal>-chain.json")
@@ -1757,7 +1877,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-JOURNAL_READERS = ("run-next", "run-eta", "run-status", "run-stats")
+JOURNAL_READERS = ("run-next", "run-eta", "run-status", "run-stats", "subset-check")
 
 
 def main(argv: Optional[List[str]] = None) -> int:

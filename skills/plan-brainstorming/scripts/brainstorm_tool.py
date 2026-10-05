@@ -1380,6 +1380,8 @@ RUNNER_PROFILES = ("claude-code", "github-copilot", "fallback")
 ROLES = ("writing", "revision", "split", "execution", "audit", "commit")
 RUNNER_SESSION_ENDS = ("stopped", "complete", "interrupted")
 RUNNER_START_COMMIT_RE = re.compile(r"^(?:[0-9a-f]{7,64}|declined|none)$")
+# runner.roadmap_sha256 (spec 10 of plan-refactoring-01): sha256 of the goal roadmap run-init read.
+RUNNER_ROADMAP_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class JournalError(Exception):
@@ -2193,8 +2195,9 @@ def _runner_sessions_errors(sessions: Any) -> List[str]:
 
 def _runner_errors(runner: Any) -> List[str]:
     """Checks of the optional `runner` section (spec plan-chain-runner-2, section C): version,
-    profile, specs, graph (membership, runner-graph-cycle), roles of models, start_commit and parallel
-    (optional keys), sessions. Required keys: version, profile, specs, graph, models, sessions."""
+    profile, specs, graph (membership, runner-graph-cycle), roles of models, start_commit, parallel,
+    roadmap and roadmap_sha256 (optional keys), sessions. Required keys: version, profile, specs, graph,
+    models, sessions."""
     if not isinstance(runner, dict):
         return ["runner: must be an object"]
     errors: List[str] = []
@@ -2215,6 +2218,12 @@ def _runner_errors(runner: Any) -> List[str]:
     parallel = runner.get("parallel", 1)
     if isinstance(parallel, bool) or not isinstance(parallel, int) or parallel < 1:
         errors.append("runner: 'parallel' must be an integer >= 1")
+    roadmap = runner.get("roadmap", "-")
+    if not (isinstance(roadmap, str) and roadmap.strip()):
+        errors.append("runner: 'roadmap' must be a non-empty string")
+    digest = runner.get("roadmap_sha256", "0" * 64)
+    if not (isinstance(digest, str) and RUNNER_ROADMAP_SHA_RE.match(digest)):
+        errors.append("runner: 'roadmap_sha256' must be 64 lowercase hex digits")
     errors.extend(_runner_sessions_errors(runner.get("sessions")))
     return errors
 

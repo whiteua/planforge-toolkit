@@ -1,31 +1,32 @@
 ---
 name: plan-chain-runner
-description: "Use when one or more approved specs (`*-spec.md`) of one goal should go through the whole pipeline (plan, revision, split, execution, audit, commit) without the user launching each skill. Also use to continue such a run, to discuss the questions it stopped on, to show its status, or with `help` for a map of the pipeline."
+description: "Use when one or more approved specs (`*-spec.md`) of one goal, given as spec files or the goal roadmap (`<goal>-roadmap.md`), should go through the whole pipeline (plan, revision, split, execution, audit, commit) without the user launching each skill. Also use to continue such a run, to discuss the questions it stopped on, to show its status, or with `help` for a map of the pipeline."
 ---
 
 # plan-chain-runner
 
 If the only argument is `help`: show this skill's USAGE.md in the dialogue language (without a spec or plan: the language of the user's message; commands and keys as they are) and do nothing else.
 
-Runs the approved specs of one goal through `plan-writing → plan-iterative-revision → [plan-splitter] → plan-executor → plan-resolver → plan-executor commit`. After a short start dialogue it works without questions: each stage is done by its own skill, launched as an agent with the model of its role; the runner decides what runs next from the chain journal `<goal>-chain.json`, reports progress in one line, and stops with questions recorded in the journal.
+Runs the approved specs of one goal — named by the goal roadmap `<goal>-roadmap.md` or given as files — through `plan-writing → plan-iterative-revision → [plan-splitter] → plan-executor → plan-resolver → plan-executor commit`. After a short start dialogue it works without questions: each stage is done by its own skill, launched as an agent with the model of its role; the runner decides what runs next from the chain journal `<goal>-chain.json`, reports progress in one line, and stops with questions recorded in the journal.
 
 ## Commands
 
 | Call | What it does |
 |---|---|
-| `/plan-chain-runner <spec> [<spec>…]` | new run: start dialogue ([START.md](references/START.md)), then the loop |
-| `/plan-chain-runner continue [<goal>]` (`продолжить`) | resume from the journal ([LOOP.md](references/LOOP.md), Continue) |
-| `/plan-chain-runner discuss [<goal>]` (`обсудить`) | the open questions one by one ([DISCUSS.md](references/DISCUSS.md)) |
-| `/plan-chain-runner status [<goal>]` (`статус`) | summary from `run-status`; changes nothing |
+| `/plan-chain-runner <goal>-roadmap.md` | new run from the goal roadmap: its specs, `#` order, dependencies, groups and notes ([START.md](references/START.md)), then the loop |
+| `/plan-chain-runner <spec> [<spec>…]` | new run of these specs (a subset of the goal roadmap when there is one): start dialogue ([START.md](references/START.md)), then the loop |
+| `/plan-chain-runner continue [<goal>\|<roadmap>]` (`продолжить`) | resume from the journal ([LOOP.md](references/LOOP.md), Continue) |
+| `/plan-chain-runner discuss [<goal>\|<roadmap>]` (`обсудить`) | the open questions one by one ([DISCUSS.md](references/DISCUSS.md)) |
+| `/plan-chain-runner status [<goal>\|<roadmap>]` (`статус`) | summary from `run-status`; changes nothing |
 | `/plan-chain-runner help` | USAGE.md, which opens with the pipeline map |
 
-Without `<goal>` the runner looks for `*-chain.json` journals with unfinished stages in the spec folders of the repository: one → it is taken; several → ask which; none → say so. `help` together with other arguments is not `help`: the arguments are read as above.
+Without `<goal>` the runner looks for `*-chain.json` journals with unfinished stages in the spec folders of the repository: one → it is taken; several → ask which; none → say so. `help` together with other arguments is not `help`: the arguments are read as above. A goal roadmap in place of `<goal>` names its goal: `J journal-path <roadmap>` gives the journal.
 
 ## Hard Invariants
 
-1. One run, one goal; one spec, one plan. Specs of different goals are refused with the proposal to run them separately; specs are never merged into one plan.
+1. One run, one goal; one spec, one plan. Specs of different goals, or a goal roadmap whose specs lie in another goal's journal, are refused with the proposal to run them separately; specs are never merged into one plan.
 2. The status of a stage comes only from the journal and the artifacts (`journal-reconcile`, `journal-show`, `run-status`), never from an agent's report.
-3. What runs next is decided only by `run-next`. Never launch a stage it did not return, never do a stage's work yourself in a profile with agents, never edit the journal, a spec or a plan by hand.
+3. What runs next is decided only by `run-next`. Never launch a stage it did not return, never do a stage's work yourself in a profile with agents, never edit the journal, a spec, a plan or the goal roadmap by hand. The runner only reads the roadmap: its order and graph reach the run through `run-init` after the user confirmed the card.
 4. After the start card no questions to the user: a decision is a `journal-question` without `--answer`, that plan waits, the independent plans go on; all questions come together at the end.
 5. While an `audit` agent runs, write nothing to the journal and nothing into the working copy: no questions, no `journal-reconcile`, no `run-session --begin/--end`. Only `run-session --heartbeat`, whose file is outside the working copy.
 6. Commits: only the start commit the user agreed to (START.md) and plan-executor's `commit` stage. Never push, never `--no-verify`, never amend.
@@ -33,7 +34,7 @@ Without `<goal>` the runner looks for `*-chain.json` journals with unfinished st
 
 ## Tool
 
-`<SKILL_DIR>` is the directory containing this file; always call the scripts by absolute path. Python 3.8 or newer, stdlib only. Every command prints JSON; errors are `{"ok": false, "errors": [...]}` with exit `2` (input, unreadable file, `unknown-spec`, journal input errors) or `1` (contract: `graph-cycle`, `session-active`, `session-stale-running`, `session-taken-over`, `runner-missing`, `no-model`). `session-taken-over` from `--heartbeat` or `--end` means another window took the run over: stop at once with one line, write nothing to the journal, no `--end`.
+`<SKILL_DIR>` is the directory containing this file; always call the scripts by absolute path. Python 3.8 or newer, stdlib only. Every command prints JSON; errors are `{"ok": false, "errors": [...]}` with exit `2` (input, unreadable file, `unknown-spec`, `roadmap-mismatch`, `not-in-roadmap`, journal input errors) or `1` (contract: `graph-cycle`, `session-active`, `session-stale-running`, `session-taken-over`, `runner-missing`, `no-model`). `session-taken-over` from `--heartbeat` or `--end` means another window took the run over: stop at once with one line, write nothing to the journal, no `--end`.
 
 `C` = `python "<SKILL_DIR>/scripts/chain_tool.py"`; `J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py"`.
 
@@ -42,13 +43,14 @@ Without `<goal>` the runner looks for `*-chain.json` journals with unfinished st
 | `C settings-load [--file F] --profile P` | models, effort and `parallel` of a profile (`~/.planforge/runner.json`, else built-in) |
 | `C settings-save --profile P --roles JSON [--file F]` | remember the edited table, only with the user's consent |
 | `C model-pick --profile P --role R [--journal J] [--file F] [--light] [--unsupported MODEL]...` | the fallback model after a refusal; with `--journal` from the journal's `runner.models` (the loop always passes it); `--light` (role `execution`): the `light` model of delegated green units instead of the role's model |
-| `C run-init <journal> --profile P --spec S... --graph JSON --models JSON [--parallel N] [--start-commit SHA\|declined\|none]` | write the journal's `runner` section (`parallel`: the card's value, read by `run-next`) |
+| `C run-init <journal> --profile P --spec S... --graph JSON --models JSON [--parallel N] [--start-commit SHA\|declined\|none] [--roadmap R]` | write the journal's `runner` section (`parallel`: the card's value, read by `run-next`; `--roadmap`: the specs in the roadmap's `#` order, `runner.roadmap` and `runner.roadmap_sha256`, kept by a later call without it) |
+| `C subset-check <journal> --roadmap R [--spec S]...` | the run a goal roadmap allows for these specs (none: all of them): `specs` in `#` order, `not_in_roadmap`, `missing_dependencies`, `graph` inside the set, `dropped_uncommitted` ([START.md](references/START.md)) |
 | `C run-session <journal> --begin [--host H] [--takeover]` / `--heartbeat --id ID` / `--end stopped\|complete\|interrupted --id ID` | the active-session mark; `ID` is the `id` that `--begin` returned |
 | `C run-next <journal> [--parallel N] [--in-flight PLAN:STAGE]...` | the actions to launch now (not the in-flight pairs, which still count), the waiting plans, `done`, `blocked` |
-| `C run-eta <journal>` / `C run-status <journal>` | ETA; the per-plan status table |
+| `C run-eta <journal>` / `C run-status <journal>` | ETA; the per-plan status table, with `roadmap` (`path`, `sha_matches`, `missing`, `not_in_roadmap`; `null` without one) and `order` (`plan`, `#`, group) |
 | `C run-stats (<journal> \| --plan <plan.md>) [--baseline <json>] [--json-out <file>]` | sizes, durations, token cost (the host's fact when recorded, else an estimate from the artifacts) and quality per stage; the summary's volume line; deltas against an earlier result ([docs/COST.md](../../docs/COST.md)) |
 
-Journal commands: `J spec-check`, `journal-path --create`, `journal-event`, `journal-question`, `journal-answer`, `journal-show`, `journal-reconcile`, `journal-export-findings`, `backlog-parse`. `executor_tool.py` is used only through the plan-executor skill.
+Journal commands: `J spec-check`, `roadmap-check`, `roadmap-parse`, `journal-path --create`, `journal-event`, `journal-question`, `journal-answer`, `journal-show`, `journal-reconcile`, `journal-export-findings`, `backlog-parse`. `executor_tool.py` is used only through the plan-executor skill.
 
 ## The loop (LOOP.md is authoritative)
 

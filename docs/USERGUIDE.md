@@ -55,7 +55,7 @@ Each skill is an independent module with a well-defined input, output, and invar
 | **Chain journal** | `<goal>-chain.json` next to the spec: the stage of each plan (`writing`, `revision`, `split`, `execution`, `diffs`, `audit`, `commit`), questions waiting for your answer, findings. Every skill keeps it, manual runs too. |
 | **Follow-ups** | `<goal>-followups.json` next to the journal: defects found outside the plans, in the input format of `plan-brainstorming`. |
 | **Diff report** | `<base>-diffs.md` next to the plan: what the run changed, file by file. |
-| **Chain runner** | `plan-chain-runner`: takes the approved specs of one goal through every stage in the order of their dependencies, launches an agent per stage with the model of its role, and stops with questions in the chain journal (`continue`, `discuss`, `status`). |
+| **Chain runner** | `plan-chain-runner`: takes the approved specs of one goal (from the goal roadmap `<goal>-roadmap.md` or as spec files) through every stage in the order of their dependencies, launches an agent per stage with the model of its role, and stops with questions in the chain journal (`continue`, `discuss`, `status`). |
 
 ---
 
@@ -90,7 +90,7 @@ Each skill is an independent module with a well-defined input, output, and invar
 
 plan-iterative-revision  — use at any stage to clean up a plan before execution
 plan-executor <plan> commit — after plan-resolver: commit the run's files and the audit's fixes
-plan-chain-runner <specs>  — runs the whole chain for approved specs, by their dependencies
+plan-chain-runner <roadmap> — runs the whole chain from the goal roadmap (or approved specs), by their dependencies
 ```
 
 ---
@@ -140,7 +140,7 @@ Every message you see (questions, answer options, summaries) and the spec body f
 
 **Several inputs.** `/plan-brainstorming goal.md research.md review.json <text>` takes every existing file as an input and the rest of the line as the instruction. `brainstorm_tool.py inputs` classifies each file (`goal`, `markdown`, `findings`, `backlog`, `spec`, `plan`, `goal-roadmap`, `json`, `text`, `binary`, `missing`) and returns the mode of the call; the agent restates which file plays which role, and you correct it. Without an instruction the goal file and other notes are the problem statement and background, findings go to the spec that takes them, a spec or a plan is read only.
 
-**Several specs, the set check and the goal roadmap.** After the first step the skill proposes one spec or several (by size, your instruction and independent subsystems); you choose the set and the order, and the specs are written one after the other. With two or more specs of a goal, `spec-set-check` lists the files and symbols they share, the pairs that do not mention each other and the numbered sections several specs edit, and a reviewer subagent checks the set for duplicated work, contradicting decisions and order conflicts; accepted fixes go into the specs with your approval, rejected ones into the roadmap's notes. Then `roadmap-write` writes `<goal>-roadmap.md` next to the specs — also for one spec: the execution order `#`, dependencies, parallel groups, tier and size estimate per spec, shared touchpoints with their delivery order, a Mermaid graph, notes and the inputs — and `roadmap-check` validates it. The closing report names the command you run next (`/plan-chain-runner <spec>…` in the roadmap's order, or `/plan-writing <spec>`); the skill never starts it.
+**Several specs, the set check and the goal roadmap.** After the first step the skill proposes one spec or several (by size, your instruction and independent subsystems); you choose the set and the order, and the specs are written one after the other. With two or more specs of a goal, `spec-set-check` lists the files and symbols they share, the pairs that do not mention each other and the numbered sections several specs edit, and a reviewer subagent checks the set for duplicated work, contradicting decisions and order conflicts; accepted fixes go into the specs with your approval, rejected ones into the roadmap's notes. Then `roadmap-write` writes `<goal>-roadmap.md` next to the specs — also for one spec: the execution order `#`, dependencies, parallel groups, tier and size estimate per spec, shared touchpoints with their delivery order, a Mermaid graph, notes and the inputs — and `roadmap-check` validates it. The closing report names the command you run next (`/plan-chain-runner <goal>-roadmap.md`, or `/plan-writing <spec>`); the skill never starts it.
 
 **Output:** `*-spec.md` in the same directory as the goal file. After you approve it, the skill creates the chain journal `<goal>-chain.json` next to it (`<goal>` is the `Backlog` setting, else the spec name without `-spec.md`); the dialogue questions are not recorded there.
 
@@ -340,16 +340,19 @@ In audit mode, always provide the full list of previous reports for delta analys
 
 **Invoke:**
 ```
-/plan-chain-runner <spec> [<spec> …]     # new run: launch card, then the loop
-/plan-chain-runner continue [<goal>]     # resume from the journal (also: продолжить)
-/plan-chain-runner discuss [<goal>]      # answer the open questions one by one (also: обсудить)
-/plan-chain-runner status [<goal>]       # summary only, changes nothing (also: статус)
+/plan-chain-runner <goal>-roadmap.md     # new run from the goal roadmap: its order, groups and notes
+/plan-chain-runner <spec> [<spec> …]     # new run of these specs: launch card, then the loop
+/plan-chain-runner continue [<goal>|<roadmap>]   # resume from the journal (also: продолжить)
+/plan-chain-runner discuss [<goal>|<roadmap>]    # answer the open questions one by one (also: обсудить)
+/plan-chain-runner status [<goal>|<roadmap>]     # summary only, changes nothing (also: статус)
 /plan-chain-runner help                  # pipeline map
 ```
 
 Without a goal the runner looks for `*-chain.json` journals with unfinished stages in the spec folders of the repository: one is taken, several are asked about.
 
 **Start dialogue.** Every spec must pass `spec-check` and belong to the same goal (otherwise: separate runs). The runner names the host profile in one line, proposes the dependency graph of the specs with a reason for each edge (stages already `done` in the journal are not repeated) and shows one launch card: graph and order, models and effort per role (edits can be saved to `~/.planforge/runner.json`), the chain settings of the specs, and the environments with their rights (a task with `task` rights, a production write included, stops its plan on a question), plus the size and ETA when there is history. A spec without `> Chain:` gets plan-writing's questions here. With a dirty working tree the runner lists the files and offers a start commit (`chore: snapshot before plan-chain-runner run`, no push); the chain's own files are never in it.
+
+**From the goal roadmap.** `/plan-chain-runner <goal>-roadmap.md` checks the roadmap (`roadmap-check`) and takes its specs, `#` order, dependencies, groups, tiers, estimates and notes (`roadmap-parse`); the card shows them instead of proposing edges and says that `#` orders only within `parallel` and the code stages. Specs given by name while the goal has a roadmap run as a subset of it: in its order, with its edges between them; a dependency outside the set that is not committed yet is named in the card (add it or stop). An edit of the graph in the card holds for that run only; amend the roadmap through `plan-brainstorming` to keep it. The journal records the roadmap and its hash (`runner.roadmap`, `runner.roadmap_sha256`); on `continue` a changed roadmap is shown as a `roadmap-changed` card (apply it or keep the old graph), a missing one as `roadmap-missing`. The writing and revision agents get the roadmap's notes for their spec and the handoff of its dependencies; the spec outranks the notes.
 
 **Loop.** `run-next` names the stages to run now; each is launched as an agent of the host profile with the model of its role and a silent brief: run `/<skill> <args>`, there is no confirmation channel, a needed decision is recorded with `journal-question` and the agent stops. After each agent the runner checks the journal and the artifacts, never the agent's word. Progress lines in the spec's language: start and end of each stage with the remaining time, execution progress every 10 tasks or 10 minutes, and a line when an agent is silent for more than 10 minutes.
 
@@ -367,7 +370,7 @@ Without a goal the runner looks for `*-chain.json` journals with unfinished stag
 
 Roles: `writing`, `revision`, `split`, `execution`, `audit`, `commit`. An alias (`sonnet`, `opus`, `haiku`, `fable`) does not pin the version; a full model id (`claude-sonnet-5-5`) does, and such a role runs through its agent definition `~/.claude/agents/planforge-<role>.md`. The built-in defaults are in `skills/plan-chain-runner/references/PROFILES.md`; your own table lives in `~/.planforge/runner.json`. `split` runs on `sonnet` with low effort by default (it reads only the task list). `execution` may also name `light`, the model of the green tasks the executor delegates (none by default; a host that refuses it turns delegation off for the run without a question).
 
-**Output:** the chain's usual artifacts plus the `runner` section of `<goal>-chain.json` (profile, specs, graph, models, start commit, sessions). Apart from the optional start commit and the chain journal (`runner` section, skipped events, questions, answers), the runner writes nothing in the repository.
+**Output:** the chain's usual artifacts plus the `runner` section of `<goal>-chain.json` (profile, specs, graph, models, start commit, sessions, and with a goal roadmap `roadmap` and `roadmap_sha256`). Apart from the optional start commit and the chain journal (`runner` section, skipped events, questions, answers), the runner writes nothing in the repository.
 
 **Cost:** `chain_tool.py run-stats <journal>` (or `--plan <plan.md>` without a journal) reports per plan and stage the files written, their size and code share, the minutes, the model, the host's token count when the runner recorded it or an estimate of input, output and effective tokens derived from what the stage read and wrote, plus quality (audit status and issues, reviews, unit retries); `--baseline <json>` compares with an earlier result per task and per KB of plan. The summary's "Volume" line is this number. Model, baseline and checkpoints: [docs/COST.md](COST.md).
 
@@ -613,15 +616,15 @@ done
 
 ```
 /plan-brainstorming I want to add WebSocket notifications to the API
-  → approved specs docs/plans/ws-1-spec.md, docs/plans/ws-2-spec.md and the journal ws-chain.json
+  → approved specs docs/plans/ws-1-spec.md, docs/plans/ws-2-spec.md, the goal roadmap docs/plans/ws-roadmap.md and the journal ws-chain.json
 
-/plan-chain-runner docs/plans/ws-1-spec.md docs/plans/ws-2-spec.md
-  → launch card: graph (ws-2 after ws-1), models per role, settings, environments → you confirm
-  → per plan: writing → revision → [split] → execution → diffs → audit → commit, without questions
+/plan-chain-runner docs/plans/ws-roadmap.md
+  → launch card: the roadmap's order and groups (ws-2 after ws-1), its notes, models per role, settings, environments → you confirm
+  → per plan: writing → revision → [split] → execution → diffs → audit → commit, without questions; writing and revision get the roadmap's notes
   → one summary and the open questions, if any
 
 /plan-chain-runner discuss       # answer the questions one by one
-/plan-chain-runner continue      # resume
+/plan-chain-runner continue      # resume; a changed roadmap is shown first
 ```
 
 ### Help
@@ -652,7 +655,7 @@ Only `plan-executor` commits on your branch, at its commit stage (`/plan-executo
 |---|---|---|
 | `<base>-spec.md` | `plan-brainstorming` | Design spec |
 | `<root>-1-spec.md`, `<root>-2-spec.md`, … | `plan-brainstorming` | Several specs of one goal |
-| `<goal>-roadmap.md` | `plan-brainstorming` (`roadmap-write`) | Goal roadmap: order of the specs, dependencies, groups, shared touchpoints, Mermaid graph; input of `plan-chain-runner` |
+| `<goal>-roadmap.md` | `plan-brainstorming` (`roadmap-write`) | Goal roadmap: order of the specs, dependencies, groups, shared touchpoints, Mermaid graph; the argument of `plan-chain-runner`, recorded in the journal as `runner.roadmap` with its hash |
 | `BACKLOG.md` (repository root) | `plan-brainstorming`, `plan-executor`, `plan-resolver` | Shared backlog; skills only append |
 | `<base>-impl.md` | `plan-writing` | Implementation plan |
 | `<base>-roadmap.md` | `plan-splitter` | Part roadmap |
@@ -699,6 +702,8 @@ Only `plan-executor` commits on your branch, at its commit stage (`/plan-executo
 | `plan-chain-runner` asks whether another run is active | A session mark younger than 30 minutes exists (another window, or a run that has just crashed), or an older one while a stage is still `running` (`session-stale-running`) | Stop the other run, or continue here to take over |
 | The runner stops with `session-taken-over` | Another window took the run over | Nothing to do: that window goes on |
 | `run-init`: `graph-cycle` | The dependency graph in the launch card has a cycle | Fix the graph in the card |
+| `run-init`: `roadmap-mismatch` | The roadmap is not in the journal's folder, or its `> Goal:` names another goal | Start from the roadmap of this goal, in its own folder |
+| A `roadmap-changed` card on `continue` | The goal roadmap changed after the run started | Apply the change, or keep the old graph and amend the roadmap later |
 | `settings-load` fails | `~/.planforge/runner.json` is not valid JSON or names an unknown profile or role | Fix or delete the file; the runner offers the built-in defaults for this run |
 | A `model: <role>` question | The host refused the role's model and its fallback (`model-pick`: `no-model`) | `/plan-chain-runner discuss`: `retry <model>` names the model to use, then `continue` |
 | `status` shows a plan waiting without a question | A stage was answered `stop` (`stage-failed:`, `not-confirmed:`, `model:`); plans that need the code stages wait as `code-busy` | Run that stage by hand, then `/plan-chain-runner continue` |

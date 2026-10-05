@@ -1506,5 +1506,39 @@ class RunnerLightTest(unittest.TestCase):
         self.assertEqual(entry["required"], ["model", "effort"])
 
 
+class RunnerRoadmapTest(unittest.TestCase):
+    """Spec 10 of plan-refactoring-01: runner.roadmap and runner.roadmap_sha256 are optional and validate."""
+
+    def test_roadmap_keys_validate(self):
+        good = _jr_runner(roadmap="g-roadmap.md", roadmap_sha256="0" * 64)
+        self.assertEqual(j2._runner_errors(good), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = RunnerValidateTest._journal(self, tmp, good)  # its helper uses no state
+            self.assertEqual(j2.journal_validate(path), {"ok": True, "errors": []})
+
+    def test_bad_roadmap_keys(self):
+        cases = [
+            (_jr_runner(roadmap=""), ["runner: 'roadmap' must be a non-empty string"]),
+            (_jr_runner(roadmap=3), ["runner: 'roadmap' must be a non-empty string"]),
+            (_jr_runner(roadmap_sha256="abc"), ["runner: 'roadmap_sha256' must be 64 lowercase hex digits"]),
+            (_jr_runner(roadmap_sha256="A" * 64), ["runner: 'roadmap_sha256' must be 64 lowercase hex digits"]),
+        ]
+        for runner, expected in cases:
+            with self.subTest(expected=expected[0]):
+                self.assertEqual(j2._runner_errors(runner), expected)
+
+
+class RunnerRoadmapSchemaTest(unittest.TestCase):
+    def test_schema_documents_the_roadmap_keys(self):
+        path = os.path.join(os.path.dirname(_J2_TOOL), "..", "assets", "chain-journal.schema.json")
+        with open(path, encoding="utf-8") as fh:
+            runner = json.load(fh)["definitions"]["runner"]
+        self.assertEqual((runner["properties"]["roadmap"]["type"], runner["properties"]["roadmap"]["minLength"]),
+                         ("string", 1))
+        self.assertEqual(runner["properties"]["roadmap_sha256"]["pattern"], j2.RUNNER_ROADMAP_SHA_RE.pattern)
+        self.assertNotIn("roadmap", runner["required"])
+        self.assertNotIn("roadmap_sha256", runner["required"])
+
+
 if __name__ == "__main__":
     unittest.main()

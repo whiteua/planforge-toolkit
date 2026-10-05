@@ -2221,5 +2221,251 @@ class LightDocsTest(HomeCase):
             self.assertIn(needle, text)
 
 
+# Spec 10 of plan-refactoring-01: the runner takes the goal roadmap <goal>-roadmap.md.
+class _RoadmapCase(JournalCase):
+    def make_roadmap(self, folder, rows):
+        """<folder>/goal-roadmap.md written by brainstorm_tool.roadmap_write; rows: (file, depends, group) in
+        JSON order (# follows the dependency levels, the JSON order inside a level)."""
+        graph = {"title": "Goal", "specs": [{"file": name, "title": name, "depends": deps, "group": group,
+                                             "notes": f"notes of {name}"} for name, deps, group in rows]}
+        source = os.path.join(self.tmp, "roadmap-graph.json")
+        with open(source, "w", encoding="utf-8") as fh:
+            json.dump(graph, fh)
+        code, out = ct._brainstorm().roadmap_write(folder, source, "en")
+        self.assertEqual(code, 0, out)
+        return out["path"]
+
+    def three(self):
+        """Specs a, b, c of goal `goal`; the roadmap orders b (#1), a (#2), c (#3, depends on a)."""
+        folder, journal = self.make_journal("a-spec.md", "b-spec.md", "c-spec.md")
+        roadmap = self.make_roadmap(folder, [("b-spec.md", [], "A"), ("a-spec.md", [], "A"),
+                                             ("c-spec.md", ["a-spec.md"], "B")])
+        return folder, journal, roadmap
+
+    def init_all(self, journal, folder, roadmap, *extra):
+        def path(name):
+            return os.path.join(folder, name)
+        return self.run_main("run-init", journal, "--profile", "claude-code", "--spec", path("a-spec.md"),
+                             "--spec", path("b-spec.md"), "--spec", path("c-spec.md"),
+                             "--graph", json.dumps({path("c-spec.md"): [path("a-spec.md")]}), "--models", "{}",
+                             "--roadmap", roadmap, *extra)
+
+    def add_spec(self, journal, folder, name):
+        """One more registered spec of the goal; a roadmap written before does not name it."""
+        path = os.path.join(folder, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# Goal\n\nSpec " + name + "\n")
+        ct._brainstorm().journal_create(journal, "goal", "en", spec=path)
+        return path
+
+    def add_entry(self, journal, spec, done=(), **statuses):
+        """A plan entry of `spec` (_t2_plan) appended to the journal."""
+        entry = _t2_plan(spec, done=done, **statuses)
+        ct._brainstorm().journal_update(journal, lambda data: data["plans"].append(entry))
+        return entry
+
+
+class RoadmapRunTest(_RoadmapCase):
+    def test_run_init_stores_the_roadmap_and_its_order(self):
+        folder, journal, roadmap = self.three()
+        code, out = self.init_all(journal, folder, roadmap)
+        self.assertEqual(code, 0, out)
+        runner = out["runner"]
+        self.assertEqual(runner["specs"], ["b-spec.md", "a-spec.md", "c-spec.md"])  # the # order, not the arguments
+        self.assertEqual((runner["roadmap"], runner["roadmap_sha256"]),
+                         ("goal-roadmap.md", ct._brainstorm()._sha256(roadmap)))
+        self.assertEqual(ct._brainstorm().journal_validate(journal), {"ok": True, "errors": []})
+
+    def test_roadmap_path_resolves_like_spec(self):
+        self.three()
+        code, out = self.run_cli("run-init", os.path.join("docs", "goal-chain.json"), "--profile", "claude-code",
+                                 "--spec", "docs/a-spec.md", "--spec", "docs/b-spec.md", "--graph", "{}",
+                                 "--models", "{}", "--roadmap", "docs/goal-roadmap.md", cwd=self.tmp)
+        self.assertEqual((code, out["runner"]["roadmap"], out["runner"]["specs"]),
+                         (0, "goal-roadmap.md", ["b-spec.md", "a-spec.md"]))
+
+
+class RoadmapMismatchTest(_RoadmapCase):
+    def test_roadmap_outside_the_folder_or_of_another_goal(self):
+        folder, journal, roadmap = self.three()
+        outside = os.path.join(self.tmp, "goal-roadmap.md")
+        shutil.copyfile(roadmap, outside)
+        other = os.path.join(folder, "other-roadmap.md")
+        with open(roadmap, encoding="utf-8") as fh:
+            text = fh.read()
+        with open(other, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("> Goal: goal", "> Goal: other", 1))
+        for path in (outside, other):
+            with self.subTest(path=path):
+                code, out = self.init_all(journal, folder, path)
+                self.assertEqual(code, 2, out)
+                self.assertTrue(out["errors"][0].startswith("roadmap-mismatch: "), out)
+        self.assertNotIn("runner", ct._brainstorm().journal_load(journal))
+
+
+class RoadmapReinitTest(_RoadmapCase):
+    def test_spec_not_in_roadmap_is_refused(self):
+        folder, journal, roadmap = self.three()
+        extra = self.add_spec(journal, folder, "d-spec.md")
+        code, out = self.init_all(journal, folder, roadmap, "--spec", extra)
+        self.assertEqual((code, out["errors"]), (2, ["not-in-roadmap: d-spec.md"]))
+        self.assertNotIn("runner", ct._brainstorm().journal_load(journal))
+
+    def test_reinit_without_roadmap_keeps_it(self):
+        folder, journal, roadmap = self.three()
+        first = self.init_all(journal, folder, roadmap)[1]["runner"]
+        code, out = self.run_main("run-init", journal, "--profile", "fallback", "--spec",
+                                  os.path.join(folder, "b-spec.md"), "--graph", "{}", "--models", "{}")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((out["runner"]["roadmap"], out["runner"]["roadmap_sha256"]),
+                         (first["roadmap"], first["roadmap_sha256"]))
+
+
+class RoadmapScheduleTest(_RoadmapCase):
+    def test_run_next_follows_the_roadmap_order_and_graph(self):
+        folder, journal, roadmap = self.three()
+        self.assertEqual(self.init_all(journal, folder, roadmap, "--parallel", "3")[0], 0)
+        result = ct.run_next(journal)
+        self.assertEqual([(action["spec"], action["stage"]) for action in result["actions"]],
+                         [("b-spec.md", "writing"), ("a-spec.md", "writing")])
+        self.assertEqual([(item["spec"], item["reason"]) for item in result["waiting"]],
+                         [("c-spec.md", "depends-on: a-spec.md")])
+
+
+class SubsetCheckTest(_RoadmapCase):
+    def test_missing_dependency_until_it_is_committed(self):
+        folder, journal, roadmap = self.three()
+        c = os.path.join(folder, "c-spec.md")
+        out = ct.subset_check(journal, roadmap, [c])
+        self.assertEqual((out["specs"], out["missing_dependencies"], out["graph"]),
+                         (["c-spec.md"], ["a-spec.md"], {"c-spec.md": []}))
+        self.add_entry(journal, "a-spec.md", done=T2_STAGES)
+        out = ct.subset_check(journal, roadmap, [c])
+        self.assertEqual((out["missing_dependencies"], out["graph"]), ([], {"c-spec.md": []}))
+
+    def test_without_specs_the_whole_roadmap_in_hash_order(self):
+        folder, journal, roadmap = self.three()
+        out = ct.subset_check(journal, roadmap)
+        self.assertEqual((out["roadmap"], out["specs"], out["missing_dependencies"]),
+                         ("goal-roadmap.md", ["b-spec.md", "a-spec.md", "c-spec.md"], []))
+        self.assertEqual(out["graph"], {"b-spec.md": [], "a-spec.md": [], "c-spec.md": ["a-spec.md"]})
+
+
+class SubsetCheckDropTest(_RoadmapCase):
+    def test_dropped_uncommitted_and_not_in_roadmap(self):
+        folder, journal, roadmap = self.three()
+        entry = self.add_entry(journal, "b-spec.md", done=("writing", "revision", "split"), execution="running")
+        ct._brainstorm().journal_update(journal, lambda data: data["plans"][0]["stages"]["execution"].update(
+            started_at="2026-10-02T01:05:00Z"))
+        self.assertEqual(entry["id"], "b-impl")
+        d = self.add_spec(journal, folder, "d-spec.md")
+        out = ct.subset_check(journal, roadmap, [os.path.join(folder, "a-spec.md"), d])
+        self.assertEqual((out["specs"], out["not_in_roadmap"], out["dropped_uncommitted"]),
+                         (["a-spec.md"], ["d-spec.md"], ["b-spec.md"]))
+        out = ct.subset_check(journal, roadmap)
+        self.assertEqual((out["not_in_roadmap"], out["dropped_uncommitted"]), (["d-spec.md"], []))
+
+
+class SubsetCheckCliTest(_RoadmapCase):
+    def test_cli_and_roadmap_mismatch(self):
+        folder, journal, roadmap = self.three()
+        code, out = self.run_cli("subset-check", journal, "--roadmap", roadmap,
+                                 "--spec", os.path.join(folder, "c-spec.md"))
+        self.assertEqual((code, out["specs"], out["missing_dependencies"]), (0, ["c-spec.md"], ["a-spec.md"]))
+        code, out = self.run_cli("subset-check", journal, "--roadmap", os.path.join(self.tmp, "none-roadmap.md"))
+        self.assertEqual((code, out["ok"]), (2, False))
+        self.assertTrue(out["errors"][0].startswith("roadmap-mismatch: "), out)
+
+    def test_single_spec_roadmap_has_an_empty_graph(self):
+        folder, journal = self.make_journal("a-spec.md")
+        roadmap = self.make_roadmap(folder, [("a-spec.md", [], "A")])
+        code, out = self.run_main("subset-check", journal, "--roadmap", roadmap)
+        self.assertEqual((code, out["graph"]), (0, {"a-spec.md": []}))
+        code, out = self.run_main("run-init", journal, "--profile", "claude-code", "--spec",
+                                  os.path.join(folder, "a-spec.md"), "--graph", "{}", "--models", "{}",
+                                  "--roadmap", roadmap)
+        self.assertEqual((code, out["runner"]["specs"], out["runner"]["graph"]), (0, ["a-spec.md"], {}))
+
+
+class RoadmapStatusTest(_RoadmapCase):
+    BY_RUNNER = [{"plan": "b-impl.md", "n": 1, "group": None}, {"plan": "a-impl.md", "n": 2, "group": None},
+                 {"plan": "c-impl.md", "n": 3, "group": None}]
+
+    def test_roadmap_and_order(self):
+        folder, journal, roadmap = self.three()
+        self.init_all(journal, folder, roadmap)
+        result = ct.run_status(journal)
+        self.assertIn("cost", result)  # spec 1's field stays
+        self.assertEqual(result["roadmap"], {"path": "goal-roadmap.md", "sha_matches": True, "missing": False,
+                                             "not_in_roadmap": []})
+        self.assertEqual(result["order"], [{"plan": "b-impl.md", "n": 1, "group": "A"},
+                                           {"plan": "a-impl.md", "n": 2, "group": "A"},
+                                           {"plan": "c-impl.md", "n": 3, "group": "B"}])
+
+    def test_changed_or_missing_roadmap_orders_by_the_runner(self):
+        folder, journal, roadmap = self.three()
+        self.init_all(journal, folder, roadmap)
+        with open(roadmap, "a", encoding="utf-8") as fh:
+            fh.write("\nEdited.\n")
+        result = ct.run_status(journal)
+        self.assertEqual((result["roadmap"]["sha_matches"], result["roadmap"]["missing"], result["order"]),
+                         (False, False, self.BY_RUNNER))
+        os.remove(roadmap)
+        result = ct.run_status(journal)
+        self.assertEqual(result["roadmap"], {"path": "goal-roadmap.md", "sha_matches": False, "missing": True,
+                                             "not_in_roadmap": []})
+        self.assertEqual(result["order"], self.BY_RUNNER)
+
+    def test_without_roadmap_and_not_in_roadmap(self):
+        folder, journal, roadmap = self.three()
+        self.init(journal, folder)
+        result = ct.run_status(journal)
+        self.assertEqual((result["roadmap"], [item["n"] for item in result["order"]]), (None, [1, 2]))
+        self.init_all(journal, folder, roadmap)
+        self.add_spec(journal, folder, "d-spec.md")
+        self.assertEqual(ct.run_status(journal)["roadmap"]["not_in_roadmap"], ["d-spec.md"])
+
+
+class RoadmapDocsTest(unittest.TestCase):
+    """Spec 10 of plan-refactoring-01: the runner's documents take the goal roadmap as the input."""
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def read(self, *parts):
+        return self.ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+    def assert_has(self, text, *needles):
+        for needle in needles:
+            self.assertIn(needle, text)
+
+    def test_skill_md(self):
+        self.assert_has(self.read("SKILL.md"), "/plan-chain-runner <goal>-roadmap.md", "or the goal roadmap",
+                        "C subset-check <journal> --roadmap", "[--roadmap R]", "roadmap-parse")
+
+    def test_start_md(self):
+        self.assert_has(self.read("references", "START.md"), "J roadmap-check <roadmap>", "J roadmap-parse <roadmap>",
+                        "C subset-check <journal> --roadmap", "not-in-roadmap", "missing_dependencies",
+                        "dropped_uncommitted", "--roadmap <roadmap>", "## Roadmap changed", "one run is one goal")
+
+    def test_loop_md(self):
+        self.assert_has(self.read("references", "LOOP.md"), "10. **`roadmap`**", "the spec outranks the notes",
+                        "roadmap-missing", "START.md, Roadmap changed", "[#2 · g-3-impl · group B · revision]",
+                        "goal roadmap line")
+
+    def test_summary_templates(self):
+        for lang, line in (("en", "Goal roadmap: {{goal_roadmap_path}}"), ("ru", "Roadmap цели: {{goal_roadmap_path}}")):
+            with self.subTest(lang=lang):
+                self.assert_has(self.read("assets", f"summary.{lang}.md"), line, "{{roadmap_path}}", "{{cost_line}}")
+
+    def test_usage_and_scenarios(self):
+        self.assert_has(self.read("USAGE.md"), "/plan-chain-runner <goal>-roadmap.md", "From roadmap to commit",
+                        "roadmap-mismatch", "roadmap-changed")
+        self.assert_has(self.read("tests", "eval-scenarios.md"), *(f"## Scenario {n}:" for n in range(16, 22)))
+
+    def test_brainstorming_names_the_roadmap_command(self):
+        text = (self.ROOT.parent / "plan-brainstorming" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("`/plan-chain-runner <goal>-roadmap.md`", text)
+        self.assertNotIn("until the runner takes it as an argument", text)
+
+
 if __name__ == "__main__":
     unittest.main()

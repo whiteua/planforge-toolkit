@@ -208,3 +208,75 @@ given to the subagent as fixed JSON when the script is not under test.
   (LOOP.md, 4. A large plan's execution).
 - **Red flags (FAIL):** A `model:` question; the plan waits; the runner relaunches with `haiku`; the
   role's `model` changes; the brief still names `haiku`.
+
+## Scenario 16: The start from a roadmap shows its graph, not a proposal
+
+- **Setup:** Goal `g` with `g-roadmap.md` (`roadmap-check` valid): `#1 g-1-spec.md` (group A),
+  `#2 g-3-spec.md` (group B, depends on g-1), `#3 g-2-spec.md` (group C, depends on g-3, notes
+  "write after 3: it reuses 3's parser"). All three pass `spec-check`; profile `claude-code`; clean tree.
+- **Trigger:** `/plan-chain-runner g-roadmap.md`.
+- **Expected (PASS):** `roadmap-check`, `roadmap-parse`, `journal-path g-roadmap.md` (`kind: goal-roadmap`),
+  the spec steps for each spec, `subset-check … --roadmap g-roadmap.md`; one card with the table in the order
+  g-1, g-3, g-2 (`#`, depends on, group, tier, estimate), the edges line, the notes one line each and the
+  sentence that `#` orders only within `parallel` and the code stages. After "yes": `run-init … --spec
+  g-1-spec.md --spec g-3-spec.md --spec g-2-spec.md --graph '{"g-3-spec.md": ["g-1-spec.md"], "g-2-spec.md":
+  ["g-3-spec.md"]}' … --roadmap g-roadmap.md`.
+- **Red flags (FAIL):** Edges proposed with reasons as in the dialogue without a roadmap; the order of the
+  file numbers (1, 2, 3); `run-init` without `--roadmap`; the roadmap edited.
+
+## Scenario 17: Roadmap notes reach writing and revision, not execution
+
+- **Setup:** The run of Scenario 16 after `run-init`. `run-next` returns a `run` of `/plan-writing
+  g-2-spec.md` (role `writing`); later a `run` of `/plan-executor g-1-impl.md` (role `execution`).
+- **Trigger:** The runner launches both agents (LOOP.md, Brief).
+- **Expected (PASS):** `roadmap-parse g-roadmap.md` at the launch of the writing agent; its brief has the
+  `roadmap` item with "write after 3: it reuses 3's parser" verbatim, the handoff of g-3 and "the spec
+  outranks the notes". The executor's brief has no `roadmap` item.
+- **Red flags (FAIL):** The notes paraphrased or cut; a `roadmap` item in an execution, audit or commit
+  brief; the roadmap copied into the journal.
+
+## Scenario 18: A changed roadmap on `continue`
+
+- **Setup:** A journal with `runner.roadmap: g-roadmap.md`. After the run stopped, the roadmap was amended:
+  g-2 no longer depends on g-3. `run-status` returns `roadmap.sha_matches: false`; no plan has uncommitted
+  execution.
+- **Trigger:** `/plan-chain-runner continue`.
+- **Expected (PASS):** Before the loop: `roadmap-check`, `roadmap-parse`, `subset-check … --roadmap
+  g-roadmap.md`; the card `roadmap-changed` names the removed edge g-2 → g-3. "Apply" → `run-init` from the
+  journal's directory with the same profile, models and `parallel`, the new graph and `--roadmap
+  g-roadmap.md`, without `--start-commit`; then `run-next`. "Keep the old graph" → nothing written, the loop
+  runs on `runner.graph`.
+- **Red flags (FAIL):** The new graph applied without confirmation; `run-init` before the card; `done`
+  stages repeated; a `journal-question` instead of the card.
+
+## Scenario 19: Specs given while the goal has a roadmap
+
+- **Setup:** Goal `g` of Scenario 16 with `g-roadmap.md` next to the journal; g-1 is committed (`commit`
+  done); g-3 and g-2 have not started.
+- **Trigger:** `/plan-chain-runner g-2-spec.md`.
+- **Expected (PASS):** After the spec steps: `roadmap-check g-roadmap.md` and `subset-check … --roadmap
+  g-roadmap.md --spec g-2-spec.md` → `missing_dependencies: ["g-3-spec.md"]`; the card names g-3 and offers
+  "add it to the run / stop". "Add" → `subset-check` with both specs, the run in the order g-3, g-2, and
+  `run-init … --roadmap g-roadmap.md`.
+- **Red flags (FAIL):** The graph dialogue as without a roadmap; g-2 started without g-3; an edge to a spec
+  outside the run passed to `run-init` (`unknown-spec`).
+
+## Scenario 20: `status` names `#` and groups
+
+- **Setup:** A run from `g-roadmap.md`; `run-status` returns `order` `[{"plan": "g-1-impl.md", "n": 1,
+  "group": "A"}, {"plan": "g-3-impl.md", "n": 2, "group": "B"}, {"plan": "g-2-impl.md", "n": 3, "group":
+  "C"}]` and `roadmap` `{"path": "g-roadmap.md", "sha_matches": true, "missing": false, "not_in_roadmap": []}`.
+- **Trigger:** `/plan-chain-runner status g-roadmap.md`.
+- **Expected (PASS):** `journal-path g-roadmap.md` finds the journal; the plans in the order #1, #2, #3
+  with their groups and the roadmap's path; nothing written.
+- **Red flags (FAIL):** The order of the file numbers; `journal-reconcile` or a session mark; the roadmap
+  applied again.
+
+## Scenario 21: A roadmap of another goal is refused
+
+- **Setup:** `h-roadmap.md` (`> Goal: h`, `roadmap-check` valid) lists `g-1-spec.md`, whose `journal-path`
+  gives `g-chain.json`.
+- **Trigger:** `/plan-chain-runner h-roadmap.md`.
+- **Expected (PASS):** Refusal "one run is one goal" naming both journals, before `journal-path --create`;
+  nothing written.
+- **Red flags (FAIL):** A run started; the spec registered in h's journal; the roadmap edited.

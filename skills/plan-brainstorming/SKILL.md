@@ -132,7 +132,7 @@ item for the whole checklist is enough.
 11. **Set consistency** — run `spec-set-check <dir> --goal <goal>` (see Set consistency): its `specs` lists the goal's specs, and `single-spec` (one spec) skips the rest of this step; with two or more specs check them together.
 12. **Goal roadmap** — write and check `<goal>-roadmap.md` (see Goal roadmap), then close with one report: the spec files, the set check's findings and what became of them, the roadmap, the BACKLOG lines, the journal and the command the user runs next. Stop.
 
-The terminal state is the goal roadmap and the closing report (in amend mode: the closing report, see Amend mode). Do not invoke `plan-writing`, `plan-chain-runner` or any other skill: the report names the command — `/plan-chain-runner <spec> [<spec>…]` with the specs in the roadmap's `#` order, or `/plan-writing <spec>` — and the user runs it.
+The terminal state is the goal roadmap and the closing report (in amend mode: the closing report, see Amend mode). Do not invoke `plan-writing`, `plan-chain-runner` or any other skill: the report names the command — `/plan-chain-runner <goal>-roadmap.md` (the run takes the roadmap's order, dependencies and notes), or `/plan-writing <spec>` — and the user runs it.
 
 ## Understanding the Idea
 
@@ -314,7 +314,7 @@ Step 12, always — also for one spec (one row, one node): the runner gets one e
 3. `roadmap-check <goal>-roadmap.md` must return `valid: true`.
 4. The BACKLOG line that points at the roadmap (Backlog, step 2), then the closing report (Checklist, step 12).
 
-A spec the user rejected is not written, so it is neither in the journal nor in the roadmap; the closing report names it. `Tier` and `Estimate` come from `spec-check` of each spec (`~N` = `volume.estimate_tasks`; `?` when it fails, `—` without `volume`, each with a warning). File numbers (`-N-spec.md`) are the order of writing, the column `#` the order of execution; they may differ. The roadmap is the input format of `plan-chain-runner` (`roadmap-parse`); until the runner takes it as an argument, the report names `/plan-chain-runner <spec> [<spec>…]` in `#` order.
+A spec the user rejected is not written, so it is neither in the journal nor in the roadmap; the closing report names it. `Tier` and `Estimate` come from `spec-check` of each spec (`~N` = `volume.estimate_tasks`; `?` when it fails, `—` without `volume`, each with a warning). File numbers (`-N-spec.md`) are the order of writing, the column `#` the order of execution; they may differ. The roadmap is the input of `plan-chain-runner` (`roadmap-parse`): the report names `/plan-chain-runner <goal>-roadmap.md`.
 
 ## Amend mode
 

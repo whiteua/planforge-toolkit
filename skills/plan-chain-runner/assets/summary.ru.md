@@ -2,6 +2,7 @@
 
 Итог: {{result}}
 Журнал: `{{journal_path}}`
+Roadmap цели: {{goal_roadmap_path}}
 Профиль: {{profile}}; время: {{duration}}
 Объём: {{cost_line}}
 

@@ -227,7 +227,7 @@ must be strengthened, not the test loosened.
 - **Trigger:** The user approves the spec file.
 - **Expected (PASS):** Backlog lines, `journal-path --create`, then `roadmap-write` (one row, one
   node) and `roadmap-check`; one closing report names the spec, the roadmap, the BACKLOG lines, the
-  journal and the command the user runs (`/plan-chain-runner <spec>` or `/plan-writing <spec>`).
+  journal and the command the user runs (`/plan-chain-runner <goal>-roadmap.md` or `/plan-writing <spec>`).
   No Skill call at all.
 - **Red flags (FAIL):** `plan-writing`, `plan-chain-runner` or any other skill invoked; "let me
   start the plan"; code or project files changed after the approval.

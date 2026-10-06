@@ -49,7 +49,7 @@ the invariants below hold for every AUDIT pass.
 bootstrap <workspace-root> <plan> [reports...] [--full]
 preflight <plan-dir> <next-open-name> <next-final-name>
 # journal start (Chain journal): journal-event … --stage audit --status running
-fingerprint-workspace <workspace-root> <start-json>
+fingerprint-workspace <workspace-root> <start-json> --plan <plan>
 # subsequent: rescan-scope <plan> <LAST_REPORT> --snapshot <start-json>   → <tmp>/scope.json
 #   incremental: carry-forward <LAST_REPORT> --scope <tmp>/scope.json --header <tmp>/bootstrap.json --out <NEXT_REPORT>
 # audit pass (AUDIT.md): first | incremental | full
@@ -58,10 +58,11 @@ fingerprint-workspace <workspace-root> <start-json>
 evidence-fingerprint <NEXT_REPORT> --snapshot <start-json> --plan <plan>
 task-census <plan> <NEXT_REPORT>
 validate-report <NEXT_REPORT> --root <workspace-root> --plan <plan>
-fingerprint-workspace <workspace-root> <current-json> --base <start-json>
-assert-readonly <start-json> <current-json> <NEXT_REPORT> <BACKLOG.md>
+fingerprint-workspace <workspace-root> <current-json> --plan <plan>
+assert-readonly <start-json> <current-json> <NEXT_REPORT> <BACKLOG.md> --plan <plan>
+# ignored_changed not empty or origin walk: one line in Additional Context, validate-report again
 # journal end (Chain journal): journal-finding per defect outside the plan (AUDIT.md),
-# journal-event … --stage audit --status done, journal-export-findings
+# journal-event … --stage audit --status done … --artifact guard=<origin>, journal-export-findings
 ```
 
 ## Bootstrap
@@ -85,27 +86,57 @@ assert-readonly <start-json> <current-json> <NEXT_REPORT> <BACKLOG.md>
 
 ## Fingerprint (read-only guard)
 
-`fingerprint-workspace` walks `WORKSPACE_ROOT`, skips the root `.gitignore` patterns and the fixed
-exclusions (`node_modules`, `.git/objects`, `__pycache__`, `dist`, `build`, `target`, `out`, `bin`,
-`obj`, `.next`, `.gradle`, `.venv`, `venv`, plus tool caches: `.pytest_cache`, `.mypy_cache`,
-`.ruff_cache`, `.hypothesis`, `.tox`, `.nox`, `.cache`, `.eslintcache`, `*.tsbuildinfo`), hashes every
-file (SHA-256) and stores `files` + `stats` (`[size, mtime_ns]`) as JSON. With `--base <prev-json>`
-(same root) files with unchanged size and mtime reuse the previous hash. More than 200 000 files →
-stop and ask the user to narrow the scope.
+`fingerprint-workspace <workspace-root> <out-json> --plan <MASTER_PLAN>` writes
+`brainstorm_tool.worktree_snapshot` of the working tree (without `plan-brainstorming` alongside:
+exit `1` `snapshot-unavailable`, and the audit does not start). With git (`origin: git`) the
+snapshot root is the repository's top level: `HEAD`, every path `git status` lists (a changed, new
+or deleted file git does not ignore with its blob hash, a new ignored file or folder by name only)
+and every ignored file of the plan's folder with its SHA-256. Clean tracked files are not read, so
+the cost follows the changes, not the size of the tree. Without git (`origin: walk`) every file
+under the root with size and mtime, the plan's folder with SHA-256, ignored by the root
+`.gitignore` only (an approximation: no nested `.gitignore`, no `!` lines). The file also keeps
+`workspace`, the root the command was given: evidence paths and relative allowed paths are spelled
+against it. `--base <json>` is accepted without effect (warning `base-ignored`); a failing git is
+exit `1` `snapshot-failed`. After exit `1`, when the journal is started, record the stop before
+ending: without a confirmation channel `journal-question` on the `audit` stage (`--text` the
+errors, `--option "fix the repository and re-run"`) and `journal-export-findings` (Chain journal).
+Output: `origin`, `root`, `plan_dir`, `entry_count`, `warnings`.
 
-Snapshot files live outside the workspace: `tempfile.mkstemp(prefix="fp-", suffix=".json",
-dir=tempfile.gettempdir())`, close the fd, pass the path.
+Snapshot files live outside the repository: `tempfile.mkstemp(prefix="fp-", suffix=".json",
+dir=tempfile.gettempdir())`, close the fd, pass the path (inside it: exit `2`
+`fingerprint-out-json-inside-workspace`).
 
-`assert-readonly <start> <current> <NEXT_REPORT> <BACKLOG.md>` allows exactly the paths given
-after the two snapshots. Pass `BACKLOG.md` as an absolute path when it lies inside
-`WORKSPACE_ROOT`; outside it is not fingerprinted, leave it out. Any other
-added/removed/modified path is the blocker `probe-mutated-workspace`: rewrite the same report with
-that single issue, run only `validate-report` again, stop with status OPEN. No second guard in the
-same invocation.
+`assert-readonly <start> <current> <NEXT_REPORT> <BACKLOG.md> --plan <MASTER_PLAN>` compares the
+two snapshots (`brainstorm_tool.worktree_diff`) and allows exactly the paths given after them
+(absolute, or relative to the workspace root). Pass `BACKLOG.md` as an absolute path when it lies
+inside the repository; outside it is not in the snapshot, leave it out. Outside the allowed paths:
 
-`snapshot-diff <before> <after>` lists `added`/`removed`/`modified` paths and their union
-`changed` (used by FIX). `.git/index` is excluded from the fingerprint, so read-only git commands
-(`git status`, `git diff`) do not trip the guard; commits, resets and checkouts still do.
+- a changed file git does not ignore, or any changed file of the plan's folder, is a violation; a
+  moved `HEAD` (a commit, reset or checkout) is the violation `HEAD` (`head_moved: true`);
+- a changed ignored path outside the plan's folder is `ignored_changed`: information, never a
+  violation (probe caches, build output in ignored folders). With git a write inside an ignored
+  file or folder that already existed there is not seen at all: the accepted blind spot.
+
+Without `--plan` the command warns `plan-unknown` and every changed ignored path is a violation:
+without the plan's folder an ignored file has no hash, only its appearing and vanishing are seen.
+A violation is the blocker `probe-mutated-workspace`: rewrite the same report with that single
+issue, run only `validate-report` again, stop with status OPEN. No second guard in the same
+invocation. The output also has `added`/`removed`/`modified` (the classes of `snapshot-diff`),
+`ignored_changed`, `head_moved`, `origin` and `warnings`.
+
+After `assert-readonly`, when `ignored_changed` is not empty or `origin` is `walk`, add one line to
+the report's `## Additional Context` (`## Дополнительный контекст`; a report without the section
+gets it before `## Task`), in the report's language: the number of `ignored_changed` paths, the
+first three, and the snapshot origin (`git`; `walk`: without git the root `.gitignore` is an
+approximation), e.g. `Охрана: снимок git, ignored_changed: 2 (.pytest_cache/, build/)`. Then run
+`validate-report` again. The journal end records the origin as `--artifact guard=<git|walk>`.
+
+`snapshot-diff <before> <after>` (used by FIX) gives `changed`: the changed paths without the
+ignored ones outside the plan's folder, which come only as `ignored_changed` and so never become
+`fix_files` or reach the commit. It splits `changed` into `added` (new and untracked), `removed`
+(the file is gone) and `modified` (a tracked file edited, a file reverted to `HEAD`, a changed file
+of the plan's folder such as a report's Fix Log), and gives `origin`. The paths are relative to the
+snapshot root: with git, the repository's top level.
 
 ## Evidence fingerprint and pass scope
 
@@ -113,16 +144,19 @@ same invocation.
 `## Evidence fingerprint` (`## Отпечаток улик` in a Russian report): one row `| path | SHA-256 |`
 per evidence file, that is every anchor path of the stages section and of issue `evidence`, and
 every file of the plan tasks' `Files` blocks (`brainstorm_tool.parse_plan_tasks`; a `Files` token
-that names no file is skipped). The pipeline's own files are never evidence: `BACKLOG.md` at the root and the chain files by exact name in the plan's folder (`CHAIN_FILE_RE`, a copy of plan-executor's `_CHAIN_FILE_RE`); a file with such a name elsewhere is ordinary evidence. The hashes come from this audit's start snapshot: the audit is
-read-only, so they still hold at the end of the pass. A file the snapshot skips (`.gitignore`,
-outside the root) is `excluded`, with a warning; an anchored file that does not exist is
-`missing`. A second run replaces the section whole; it stands before the Fix Log, else at the end.
-Without `plan-brainstorming` alongside only anchors count (warning `plan-files-unavailable`); a
-snapshot of another workspace (the plan is not under its root) → exit `2` `snapshot-root-mismatch`.
+that names no file is skipped). The pipeline's own files are never evidence: `BACKLOG.md` at the root and the chain files by exact name in the plan's folder (`CHAIN_FILE_RE`, a copy of plan-executor's `_CHAIN_FILE_RE`); a file with such a name elsewhere is ordinary evidence.
+Each file is hashed when the command runs (the snapshot does not hash clean files): the audit is
+read-only, and `assert-readonly` after `evidence-fingerprint` catches a change of an evidence file,
+except one ignored outside the plan's folder. The value is the SHA-256 of the content, as in older
+reports, so their tables stay comparable. A file that does not exist, or lies outside the workspace
+root, is `missing`; `excluded` is no longer written. A second run replaces the section whole; it
+stands before the Fix Log, else at the end. Without `plan-brainstorming` alongside only anchors
+count (warning `plan-files-unavailable`). `--snapshot` gives the workspace root: a snapshot of
+another workspace (the plan is not under its root) → exit `2` `snapshot-root-mismatch`.
 
 `rescan-scope <plan> <LAST_REPORT> --snapshot <start-json> [--ratio 0.5]` compares that table with
-the start snapshot of the current audit; rows of the pipeline's own files (an older report may hold `BACKLOG.md` as `excluded`) are left out. Output: `changed_files`, `missing_files` (hashed before,
-gone now), `unverified_files` (`excluded`/`missing` rows), `reaudit` (tasks whose anchors in the
+the evidence files hashed again now (the snapshot gives the workspace root); rows of the pipeline's own files (an older report may hold `BACKLOG.md` as `excluded`) are left out. Output: `changed_files`, `missing_files` (hashed before,
+gone now), `unverified_files` (`missing` rows, and the `excluded` rows of older reports: their tasks are re-audited once), `reaudit` (tasks whose anchors in the
 last report or whose plan `Files` name a changed, gone or unverified file; tasks not `✅`;
 `linked_items` of open issues; tasks closed by `evidence_probe` without an anchor; tasks new in the
 plan; the parent of every re-audited subtask), `carry` (the other tasks of the report),
@@ -198,14 +232,15 @@ as AUDIT.md describes.
     audit. A stage already `running` (the FIX of this cycle started it) needs no event.
 - **End** (after `assert-readonly`, also when the report became `probe-mutated-workspace`):
   1. each defect outside the plan: `J journal-finding … --skill plan-resolver …` (AUDIT.md);
-  2. `J journal-event <journal> --skill plan-resolver --plan P --stage audit --status done --input MASTER_PLAN --artifact report=<NEXT_REPORT relative to the journal's directory> --artifact status=<open|final> --artifact issues=<number of open issues> --artifact scope=<full|incremental>` (`scope` = the report's `audit_scope`);
+  2. `J journal-event <journal> --skill plan-resolver --plan P --stage audit --status done --input MASTER_PLAN --artifact report=<NEXT_REPORT relative to the journal's directory> --artifact status=<open|final> --artifact issues=<number of open issues> --artifact scope=<full|incremental> --artifact guard=<git|walk>` (`scope` = the report's `audit_scope`, `guard` = the `origin` of `assert-readonly`);
   3. `J journal-export-findings <journal>`.
-- **FIX**: after `snapshot-diff` and `mark-fix` (FIX-LOOP.md), every path of `changed` becomes a
-  repository-root path: `<prefix>` = `git -C <workspace-root> rev-parse --show-prefix` (empty at the
-  repository root), then one command for all of them:
-  `J journal-event <journal> --skill plan-resolver --plan P --stage audit --status running --artifact fix_files[]=<prefix><path> ...`
-  (one `--artifact` per file; outside git, the paths as they are). plan-executor's `commit` stage
-  commits exactly these files besides the run's own ones.
+- **FIX**: after `snapshot-diff` and `mark-fix` (FIX-LOOP.md), every path of `changed` is recorded
+  as it is: with git (`origin: git`) the snapshot root is the repository's top level, so the paths
+  are already repository-root paths (no `rev-parse --show-prefix` prefix); outside git, the paths as
+  they are. One command for all of them:
+  `J journal-event <journal> --skill plan-resolver --plan P --stage audit --status running --artifact fix_files[]=<path> ...`
+  (one `--artifact` per file; `ignored_changed` paths are never recorded). plan-executor's `commit`
+  stage commits exactly these files besides the run's own ones.
 - **Questions without a confirmation channel**: `bootstrap.stuck_open.ask_required` with a report
   that stayed open, and the gates `ask-user`, `stop-stalled`, `stop-limit` and
   `full-audit-required` (FIX-LOOP.md; its decision is "run the closing full pass:
@@ -234,12 +269,12 @@ as AUDIT.md describes.
 ```text
 bootstrap <workspace-root> <plan> [reports...] [--full]
 preflight <plan-dir> <next-open-name> <next-final-name>
-fingerprint-workspace <root> <out-json> [--base <prev-json>]
+fingerprint-workspace <root> <out-json> [--plan <plan>] [--base <prev-json>]
 evidence-fingerprint <report> --snapshot <start-json> --plan <plan>
 rescan-scope <plan> <last-report> --snapshot <start-json> [--ratio 0.5]
 carry-forward <last-report> --scope <json> --header <json> --out <report>
 snapshot-diff <before-json> <after-json>
-assert-readonly <start-json> <current-json> <allowed-path>...
+assert-readonly <start-json> <current-json> <allowed-path>... [--plan <plan>]
 parse-report <report.md>
 validate-report <report.md> [--root <workspace-root>] [--plan <plan>]
 task-census <plan> <report>
@@ -254,7 +289,9 @@ cycle-check <prev-report> <new-report> <cycle> [limit=2]
 Exit codes: `0` ok; `1` the check ran and the contract is violated (`validate-report`,
 `assert-readonly`, `assert-protected`, `task-census`, `mark-fix`, `preflight` target exists,
 `discover` without exactly one candidate, `carry-forward` with a `full` scope); `2` bad input or
-filesystem; `64` `bootstrap` found a `-final` report.
+filesystem; `64` `bootstrap` found a `-final` report. `fingerprint-workspace`, `snapshot-diff` and
+`assert-readonly` also exit `1` with `snapshot-unavailable` (`plan-brainstorming` is not installed
+alongside), `fingerprint-workspace` with `snapshot-failed` (git failed).
 
 `task-census` exit `2` with `task-census-no-units` means the plan has no recognisable task units
 (no headings, numbered items, bullets or a roadmap table): stop and ask the user for a structured

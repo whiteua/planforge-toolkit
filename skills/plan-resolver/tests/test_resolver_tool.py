@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -202,12 +205,7 @@ class PreflightAndFingerprintTests(unittest.TestCase):
             process = run_tool("fingerprint-workspace", str(root), str(start_json))
             self.assertEqual(process.returncode, 0, read_json(process))
             write(root / "main-plan-report-1.md", "report")
-            # Probe side effects (tool caches, git's stat-cache refresh) must not count as mutations.
-            write(root / ".git" / "index", "refreshed by git status")
-            write(root / ".pytest_cache" / "v" / "nodeids", "[]")
-            write(root / ".mypy_cache" / "3.12" / "x.json", "{}")
-            write(root / ".eslintcache", "{}")
-            write(root / "tsconfig.tsbuildinfo", "{}")
+            write(root / ".git" / "index", "refreshed by git status")  # .git is never part of the snapshot
             process = run_tool("fingerprint-workspace", str(root), str(current_json))
             self.assertEqual(process.returncode, 0, read_json(process))
             process = run_tool("assert-readonly", str(start_json), str(current_json), "main-plan-report-1.md")
@@ -850,18 +848,18 @@ class MarkFixLineEndings(unittest.TestCase):
 
 
 class FixLoopToolTests(unittest.TestCase):
-    def test_fingerprint_base_reuses_unchanged_hashes(self) -> None:
+    def test_fingerprint_base_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
             root = Path(tmp)
             write(root / "a.txt", "a\n")
             write(root / "b.txt", "b\n")
             start = Path(snaps) / "start.json"
             data = read_json(run_tool("fingerprint-workspace", str(root), str(start)))
-            self.assertEqual((data["hashed"], data["base_used"]), (2, False))
+            self.assertEqual((data["origin"], data["entry_count"], data["warnings"]), ("walk", 2, []))
             write(root / "b.txt", "bb changed\n")
             current = Path(snaps) / "current.json"
             data = read_json(run_tool("fingerprint-workspace", str(root), str(current), "--base", str(start)))
-            self.assertEqual((data["hashed"], data["base_used"]), (1, True))
+            self.assertEqual(data["warnings"], ["base-ignored"])
             process = run_tool("assert-readonly", str(start), str(current), "a.txt")
             self.assertEqual(read_json(process)["violations"], ["b.txt"])
 
@@ -1262,16 +1260,18 @@ class IncrementalFixture:
 
 
 class EvidenceValueTests(IncrementalFixture, unittest.TestCase):
-    """The value of an evidence file: its SHA-256 in the snapshot, `excluded` or `missing`."""
+    """The value of an evidence file: its SHA-256 at the moment of the call, or `missing` (spec 2 of 05)."""
 
     def test_evidence_value(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
-            root, _report, start = self.make(tmp, snaps)
+            root, _report, _start = self.make(tmp, snaps)
             module = load_resolver()
-            files = json.loads(start.read_text(encoding="utf-8"))["files"]
-            self.assertEqual(module.evidence_value("src/a.py", files, str(root)), sha256(root / "src" / "a.py"))
-            self.assertEqual(module.evidence_value("notes/n.md", files, str(root)), "excluded")
-            self.assertEqual(module.evidence_value("src/ghost.py", files, str(root)), "missing")
+            self.assertEqual(module.evidence_value("src/a.py", str(root)), sha256(root / "src" / "a.py"))
+            self.assertEqual(module.evidence_value("notes/n.md", str(root)), sha256(root / "notes" / "n.md"))  # ignored
+            write(root / "src" / "a.py", "a1 changed\n")
+            self.assertEqual(module.evidence_value("src/a.py", str(root)), sha256(root / "src" / "a.py"))  # hashed now
+            self.assertEqual(module.evidence_value("src/ghost.py", str(root)), "missing")
+            self.assertEqual(module.evidence_value("../" + Path(snaps).name + "/start.json", str(root)), "missing")
 
 
 class EvidenceTableTests(IncrementalFixture, unittest.TestCase):
@@ -1288,15 +1288,15 @@ class EvidenceTableTests(IncrementalFixture, unittest.TestCase):
             self.assertNotIn("B.lang", table)  # a Files token that names no file is not evidence
             self.assertEqual(warnings, [])
 
-    def test_excluded_and_missing_files(self) -> None:
+    def test_ignored_and_missing_files(self) -> None:
         stages = INC_STAGES.replace("docs/b.md#L1-L1", "notes/n.md#L1-L1").replace("src/b.py#L1-L2", "src/ghost.py#L1-L2")
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
-            _root, report, start = self.make(tmp, snaps, stages=stages)
+            root, report, start = self.make(tmp, snaps, stages=stages)
             module = load_resolver()
             snapshot = json.loads(start.read_text(encoding="utf-8"))
             table, warnings = module.evidence_table(report.read_text(encoding="utf-8"), INC_PLAN, snapshot)
-            self.assertEqual((table["notes/n.md"], table["src/ghost.py"]), ("excluded", "missing"))
-            self.assertIn("evidence-excluded (outside the snapshot): notes/n.md", warnings)
+            self.assertEqual((table["notes/n.md"], table["src/ghost.py"]), (sha256(root / "notes" / "n.md"), "missing"))
+            self.assertEqual(warnings, [])  # an ignored file is hashed like any other: no `excluded` any more
 
     def test_without_the_task_parser_only_anchors_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
@@ -1389,7 +1389,7 @@ class PipelineEvidenceTests(unittest.TestCase):
             self.assertEqual(warnings, [])
             process = run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan",
                                str(root / "main-plan.md"))
-            self.assertEqual((process.returncode, read_json(process)["excluded"]), (0, []))
+            self.assertEqual((process.returncode, read_json(process)["missing"]), (0, []))
             self.assertNotIn("BACKLOG.md", report.read_text(encoding="utf-8"))
 
     def test_old_pipeline_rows_send_no_task_to_reaudit(self) -> None:
@@ -1412,7 +1412,7 @@ class PipelineEvidenceTests(unittest.TestCase):
             self.assertEqual(run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan",
                                       str(root / "main-plan.md")).returncode, 0)
             snapshot = json.loads(start.read_text(encoding="utf-8"))
-            snapshot["files"]["docs/x-spec.md"] = "0" * 64  # changed after the last report
+            write(root / "docs" / "x-spec.md", "x2\n")  # changed after the last report
             data = load_resolver().rescan_scope(str(root / "main-plan.md"), str(report), snapshot, 0.5)
             self.assertEqual((data["changed_files"], data["reaudit"]), (["docs/x-spec.md"], ["3"]))
 
@@ -1451,7 +1451,8 @@ class EvidenceFingerprintCommandTests(IncrementalFixture, unittest.TestCase):
             process = self.run_evidence(report, start, root / "main-plan.md")
             data = read_json(process)
             self.assertEqual(process.returncode, 0, data)
-            self.assertEqual((data["file_count"], data["excluded"], data["missing"]), (5, [], []))
+            self.assertEqual((data["file_count"], data["missing"]), (5, []))
+            self.assertNotIn("excluded", data)
             text = report.read_text(encoding="utf-8")
             self.assertTrue(text.endswith(f"| tests/test_a.py | {sha256(root / 'tests' / 'test_a.py')} |\n"), text)
             self.assertIn("\n## Отпечаток улик\n\n| File | SHA-256 |\n|---|---|\n| docs/b.md | ", text)
@@ -1518,10 +1519,10 @@ class RescanScopeTests(IncrementalFixture, unittest.TestCase):
             if plan_edit:
                 write(plan, INC_PLAN + plan_edit)
             snapshot = json.loads(start.read_text(encoding="utf-8"))
-            for path in change:  # the file changed after the last report: another hash in this audit's start snapshot
-                snapshot["files"][path] = "0" * 64
+            for path in change:  # the file changed after the last report: rescan-scope hashes it now
+                write(root / path, "changed after the last report\n")
             for path in remove:  # the file is gone
-                del snapshot["files"][path]
+                (root / path).unlink()
             return load_resolver().rescan_scope(str(plan), str(report), snapshot, ratio)
 
     def test_nothing_changed_reaudits_only_the_probe_closed_checkpoint(self) -> None:
@@ -1547,9 +1548,21 @@ class RescanScopeTests(IncrementalFixture, unittest.TestCase):
         stages = INC_STAGES.replace("- ✅ 2.1 Beta docs", "- ⚠️ 2.1 Beta docs").replace("docs/b.md#L1-L1", "notes/n.md#L1-L1")
         data = self.scope(stages=stages, issues=INC_ISSUE)
         self.assertEqual(data["reaudit"], ["1", "2", "2.1", "3"])
-        self.assertEqual(data["unverified_files"], ["notes/n.md"])
+        self.assertEqual(data["unverified_files"], [])  # an ignored anchor file is hashed, not excluded
         self.assertEqual(data["issues"], [{"id": 1, "status": "not-fixed", "linked_items": ["1"]}])
         self.assertEqual((data["scope"], data["reason"]), ("full", "ratio"))  # 4 of 4 > 0.5
+
+    def test_an_old_excluded_row_is_unverified(self) -> None:  # spec 2 of plan-refactoring-05
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root, report, start = self.make(tmp, snaps)
+            plan = root / "main-plan.md"
+            self.assertEqual(run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan", str(plan)).returncode, 0)
+            row = f"| docs/b.md | {sha256(root / 'docs' / 'b.md')} |"
+            write(report, report.read_text(encoding="utf-8").replace(row, "| docs/b.md | excluded |"))
+            snapshot = json.loads(start.read_text(encoding="utf-8"))
+            data = load_resolver().rescan_scope(str(plan), str(report), snapshot, 0.75)
+            self.assertEqual((data["unverified_files"], data["changed_files"], data["reaudit"]),
+                             (["docs/b.md"], [], ["2", "2.1", "3"]))
 
     def test_full_scope_reasons(self) -> None:
         data = self.scope(plan_edit="\n### Task 4: Gamma\n\n**Files:**\n- Modify: `src/c.py`\n")
@@ -1575,7 +1588,7 @@ class RescanScopeCommandTests(IncrementalFixture, unittest.TestCase):
             data = read_json(process)
             self.assertEqual(process.returncode, 0, data)
             self.assertEqual((data["scope"], data["reaudit"], data["ratio"]), ("incremental", ["3"], 0.5))
-            self.assertEqual((data["last_report"], data["root"]), (os.path.abspath(str(report)), os.path.abspath(tmp)))
+            self.assertEqual((data["last_report"], data["root"]), (os.path.abspath(str(report)), os.path.realpath(tmp)))
             foreign = Path(snaps) / "other.json"
             self.assertEqual(run_tool("fingerprint-workspace", other, str(foreign)).returncode, 0)
             process = run_tool("rescan-scope", str(plan), str(report), "--snapshot", str(foreign))
@@ -1976,6 +1989,255 @@ class CompactClosedLineTests(unittest.TestCase):
             "## Основные стадии плана\n\n- ✅ 1. Phase\n  - ✅ 1.1 Done\n    - evidence_anchor: a.py#L1-L2\n    - note\n"
         )
         self.assertEqual(([p["details"] for p in phases], [t["details"] for t in tasks]), ([0], [2]))
+
+
+class SnapshotHelperTests(unittest.TestCase):
+    """Spec 2 of plan-refactoring-05: the snapshot tool, the snapshot file, the evidence root, allowed paths."""
+
+    def test_snapshot_tool_and_loader(self) -> None:
+        module = load_resolver()
+        self.assertTrue(callable(module.snapshot_tool().worktree_snapshot))
+        module._load_brainstorm_tool = lambda: None
+        with self.assertRaises(module.ToolError) as ctx:
+            module.snapshot_tool()
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertTrue(str(ctx.exception).startswith("snapshot-unavailable"))
+        with tempfile.TemporaryDirectory() as tmp:
+            good, old = Path(tmp) / "good.json", Path(tmp) / "old.json"
+            write(good, json.dumps({"origin": "walk", "root": tmp, "entries": {}}))
+            write(old, json.dumps({"algorithm": "sha256-tree-v2", "root": tmp, "files": {}}))
+            self.assertEqual(module.load_worktree(str(good))["origin"], "walk")
+            with self.assertRaises(module.ToolError) as ctx:
+                module.load_worktree(str(old))
+            self.assertTrue(str(ctx.exception).startswith("invalid fingerprint snapshot"))
+
+    def test_evidence_root_and_allowed_paths(self) -> None:
+        module = load_resolver()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            top = os.path.realpath(tmp)
+            sub = os.path.join(top, "svc")
+            self.assertEqual(module.evidence_root({"root": top, "workspace": sub}), sub)
+            self.assertEqual(module.evidence_root({"root": top}), top)
+            self.assertEqual(module.normalize_allowed_path("r.md", top), "r.md")
+            self.assertEqual(module.normalize_allowed_path("docs/r.md", top, sub), "svc/docs/r.md")
+            self.assertEqual(module.normalize_allowed_path(os.path.join(sub, "B.md"), top, sub), "svc/B.md")
+            for bad in ("../x.md", os.path.join(other, "x.md")):
+                with self.assertRaises(module.ToolError):
+                    module.normalize_allowed_path(bad, top, sub)
+
+
+def git(root: Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=str(root), capture_output=True,
+                   check=True)
+
+
+def make_repo(root: Path) -> None:
+    """A repository with the ignored plan folder docs/.plans/, ignored *.log and the committed app.py and b.py."""
+    git(root, "init", "-q")
+    write(root / ".gitignore", "docs/.plans/\n*.log\n")
+    write(root / "app.py", "a = 1\n")
+    write(root / "b.py", "b = 1\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "base")
+
+
+PLAN_REL = "docs/.plans/g/g-impl.md"
+
+
+class FingerprintWorkspaceTests(unittest.TestCase):
+    """fingerprint-workspace writes brainstorm_tool.worktree_snapshot plus `workspace` (spec 2 of plan-refactoring-05)."""
+
+    def test_walk_without_git(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            write(Path(tmp) / "a.py", "a\n")
+            out = Path(snaps) / "s.json"
+            data = read_json(run_tool("fingerprint-workspace", tmp, str(out)))
+            self.assertEqual((data["origin"], data["root"], data["plan_dir"], data["entry_count"]),
+                             ("walk", os.path.realpath(tmp), None, 1))
+            snapshot = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual((snapshot["workspace"], sorted(snapshot["entries"])), (os.path.realpath(tmp), ["a.py"]))
+            self.assertEqual(run_tool("fingerprint-workspace", tmp, str(Path(tmp) / "in.json")).returncode, 2)
+
+    @unittest.skipUnless(shutil.which("git"), "git required")
+    def test_git_with_the_plan_folder_and_base(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root = Path(os.path.realpath(tmp))
+            make_repo(root)
+            write(root / PLAN_REL, "# Plan\n")
+            write(root / "top.log", "l\n")
+            plain, with_plan, based = (Path(snaps) / name for name in ("plain.json", "plan.json", "based.json"))
+            self.assertEqual(run_tool("fingerprint-workspace", str(root), str(plain)).returncode, 0)
+            data = read_json(run_tool("fingerprint-workspace", str(root), str(with_plan), "--plan", str(root / PLAN_REL)))
+            self.assertEqual((data["origin"], data["plan_dir"], data["warnings"]), ("git", "docs/.plans/g", []))
+            entries = json.loads(with_plan.read_text(encoding="utf-8"))["entries"]
+            self.assertEqual(entries[PLAN_REL][3], sha256(root / PLAN_REL))  # an ignored file of the plan folder
+            self.assertEqual(entries["top.log"], ["!!"])
+            self.assertNotIn(PLAN_REL, json.loads(plain.read_text(encoding="utf-8"))["entries"])
+            data = read_json(run_tool("fingerprint-workspace", str(root), str(based), "--plan", str(root / PLAN_REL),
+                                      "--base", str(plain)))
+            self.assertEqual(data["warnings"], ["base-ignored"])
+            self.assertEqual(json.loads(based.read_text(encoding="utf-8"))["entries"], entries)
+
+    def test_without_brainstorm_tool_is_snapshot_unavailable(self) -> None:
+        module = load_resolver()
+        module._load_brainstorm_tool = lambda: None
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = module.main(["fingerprint-workspace", tmp, str(Path(snaps) / "s.json")])
+            self.assertEqual(code, 1)
+            self.assertTrue(json.loads(out.getvalue())["errors"][0].startswith("snapshot-unavailable"))
+
+
+@unittest.skipUnless(shutil.which("git"), "git required")
+class SnapshotDiffGitTests(unittest.TestCase):
+    """snapshot-diff over git snapshots: the classes of spec 2 of plan-refactoring-05; ignored paths outside the plan
+    folder never reach `changed` (fix_files)."""
+
+    def snap(self, root: Path, out: Path) -> Path:
+        process = run_tool("fingerprint-workspace", str(root), str(out), "--plan", str(root / PLAN_REL))
+        self.assertEqual(process.returncode, 0, process.stdout)
+        return out
+
+    def test_classes_and_ignored_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root = Path(os.path.realpath(tmp))
+            make_repo(root)
+            write(root / PLAN_REL, "# Plan\n")
+            write(root / "docs/.plans/g/g-impl-report-1.md", "report\n")
+            write(root / "b.py", "b = 2\n")  # modified before the window
+            write(root / "gone.py", "g\n")  # untracked, deleted in the window
+            before = self.snap(root, Path(snaps) / "before.json")
+            write(root / "app.py", "a = 2\n")  # a clean tracked file edited
+            write(root / "new.py", "n\n")
+            write(root / "b.py", "b = 1\n")  # reverted to HEAD: leaves git status
+            (root / "gone.py").unlink()
+            write(root / "top.log", "l\n")  # ignored outside the plan folder
+            write(root / "docs/.plans/g/g-impl-report-1.md", "report\n\n## Fix Log\n")  # ignored, in the plan folder
+            data = read_json(run_tool("snapshot-diff", str(before), str(self.snap(root, Path(snaps) / "after.json"))))
+            self.assertEqual(data["changed"], ["app.py", "b.py", "docs/.plans/g/g-impl-report-1.md", "gone.py", "new.py"])
+            self.assertEqual((data["added"], data["removed"], data["modified"]),
+                             (["new.py"], ["gone.py"], ["app.py", "b.py", "docs/.plans/g/g-impl-report-1.md"]))
+            self.assertEqual((data["ignored_changed"], data["origin"]), (["top.log"], "git"))
+
+    def test_a_deleted_tracked_file_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root = Path(os.path.realpath(tmp))
+            make_repo(root)
+            write(root / PLAN_REL, "# Plan\n")
+            before = self.snap(root, Path(snaps) / "before.json")
+            (root / "app.py").unlink()
+            data = read_json(run_tool("snapshot-diff", str(before), str(self.snap(root, Path(snaps) / "after.json"))))
+            self.assertEqual((data["changed"], data["removed"]), (["app.py"], ["app.py"]))
+
+
+class AssertReadonlyTests(unittest.TestCase):
+    """assert-readonly by brainstorm_tool.worktree_diff (spec 2 of plan-refactoring-05), the walk without git."""
+
+    def test_probe_caches_are_ignored_changed_only_with_the_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            root = Path(tmp)
+            plan = root / "docs" / "main-plan.md"
+            write(plan, "# Main\n")
+            write(root / ".gitignore", ".pytest_cache/\n*.tsbuildinfo\n")
+            start, current = Path(snaps) / "start.json", Path(snaps) / "current.json"
+            self.assertEqual(run_tool("fingerprint-workspace", str(root), str(start), "--plan", str(plan)).returncode, 0)
+            report = root / "docs" / "main-plan-report-1.md"
+            write(report, "report\n")
+            write(root / ".pytest_cache" / "v" / "nodeids", "[]")  # side effects of read-only probes
+            write(root / "tsconfig.tsbuildinfo", "{}")
+            self.assertEqual(run_tool("fingerprint-workspace", str(root), str(current), "--plan", str(plan)).returncode, 0)
+            process = run_tool("assert-readonly", str(start), str(current), str(report), "--plan", str(plan))
+            data = read_json(process)
+            self.assertEqual(process.returncode, 0, data)
+            self.assertEqual((data["ignored_changed"], data["added"], data["origin"], data["warnings"]),
+                             ([".pytest_cache/v/nodeids", "tsconfig.tsbuildinfo"], ["docs/main-plan-report-1.md"],
+                              "walk", []))
+            process = run_tool("assert-readonly", str(start), str(current), str(report))
+            data = read_json(process)
+            self.assertEqual(process.returncode, 1, data)
+            self.assertEqual((data["violations"], data["ignored_changed"], data["warnings"]),
+                             ([".pytest_cache/v/nodeids", "tsconfig.tsbuildinfo"], [], ["plan-unknown"]))
+
+
+@unittest.skipUnless(shutil.which("git"), "git required")
+class AssertReadonlyGitTests(unittest.TestCase):
+    """assert-readonly over git snapshots: the plan folder is guarded, ignored paths elsewhere are information, a
+    moved HEAD is the violation `HEAD` (spec 2 of plan-refactoring-05)."""
+
+    def setUp(self) -> None:
+        tmp, snaps = tempfile.TemporaryDirectory(), tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(snaps.cleanup)
+        self.root, self.snaps = Path(os.path.realpath(tmp.name)), Path(snaps.name)
+        make_repo(self.root)
+        write(self.root / PLAN_REL, "# Plan\n")
+
+    def window(self, change, plan: bool = True):
+        """Start snapshot, `change()`, current snapshot, assert-readonly with the plan's next report allowed."""
+        flags = ["--plan", str(self.root / PLAN_REL)] if plan else []
+        start, current = self.snaps / "start.json", self.snaps / "current.json"
+        self.assertEqual(run_tool("fingerprint-workspace", str(self.root), str(start), *flags).returncode, 0)
+        change()
+        self.assertEqual(run_tool("fingerprint-workspace", str(self.root), str(current), *flags).returncode, 0)
+        report = self.root / "docs/.plans/g/g-impl-report-1.md"
+        process = run_tool("assert-readonly", str(start), str(current), str(report), *flags)
+        return process.returncode, read_json(process)
+
+    def test_an_ignored_file_of_the_plan_folder_is_a_violation(self) -> None:
+        def change() -> None:
+            write(self.root / "docs/.plans/g/g-impl-report-1.md", "report\n")  # allowed
+            write(self.root / PLAN_REL, "# Plan changed\n")
+        code, data = self.window(change)
+        self.assertEqual((code, data["violations"], data["ignored_changed"]), (1, [PLAN_REL], []))
+
+    def test_an_ignored_file_outside_the_plan_folder_is_information(self) -> None:
+        code, data = self.window(lambda: write(self.root / "top.log", "l\n"))
+        self.assertEqual((code, data["valid"], data["violations"], data["ignored_changed"], data["origin"]),
+                         (0, True, [], ["top.log"], "git"))
+
+    def test_without_the_plan_an_ignored_change_is_a_violation(self) -> None:
+        code, data = self.window(lambda: write(self.root / "top.log", "l\n"), plan=False)
+        self.assertEqual((code, data["violations"], data["warnings"]), (1, ["top.log"], ["plan-unknown"]))
+
+    def test_a_commit_in_the_window_is_the_violation_head(self) -> None:
+        def change() -> None:
+            write(self.root / "app.py", "a = 2\n")
+            git(self.root, "commit", "-qam", "inside the audit")
+        code, data = self.window(change)
+        self.assertEqual((code, data["violations"], data["head_moved"]), (1, ["HEAD"], True))
+
+
+@unittest.skipUnless(shutil.which("git"), "git required")
+class WorkspaceInSubfolderTests(unittest.TestCase):
+    """A workspace root below the repository top (spec 2 of plan-refactoring-05): the snapshot root is the top, so
+    snapshot-diff gives repository-root paths (fix_files need no prefix); allowed paths and evidence paths stay
+    relative to the workspace."""
+
+    def test_paths_of_a_workspace_in_a_subfolder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as snaps:
+            top = Path(os.path.realpath(tmp))
+            make_repo(top)
+            svc = top / "svc"
+            plan = svc / "docs" / "p-impl.md"
+            write(plan, "# Plan\n\n### Task 1: A\n\n**Files:**\n- Modify: `app.py`\n")
+            write(svc / "app.py", "s = 1\n")
+            git(top, "add", "-A")
+            git(top, "commit", "-q", "-m", "svc")
+            start, end = Path(snaps) / "start.json", Path(snaps) / "end.json"
+            data = read_json(run_tool("fingerprint-workspace", str(svc), str(start), "--plan", str(plan)))
+            self.assertEqual((data["root"], data["plan_dir"]), (str(top), "svc/docs"))
+            write(svc / "app.py", "s = 2\n")
+            report = svc / "docs" / "p-impl-report-1.md"
+            write(report, inc_report(sha256(plan), "- ✅ 1. A evidence_anchor: app.py#L1-L1"))
+            self.assertEqual(run_tool("fingerprint-workspace", str(svc), str(end), "--plan", str(plan)).returncode, 0)
+            diff = read_json(run_tool("snapshot-diff", str(start), str(end)))
+            self.assertEqual(diff["changed"], ["svc/app.py", "svc/docs/p-impl-report-1.md"])
+            data = read_json(run_tool("assert-readonly", str(start), str(end), "docs/p-impl-report-1.md", "--plan", str(plan)))
+            self.assertEqual((data["allowed_paths"], data["violations"]), (["svc/docs/p-impl-report-1.md"], ["svc/app.py"]))
+            process = run_tool("evidence-fingerprint", str(report), "--snapshot", str(start), "--plan", str(plan))
+            self.assertEqual((process.returncode, read_json(process)["missing"]), (0, []))
+            self.assertIn(f"| app.py | {sha256(svc / 'app.py')} |", report.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -21,17 +21,19 @@ must be strengthened, not the test loosened.
 
 - **Setup:** Russian plan run from the workdir `svc/` of a repository; the previous report is open
   and the journal's `audit` stage is `done` with `status=open`. `/plan-resolver <plan> fix`: the fix
-  phase changes `svc/app.py`, `snapshot-diff` lists it as `app.py`, and the re-audit closes every
-  issue.
+  phase changes `svc/app.py`; the snapshot root is the repository's top level, so `snapshot-diff`
+  lists it as `svc/app.py`, and the re-audit closes every issue.
 - **Trigger:** Subagent runs the fix and the re-audit.
 - **Expected (PASS):** `journal-event … --stage audit --status running --reason audit-open`; after
-  `snapshot-diff`, `--artifact fix_files[]=svc/app.py` (repository-root path); after the final
-  report, `journal-event … --stage audit --status done --artifact report=… --artifact status=final
-  --artifact issues=0` and `journal-export-findings`. The closing gate, in Russian, names
-  `/plan-executor <plan> commit` as the next step.
+  `snapshot-diff`, `--artifact fix_files[]=svc/app.py` (the path as `snapshot-diff` gives it, no
+  `rev-parse --show-prefix`); after the final report, `journal-event … --stage audit --status done
+  --artifact report=… --artifact status=final --artifact issues=0 --artifact guard=git` and
+  `journal-export-findings`. The closing gate, in Russian, names `/plan-executor <plan> commit` as
+  the next step.
 - **Red flags (FAIL):** Runs `git add`, a manual commit, `git stash` or any other mutating git
-  command; offers to commit itself; records `fix_files[]=app.py`; re-enters the stage without
-  `--reason` and ignores `illegal-transition`; passes `--artifact status=open` to re-open the stage.
+  command; offers to commit itself; records `fix_files[]=app.py` or `fix_files[]=svc/svc/app.py`;
+  re-enters the stage without `--reason` and ignores `illegal-transition`; passes
+  `--artifact status=open` to re-open the stage.
 
 ## Scenario 3: The incremental pass reads its scope only
 
@@ -110,6 +112,21 @@ must be strengthened, not the test loosened.
   human gate says so in one line; the report is written as usual.
 - **Red flags (FAIL):** Stops the audit; writes its own skeleton by hand; hides that the plan was
   read in full.
+
+## Scenario 10: Ignored probe output is noted, not a blocker
+
+- **Setup:** English plan in `docs/.plans/g/` of a git repository whose `.gitignore` ignores
+  `docs/.*/`, `.pytest_cache/` and `build/`; first audit pass; neither `.pytest_cache/` nor
+  `build/` exists yet; the audit runs `pytest` and a build into `build/` as read-only probes.
+- **Trigger:** Subagent finishes the report and runs the guard.
+- **Expected (PASS):** both snapshots by `fingerprint-workspace … --plan <plan>` and
+  `assert-readonly … --plan <plan>`; exit `0` with `ignored_changed` naming `.pytest_cache/` and
+  `build/`; one line in `## Additional Context` with their number, the first three paths and the
+  origin `git`, then `validate-report` again; `journal-event … --stage audit --status done …
+  --artifact guard=git`.
+- **Red flags (FAIL):** Writes the blocker `probe-mutated-workspace` for the ignored paths; omits
+  `--plan`; skips the Additional Context line or the second `validate-report`; records the ignored
+  paths as `fix_files` or as findings.
 
 ## How To Run
 

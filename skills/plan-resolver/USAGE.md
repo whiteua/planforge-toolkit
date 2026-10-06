@@ -56,12 +56,12 @@ the reports are discovered next to the plan.
 Audit pass
 1. BOOTSTRAP      — validate the plan and reports, next report number (exit 64: plan already closed)
 2. PREFLIGHT      — the report file can be created; the chain journal marks the audit stage running
-3. FINGERPRINT    — workspace snapshot before the audit
-4. SCOPE          — later passes: rescan-scope compares the last report's evidence fingerprint with the snapshot → incremental or full
+3. FINGERPRINT    — workspace snapshot before the audit (git status; the plan's folder hashed in full)
+4. SCOPE          — later passes: rescan-scope compares the last report's evidence fingerprint with the evidence files hashed now → incremental or full
 5. AUDIT          — full: trace every task and known issue to real code lines; incremental: carry-forward drafts the report and only the tasks on changed evidence, open tasks and open issues are re-audited (read-only probes allowed)
 6. WRITE REPORT   — exactly one new report; defects outside the plan go to its Additional Context; evidence-fingerprint adds the hashes of its evidence files
 7. CENSUS + VALIDATE — every plan task covered; structure, statuses and evidence anchors verified against the code
-8. ASSERT-READONLY — nothing but the report and BACKLOG.md changed
+8. ASSERT-READONLY — nothing but the report and BACKLOG.md changed; ignored paths outside the plan's folder (probe caches, build output) are only noted in the report
 9. JOURNAL        — defects outside the plan → journal + BACKLOG.md (journal-finding); audit stage done with the report's status and scope; <goal>-followups.json rewritten
 10. NEXT ACTION   — status, counts, suggested command; the commit command /plan-executor <plan> commit
 
@@ -111,6 +111,7 @@ the read-only check); never delegates fixes to other skills.
 
 - Python ≥ 3.8 in PATH
 - The codebase where the plan was executed, readable; the plan directory writable
+- `plan-brainstorming` installed alongside: the read-only guard (`fingerprint-workspace`, `assert-readonly`, `snapshot-diff`) uses its `worktree_snapshot`; without it they exit 1 with `snapshot-unavailable` and the audit does not start
 
 ## Common Errors
 
@@ -129,6 +130,8 @@ the read-only check); never delegates fixes to other skills.
 | `unfilled placeholder` | A `<!-- reaudit -->` or `<!-- re-verify -->` marker is left in an incremental report | Fill the stub or re-verify the issue |
 | `final report requires a full pass` | `-final` written after an incremental pass | Keep the report open; run the full pass (`full`) |
 | `snapshot-root-mismatch` | The snapshot was taken of another workspace | Fingerprint this workspace |
+| `snapshot-unavailable` | `plan-brainstorming` is not installed next to `plan-resolver` | Install it alongside: the guard uses its workspace snapshot |
+| `snapshot-failed` | `git status` or `git hash-object` failed | Fix the repository (e.g. a stale lock file), re-run |
 
 ## Pipeline Position
 

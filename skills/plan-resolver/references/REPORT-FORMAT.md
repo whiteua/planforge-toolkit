@@ -138,13 +138,15 @@ end; the templates end with the placeholder `{{evidence_fingerprint}}`, which th
 | File | SHA-256 |
 |---|---|
 | skills/x/scripts/tool.py | <64 hex> |
-| notes/local.md | excluded |
+| src/removed.py | missing |
 ```
 
 One row per evidence file: the anchors of the stages section and of issue `evidence`, and the files
-of the plan tasks' `Files` blocks, never `BACKLOG.md` or a chain file of the plan's folder. The value is the file's SHA-256 at the start of the audit,
-`excluded` (outside the snapshot) or `missing` (an anchored file that does not exist); any other
-row is an error. The next pass compares the table with its own start snapshot (`rescan-scope`).
+of the plan tasks' `Files` blocks, never `BACKLOG.md` or a chain file of the plan's folder. The value
+is the file's SHA-256 when `evidence-fingerprint` runs (the audit is read-only, `assert-readonly`
+checks it) or `missing` (an anchored file that does not exist); `excluded` is no longer written,
+but an `excluded` row of an older report stays valid and makes its file unverified for the next
+pass. Any other row is an error. The next pass hashes the same files again (`rescan-scope`).
 
 ## Fix Log
 

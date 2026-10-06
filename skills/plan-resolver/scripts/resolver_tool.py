@@ -6,7 +6,6 @@ Stdlib only. Python 3.8+.
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import functools
 import hashlib
 import importlib.util
@@ -75,14 +74,13 @@ FIXED_EXCLUDED_DIRS = {
     ".venv",
     "venv",
 }
-# .git/index: read-only git commands (status, diff) refresh its stat cache. HEAD and refs stay
-# in the fingerprint, so commits, resets and checkouts are still detected.
+# The fixed lists only keep discover_open_plans out of these folders: the workspace snapshot is
+# brainstorm_tool.worktree_snapshot (spec 2 of plan-refactoring-05) and skips nothing by name.
 FIXED_EXCLUDED_PREFIXES = {".git/objects", ".git/index"}
 # Tool caches that read-only probes (pytest, mypy, ruff, tsc, eslint) create as a side effect.
 FIXED_EXCLUDED_CACHE_DIRS = {".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis", ".tox", ".nox", ".cache"}
 FIXED_EXCLUDED_FILES = {".eslintcache"}
 FIXED_EXCLUDED_SUFFIXES = (".tsbuildinfo",)
-MAX_FINGERPRINT_FILES = 200_000
 VALID_TASK_MARKERS = {"✅", "⭕️", "⭕", "⚠️", "⚠", "‼️", "‼", "not-applicable"}
 CLOSED_TASK_MARKERS = {"✅", "not-applicable"}
 ALLOWED_ISSUE_EMOJI = {"✅", "⭕️", "⭕", "⚠️", "⚠", "‼️", "‼"}
@@ -450,48 +448,6 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     return 1 if existing and len(errors) == 1 else 2
 
 
-def load_gitignore_patterns(root: str) -> List[str]:
-    path = os.path.join(root, ".gitignore")
-    patterns: List[str] = []
-    if not os.path.isfile(path):
-        return patterns
-    try:
-        lines = read_text(path).splitlines()
-    except OSError:
-        return patterns
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or stripped.startswith("!"):
-            continue
-        patterns.append(stripped)
-    return patterns
-
-
-def matches_gitignore(rel_path: str, is_dir: bool, patterns: Sequence[str]) -> bool:
-    rel_path = rel_path.replace("\\", "/")
-    basename = rel_path.rsplit("/", 1)[-1]
-    for raw_pattern in patterns:
-        pattern = raw_pattern.replace("\\", "/")
-        dir_only = pattern.endswith("/")
-        if dir_only:
-            pattern = pattern.rstrip("/")
-        anchored = pattern.startswith("/")
-        if anchored:
-            pattern = pattern.lstrip("/")
-        if dir_only and not is_dir:
-            continue
-        if anchored:
-            if fnmatch.fnmatch(rel_path, pattern) or rel_path.startswith(pattern + "/"):
-                return True
-        elif "/" in pattern:
-            if fnmatch.fnmatch(rel_path, pattern) or rel_path.startswith(pattern.rstrip("*") + "/"):
-                return True
-        else:
-            if fnmatch.fnmatch(basename, pattern) or any(fnmatch.fnmatch(part, pattern) for part in rel_path.split("/")):
-                return True
-    return False
-
-
 def is_fixed_excluded(rel_path: str, is_dir: bool) -> bool:
     rel_path = rel_path.replace("\\", "/")
     parts = rel_path.split("/")
@@ -502,75 +458,32 @@ def is_fixed_excluded(rel_path: str, is_dir: bool) -> bool:
     return any(rel_path == prefix or rel_path.startswith(prefix + "/") for prefix in FIXED_EXCLUDED_PREFIXES)
 
 
-def should_ignore(rel_path: str, is_dir: bool, patterns: Sequence[str]) -> bool:
-    return is_fixed_excluded(rel_path, is_dir) or matches_gitignore(rel_path, is_dir, patterns)
-
-
-def fingerprint_tree(root: str, base: Optional[Dict[str, object]] = None) -> Tuple[Dict[str, str], Dict[str, List[int]], int]:
-    """Hash the tree; reuse base hashes for files whose size and mtime_ns are unchanged."""
-    root_abs = os.path.abspath(root)
-    patterns = load_gitignore_patterns(root_abs)
-    base_files = dict(base.get("files") or {}) if base else {}
-    base_stats = dict(base.get("stats") or {}) if base else {}
-    files: Dict[str, str] = {}
-    stats: Dict[str, List[int]] = {}
-    hashed = 0
-    for current_root, dirs, filenames in os.walk(root_abs, topdown=True):
-        kept_dirs = []
-        for dirname in dirs:
-            full_dir = os.path.join(current_root, dirname)
-            if os.path.islink(full_dir):
-                continue
-            rel_dir = posix_rel(full_dir, root_abs)
-            if not should_ignore(rel_dir, True, patterns):
-                kept_dirs.append(dirname)
-        dirs[:] = kept_dirs
-        for filename in filenames:
-            full_file = os.path.join(current_root, filename)
-            if os.path.islink(full_file):
-                continue
-            rel_file = posix_rel(full_file, root_abs)
-            if should_ignore(rel_file, False, patterns):
-                continue
-            info = os.stat(full_file)
-            stat = [info.st_size, info.st_mtime_ns]
-            if rel_file in base_files and base_stats.get(rel_file) == stat:
-                files[rel_file] = str(base_files[rel_file])
-            else:
-                files[rel_file] = sha256_file(full_file)
-                hashed += 1
-            stats[rel_file] = stat
-            if len(files) > MAX_FINGERPRINT_FILES:
-                raise ToolError("fingerprint-scope-too-large: more than 200000 files after exclusions", 2)
-    return dict(sorted(files.items())), dict(sorted(stats.items())), hashed
-
-
 def cmd_fingerprint_workspace(args: argparse.Namespace) -> int:
     root = os.path.abspath(args.root)
     out_json = os.path.abspath(args.out_json)
     if not os.path.isdir(root):
         print_json({"valid": False, "errors": [f"fingerprint-missing-root: {root}"]})
         return 2
+    tool = snapshot_tool()
+    top = tool._snapshot_top(root) or os.path.realpath(root)
+    if path_inside(top, out_json):
+        print_json({"valid": False, "errors": ["fingerprint-out-json-inside-workspace"]})
+        return 2
+    plan_dir = plan_dir_of(args.plan, top) if args.plan else None
     try:
-        if os.path.commonpath([root, out_json]) == root:
-            print_json({"valid": False, "errors": ["fingerprint-out-json-inside-workspace"]})
-            return 2
-    except ValueError:
-        pass
-    try:
-        base = None
-        if args.base:
-            base = load_snapshot(args.base)
-            if os.path.abspath(str(base.get("root") or "")) != root or not isinstance(base.get("stats"), dict):
-                base = None
-        files, stats, hashed = fingerprint_tree(root, base)
-        payload = {"algorithm": "sha256-tree-v2", "root": root, "file_count": len(files), "files": files, "stats": stats}
-        write_json_file(out_json, payload)
-        print_json({"valid": True, "path": out_json, "file_count": len(files), "hashed": hashed, "base_used": base is not None})
-        return 0
-    except (OSError, json.JSONDecodeError, ToolError) as exc:
+        snapshot = tool.worktree_snapshot(root, plan_dir)
+    except tool.SnapshotError as exc:
         print_json({"valid": False, "errors": [str(exc)]})
-        return getattr(exc, "code", 2)
+        return 1
+    warnings = (["base-ignored"] if args.base else []) + list(snapshot["warnings"])
+    try:
+        write_json_file(out_json, dict(snapshot, workspace=os.path.realpath(root)))
+    except OSError as exc:
+        print_json({"valid": False, "errors": [str(exc)]})
+        return 2
+    print_json({"valid": True, "path": out_json, "origin": snapshot["origin"], "root": snapshot["root"],
+                "plan_dir": plan_dir, "entry_count": len(snapshot["entries"]), "warnings": warnings, "errors": []})
+    return 0
 
 
 def load_snapshot(path: str) -> Dict[str, object]:
@@ -581,73 +494,118 @@ def load_snapshot(path: str) -> Dict[str, object]:
     return data
 
 
-def normalize_allowed_path(raw_allowed: str, root: str) -> str:
+# Worktree snapshot (spec 2 of plan-refactoring-05): fingerprint-workspace writes brainstorm_tool.worktree_snapshot
+# (spec 1) plus `workspace`, the real path of the root it was given; assert-readonly and snapshot-diff compare two of
+# them with brainstorm_tool.worktree_diff. With git the snapshot root is the repository's top level, so `workspace`
+# keeps the root that evidence paths and relative allowed paths are spelled against.
+SNAPSHOT_FUNCTIONS = ("worktree_snapshot", "worktree_diff", "SnapshotError", "_snapshot_top")
+
+
+def snapshot_tool():
+    """brainstorm_tool with the snapshot functions; snapshot-unavailable (exit 1) without plan-brainstorming
+    installed alongside."""
+    module = _load_brainstorm_tool()
+    if module is None or any(getattr(module, name, None) is None for name in SNAPSHOT_FUNCTIONS):
+        raise ToolError("snapshot-unavailable: plan-brainstorming is not installed alongside; "
+                        "fingerprint-workspace needs brainstorm_tool.worktree_snapshot", 1)
+    return module
+
+
+def load_worktree(path: str) -> Dict[str, object]:
+    """A fingerprint-workspace snapshot: a JSON object with `root` and `entries`; ToolError otherwise."""
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), dict) or not data.get("root"):
+        raise ToolError(f"invalid fingerprint snapshot: {path}")
+    return data
+
+
+def evidence_root(snapshot: Dict[str, object]) -> str:
+    """The root evidence paths are relative to: the snapshot's `workspace`, else its `root`."""
+    return os.path.abspath(str(snapshot.get("workspace") or snapshot.get("root") or ""))
+
+
+def normalize_allowed_path(raw_allowed: str, root: str, workspace: Optional[str] = None) -> str:
+    """`raw_allowed` (absolute, or relative to `workspace`, the snapshot root by default) as a path relative to the
+    snapshot root `root`; ToolError for a path outside it."""
     if os.path.isabs(raw_allowed):
-        allowed_abs = os.path.abspath(raw_allowed)
-        try:
-            if os.path.commonpath([root, allowed_abs]) != root:
-                raise ToolError(f"allowed path is outside snapshot root: {raw_allowed}")
-        except ValueError as exc:
-            raise ToolError(f"allowed path is outside snapshot root: {raw_allowed}") from exc
-        return posix_rel(allowed_abs, root)
-    candidate = raw_allowed.replace("\\", "/")
-    if not is_posix_relative(candidate):
-        raise ToolError(f"allowed path must be workspace-relative: {raw_allowed}")
-    return candidate
+        candidate = raw_allowed
+    else:
+        relative = raw_allowed.replace("\\", "/")
+        if not is_posix_relative(relative):
+            raise ToolError(f"allowed path must be workspace-relative: {raw_allowed}")
+        candidate = os.path.join(workspace or root, relative)
+    if not path_inside(root, candidate):
+        raise ToolError(f"allowed path is outside snapshot root: {raw_allowed}")
+    return posix_rel(os.path.realpath(candidate), os.path.realpath(root))
 
 
-def snapshot_diff(before: Dict[str, object], after: Dict[str, object]) -> Dict[str, List[str]]:
-    before_files = dict(before.get("files") or {})
-    after_files = dict(after.get("files") or {})
-    return {
-        "added": sorted(path for path in after_files if path not in before_files),
-        "removed": sorted(path for path in before_files if path not in after_files),
-        "modified": sorted(path for path in after_files if path in before_files and after_files[path] != before_files[path]),
-    }
+UNTRACKED_STATUSES = ("??", "!!")
+
+
+def classify_changes(before: Dict[str, object], after: Dict[str, object], paths: Sequence[str]) -> Dict[str, List[str]]:
+    """`added`/`removed`/`modified` of changed snapshot paths: a path whose file is gone now is `removed`; a path
+    new in the snapshot is `added` when it is untracked (XY `??` or `!!`, or any path of a walk), else `modified`; a
+    path that left `git status` with its file still there (a revert to HEAD) or changed its entry is `modified`."""
+    root = str(after.get("root") or before.get("root") or "")
+    old = dict(before.get("entries") or {})
+    new = dict(after.get("entries") or {})
+    walk = after.get("origin") == "walk"
+    out: Dict[str, List[str]] = {"added": [], "removed": [], "modified": []}
+    for path in sorted(paths):
+        if not os.path.lexists(os.path.join(root, path)):
+            out["removed"].append(path)
+        elif path not in old and (walk or new[path][0] in UNTRACKED_STATUSES):
+            out["added"].append(path)
+        else:
+            out["modified"].append(path)
+    return out
 
 
 def cmd_snapshot_diff(args: argparse.Namespace) -> int:
+    """The changes between two snapshots by brainstorm_tool.worktree_diff: `changed` without the ignored paths
+    outside the plan folder (`ignored_changed`; they never become fix_files), split into added/removed/modified."""
     try:
-        before = load_snapshot(args.before_json)
-        after = load_snapshot(args.after_json)
+        before = load_worktree(args.before_json)
+        after = load_worktree(args.after_json)
     except (OSError, json.JSONDecodeError, ToolError) as exc:
         print_json({"valid": False, "errors": [str(exc)]})
         return 2
-    diff = snapshot_diff(before, after)
-    changed = diff["added"] + diff["removed"] + diff["modified"]
-    print_json({"valid": True, "changed": sorted(changed), **diff, "errors": []})
+    diff = snapshot_tool().worktree_diff(before, after, (), before.get("plan_dir"))
+    changed = [path for path in diff["changed"] if path not in diff["ignored_changed"]]
+    print_json({"valid": True, "changed": changed, **classify_changes(before, after, changed),
+                "ignored_changed": diff["ignored_changed"], "origin": diff["origin"], "errors": []})
     return 0
 
 
 def cmd_assert_readonly(args: argparse.Namespace) -> int:
+    """The audit's start and current snapshots by brainstorm_tool.worktree_diff (spec 2 of plan-refactoring-05):
+    outside the allowed paths a changed file that is not ignored, or any changed file of the --plan plan's folder, is
+    a violation, a moved HEAD the violation `HEAD`; an ignored path outside the plan folder is `ignored_changed`,
+    information only. Without --plan (warning plan-unknown) every changed ignored path is a violation: without the
+    plan folder an ignored file has no hash, only its appearing and vanishing are seen."""
     try:
-        start = load_snapshot(args.start_json)
-        current = load_snapshot(args.current_json)
-        root = os.path.abspath(str(start.get("root") or current.get("root") or "."))
-        allowed = [normalize_allowed_path(raw, root) for raw in args.allowed_paths]
-        start_files = dict(start["files"])
-        current_files = dict(current["files"])
+        start = load_worktree(args.start_json)
+        current = load_worktree(args.current_json)
+        root = str(start["root"])
+        allowed = [normalize_allowed_path(raw, root, str(start.get("workspace") or root)) for raw in args.allowed_paths]
     except (OSError, json.JSONDecodeError, ToolError) as exc:
         print_json({"valid": False, "errors": [str(exc)]})
         return 2
-
-    added = sorted(path for path in current_files if path not in start_files)
-    removed = sorted(path for path in start_files if path not in current_files)
-    modified = sorted(path for path in current_files if path in start_files and current_files[path] != start_files[path])
-    changed = sorted(set(added + removed + modified))
-    violations = [path for path in changed if path not in allowed]
+    plan_dir = plan_dir_of(args.plan, root) if args.plan else None
+    diff = snapshot_tool().worktree_diff(start, current, allowed, plan_dir)
+    violations, ignored_changed, warnings = list(diff["violations"]), list(diff["ignored_changed"]), []
+    if plan_dir is None:
+        warnings.append("plan-unknown")
+        violations, ignored_changed = sorted(violations + ignored_changed), []
+    if diff["head_moved"]:
+        violations.append("HEAD")
+    changed = [path for path in diff["changed"] if path not in ignored_changed]
     valid = not violations
-    print_json(
-        {
-            "valid": valid,
-            "allowed_path": allowed[0],
-            "allowed_paths": allowed,
-            "added": added,
-            "removed": removed,
-            "modified": modified,
-            "violations": violations,
-        }
-    )
+    print_json({"valid": valid, "allowed_path": allowed[0], "allowed_paths": allowed,
+                **classify_changes(start, current, changed), "violations": violations,
+                "ignored_changed": ignored_changed, "head_moved": diff["head_moved"], "origin": diff["origin"],
+                "warnings": warnings})
     return 0 if valid else 1
 
 
@@ -1110,31 +1068,32 @@ def plan_task_files(plan_text: str) -> Optional[Dict[str, List[str]]]:
     return out
 
 
-def evidence_value(path: str, files: Dict[str, str], root: str) -> str:
-    """SHA-256 of `path` in the snapshot; `excluded` for a file the snapshot skips; `missing` when there is none."""
-    if path in files:
-        return str(files[path])
-    return "excluded" if os.path.isfile(os.path.join(root, path)) else "missing"
+def evidence_value(path: str, root: str) -> str:
+    """SHA-256 of the file `path` (relative to `root`) at the moment of the call (spec 2 of plan-refactoring-05: the
+    snapshot no longer hashes clean files); `missing` when there is no such file under `root`."""
+    full = os.path.join(root, path)
+    if not path_inside(root, full) or not os.path.isfile(full):
+        return "missing"
+    return sha256_file(full)
 
 
 def evidence_table(report_text: str, plan_text: str, snapshot: Dict[str, object],
                    plan_path: Optional[str] = None) -> Tuple[Dict[str, str], List[str]]:
-    """{path: SHA-256 | excluded | missing} for the evidence files of a report: the anchors of its stage items
-    and issue evidence, and the files of the plan tasks' Files blocks; plus warnings. The pipeline's own files
+    """{path: SHA-256 | missing} for the evidence files of a report: the anchors of its stage items and issue
+    evidence, and the files of the plan tasks' Files blocks, hashed now; plus warnings. The pipeline's own files
     (is_pipeline_file; the plan's folder from `plan_path`) are left out."""
-    root = os.path.abspath(str(snapshot.get("root") or ""))
+    root = evidence_root(snapshot)
     plan_dir = plan_dir_of(plan_path, root) if plan_path else None
-    files = dict(snapshot["files"])
     table: Dict[str, str] = {}
     for paths in stage_anchor_paths(report_text).values():
         for path in paths:
             if not is_pipeline_file(path, plan_dir):
-                table[path] = evidence_value(path, files, root)
+                table[path] = evidence_value(path, root)
     for issue in parse_issues(report_text):
         for match in ANCHOR_RE.finditer(str(issue["evidence"])):
             path = anchor_path(match.group(0))
             if path and not is_pipeline_file(path, plan_dir):
-                table[path] = evidence_value(path, files, root)
+                table[path] = evidence_value(path, root)
     warnings: List[str] = []
     plan_files = plan_task_files(plan_text)
     if plan_files is None:
@@ -1147,13 +1106,10 @@ def evidence_table(report_text: str, plan_text: str, snapshot: Dict[str, object]
             for path in paths:
                 if is_pipeline_file(path, plan_dir):
                     continue
-                value = table.get(path) or evidence_value(path, files, root)
+                value = table.get(path) or evidence_value(path, root)
                 # A Files token that names no file (`B.lang`, a bare `SKILL.md`) is not evidence.
                 if value != "missing":
                     table[path] = value
-    excluded = sorted(path for path, value in table.items() if value == "excluded")
-    if excluded:
-        warnings.append("evidence-excluded (outside the snapshot): " + ", ".join(excluded))
     return dict(sorted(table.items())), warnings
 
 
@@ -1914,10 +1870,10 @@ def load_audit_snapshot(path: str, plan: str) -> Dict[str, object]:
     """The start snapshot of this audit; ToolError (exit 2) when it is no snapshot or when the plan is not
     under its root (a snapshot of another workspace)."""
     try:
-        snapshot = load_snapshot(path)
+        snapshot = load_worktree(path)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ToolError(f"invalid fingerprint snapshot: {path} ({exc})") from exc
-    root = os.path.abspath(str(snapshot.get("root") or ""))
+    root = evidence_root(snapshot)
     if not snapshot.get("root") or not path_inside(root, plan):
         raise ToolError(f"snapshot-root-mismatch: the plan is not under the snapshot root {root}")
     return snapshot
@@ -1950,7 +1906,6 @@ def cmd_evidence_fingerprint(args: argparse.Namespace) -> int:
             "valid": True,
             "report": args.report,
             "file_count": len(table),
-            "excluded": [path for path, value in table.items() if value == "excluded"],
             "missing": [path for path, value in table.items() if value == "missing"],
             "warnings": warnings,
             "errors": [],
@@ -1995,10 +1950,11 @@ def stub_title(item: Dict[str, object]) -> str:
 
 
 def rescan_scope(plan: str, last_report: str, snapshot: Dict[str, object], ratio: float) -> Dict[str, object]:
-    """Tasks of the last report to audit again, by its evidence fingerprint against the start snapshot."""
+    """Tasks of the last report to audit again, by its evidence fingerprint against the evidence files hashed now
+    (the snapshot gives their root)."""
     report_text = read_text(last_report)
     plan_text = read_text(plan)
-    files = dict(snapshot["files"])
+    root = evidence_root(snapshot)
     table = parse_evidence_table(report_text)
     plan_sha_changed = parse_header(report_text).get("master_plan_sha256", "").lower() != sha256_file(plan)
     phases, tasks, _ = parse_stage_items(report_text)
@@ -2011,10 +1967,11 @@ def rescan_scope(plan: str, last_report: str, snapshot: Dict[str, object], ratio
     all_ids = report_ids + [task_id for task_id in plan_ids if task_id not in report_ids]
 
     # Rows of the pipeline's own files (an older report wrote BACKLOG.md as `excluded`) send no task to re-audit.
-    plan_dir = plan_dir_of(plan, str(snapshot["root"]))
+    plan_dir = plan_dir_of(plan, root)
     rows = {path: value for path, value in (table or {}).items() if not is_pipeline_file(path, plan_dir)}
-    changed = sorted(path for path, value in rows.items() if path in files and value not in ("excluded", "missing") and files[path] != value)
-    gone = sorted(path for path, value in rows.items() if path not in files and value not in ("excluded", "missing"))
+    now = {path: evidence_value(path, root) for path, value in rows.items() if value not in ("excluded", "missing")}
+    changed = sorted(path for path, value in now.items() if value != "missing" and value != rows[path])
+    gone = sorted(path for path, value in now.items() if value == "missing")
     unverified = sorted(path for path, value in rows.items() if value in ("excluded", "missing"))
     suspect = set(changed) | set(gone) | set(unverified)
 
@@ -2075,7 +2032,7 @@ def rescan_scope(plan: str, last_report: str, snapshot: Dict[str, object], ratio
         "ratio": ratio,
         "plan": os.path.abspath(plan),
         "last_report": os.path.abspath(last_report),
-        "root": os.path.abspath(str(snapshot["root"])),
+        "root": root,
         "errors": [],
     }
 
@@ -2258,7 +2215,8 @@ def build_parser() -> argparse.ArgumentParser:
     fingerprint = subparsers.add_parser("fingerprint-workspace")
     fingerprint.add_argument("root")
     fingerprint.add_argument("out_json")
-    fingerprint.add_argument("--base", help="previous snapshot; unchanged size+mtime files reuse its hashes")
+    fingerprint.add_argument("--plan", help="master plan: the ignored files of its folder are hashed and guarded")
+    fingerprint.add_argument("--base", help="accepted without effect (warning base-ignored)")
     fingerprint.set_defaults(func=cmd_fingerprint_workspace)
 
     parse_report = subparsers.add_parser("parse-report")
@@ -2280,6 +2238,7 @@ def build_parser() -> argparse.ArgumentParser:
     readonly.add_argument("start_json")
     readonly.add_argument("current_json")
     readonly.add_argument("allowed_paths", nargs="+")
+    readonly.add_argument("--plan", help="master plan: its folder is guarded, ignored paths elsewhere are information")
     readonly.set_defaults(func=cmd_assert_readonly)
 
     census = subparsers.add_parser("task-census")

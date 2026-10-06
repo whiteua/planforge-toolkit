@@ -73,8 +73,14 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
    Copy `report_header` into the report frontmatter as is (`audit_scope: full`, `audit_tasks: all`).
 2. `TOOL preflight <plan-dir> <next-open-name> <next-final-name>`: on failure stop before auditing.
    Then the journal start (WORKFLOW.md, Chain journal): stage `audit` → `running`.
-3. Start fingerprint: `TOOL fingerprint-workspace <workspace-root> <start-json>` (temp file outside
-   the workspace).
+3. Start fingerprint: `TOOL fingerprint-workspace <workspace-root> <start-json> --plan <plan>` (temp
+   file outside the repository). Exit `1` (`snapshot-unavailable`: `plan-brainstorming` is not
+   installed alongside; `snapshot-failed`: git failed) → stop before auditing and say why. When
+   the journal is started (step 2), record the stop first: with a confirmation channel say why and
+   ask how to proceed; without one `J journal-question <journal> --skill plan-resolver --plan P
+   --stage audit --text "<errors of fingerprint-workspace>" --option "fix the repository and
+   re-run"` (the stage is already `running`, no event) and `J journal-export-findings <journal>`
+   (WORKFLOW.md, Chain journal).
 4. One audit pass (AUDIT.md) by `bootstrap.pass_type`: `first` over the whole plan, read as
    `PT skeleton <plan>` (`PT task <plan> <id>` for a disputed task);
    `subsequent` → `TOOL rescan-scope <plan> <last-report> --snapshot <start-json>` decides:
@@ -94,13 +100,16 @@ JSON fields: [references/WORKFLOW.md](references/WORKFLOW.md).
 7. `TOOL task-census <plan> <report>`: exit `1` → add the uncovered tasks to the same report.
 8. `TOOL validate-report <report> --root <workspace-root> --plan <plan>`: one rewrite of the same
    report is allowed to fix it; copy every `[WARNING]` line into the report's validator-warnings section.
-9. `TOOL fingerprint-workspace <workspace-root> <current-json> --base <start-json>` and
-   `TOOL assert-readonly <start-json> <current-json> <report> <BACKLOG.md>` (`BACKLOG.md` only
-   when it lies inside the workspace root). Drift → rewrite the same report
-   with the single blocker issue `probe-mutated-workspace`, run only the validator again, stop OPEN.
+9. `TOOL fingerprint-workspace <workspace-root> <current-json> --plan <plan>` and
+   `TOOL assert-readonly <start-json> <current-json> <report> <BACKLOG.md> --plan <plan>`
+   (`BACKLOG.md` only when it lies inside the repository). Drift (`violations`, `HEAD` included) →
+   rewrite the same report with the single blocker issue `probe-mutated-workspace`, run only the
+   validator again, stop OPEN. A non-empty `ignored_changed` (ignored paths outside the plan's
+   folder: probe caches, build output) is no drift: with it, or with `origin: walk`, add one line
+   to the report's Additional Context (WORKFLOW.md, Fingerprint) and run the validator again.
    Then the journal end (WORKFLOW.md, Chain journal): `journal-finding` per defect outside the
-   plan, `journal-event` stage `audit` `done` with the report's status and scope,
-   `journal-export-findings`.
+   plan, `journal-event` stage `audit` `done` with the report's status and scope and
+   `guard=<origin>`, `journal-export-findings`.
 10. Human gate: report path, status, counts, next action (audit mode with open issues: suggest
     `/plan-resolver <plan> fix`; an incremental report with nothing open: suggest
     `/plan-resolver <plan> full`). Inside `fix`/`next`/`auto` the gate is printed once, when the

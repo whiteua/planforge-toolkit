@@ -1457,8 +1457,8 @@ def worktree_snapshot(root: str, plan_dir: Optional[str] = None, skip: Iterable[
     return {"origin": "git", "root": top, "plan_dir": plan_dir, "head": head, "entries": entries, "warnings": warnings}
 
 
-# The root .gitignore for the walk without git, copied from resolver_tool.py (load_gitignore_patterns,
-# matches_gitignore): `!` lines are dropped, nested .gitignore files and .git/info/exclude are not read.
+# The root .gitignore for the walk without git, formerly in resolver_tool.py (removed by spec 2 of
+# plan-refactoring-05; this is the only copy): `!` lines are dropped, nested .gitignore files and .git/info/exclude are not read.
 def _gitignore_patterns(root: str) -> List[str]:
     path = os.path.join(root, ".gitignore")
     patterns: List[str] = []

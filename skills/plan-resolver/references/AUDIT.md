@@ -140,11 +140,14 @@ Probes are extra checks, allowed only when read-only for the project. A probe is
 
 - Allowed: `python -m unittest`, `pytest`, `npm test -- --runInBand`, `go test`, `cargo test`,
   `dotnet test` when they write no tracked or generated files; static checks (`py_compile`,
-  `tsc --noEmit`, `eslint` without `--fix`). Tool caches are excluded from the fingerprint
-  ([WORKFLOW.md](WORKFLOW.md)), so `pytest` and friends do not trip the guard.
-- Build: allowed when its output lands only in directories excluded from the fingerprint (`dist`,
-  `build`, `out`, `target`, `bin`, `obj`, or paths in the root `.gitignore`), so tests run on a
-  fresh build; `assert-readonly` catches a build that writes anywhere else. When a build is not
+  `tsc --noEmit`, `eslint` without `--fix`). Their caches in paths the repository ignores outside
+  the plan's folder (`.pytest_cache`, `__pycache__`, `.mypy_cache`) are `ignored_changed` for
+  `assert-readonly`: noted in the report, never a block ([WORKFLOW.md](WORKFLOW.md)); a cache the
+  repository does not ignore trips the guard.
+- Build: allowed when its output lands only in ignored paths outside the plan's folder (`dist`,
+  `build`, `out`, `target`, `bin`, `obj` when `.gitignore` ignores them; without git the root
+  `.gitignore`), so tests run on a fresh build without a block; `assert-readonly` catches a build
+  that writes anywhere else. When a build is not
   possible, say in the report that previously built code was tested and close those tasks with
   `confidence: medium`.
 - Forbidden: formatters and autofix (`black`, `ruff --fix`, `eslint --fix`, `prettier --write`,

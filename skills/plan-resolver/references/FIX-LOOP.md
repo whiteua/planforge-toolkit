@@ -57,19 +57,19 @@ after `full-audit-required` the suggestion is `/plan-resolver <plan> full` inste
 1. `open-issues <LAST_REPORT>` → `fix_order` (critical → low) and compact issue fields; the JSON is
    enough, do not re-read the whole report. Then, before any fingerprint, the journal start
    (WORKFLOW.md, Chain journal): stage `audit` → `running` with `--reason audit-open`.
-2. `protect <tmp-json> <plan> <all reports>` and `fingerprint-workspace <workspace-root> <fix-start-json>`
-   (temp paths outside the workspace; `--base <last audit's current snapshot>` is optional and
-   only saves rehashing).
+2. `protect <tmp-json> <plan> <all reports>` and `fingerprint-workspace <workspace-root> <fix-start-json> --plan <plan>`
+   (temp paths outside the repository).
 3. For each issue in `fix_order`: read the code at `evidence` and the linked plan items; make the
    minimal change that closes the plan's contract, no refactoring of neighbouring code; run the
    existing read-only probe for the area if there is one; note the outcome: `applied`,
    `needs-user` or `skipped` (reason in the note).
 4. `assert-protected <tmp-json>`: exit `1` → revert your edits to protected files if possible, mark
    the affected issues `needs-user`, stop.
-5. `fingerprint-workspace <workspace-root> <fix-end-json> --base <fix-start-json>` and
-   `snapshot-diff <fix-start-json> <fix-end-json>`: the authoritative list of changed files.
-   Every changed path must belong to an `applied` issue; an unexplained change is reverted or
-   reported to the user.
+5. `fingerprint-workspace <workspace-root> <fix-end-json> --plan <plan>` and
+   `snapshot-diff <fix-start-json> <fix-end-json>`: the authoritative list of changed files
+   (`changed`; ignored paths outside the plan's folder come only as `ignored_changed` and never
+   become `fix_files`). Every changed path must belong to an `applied` issue; an unexplained change
+   is reverted or reported to the user.
 6. `mark-fix <LAST_REPORT> <id> <state> --files <paths from the diff> [--note ...]` per issue: the
    only allowed change to a past report, and it touches only the Fix Log.
 7. Record every path of the diff as `fix_files` of the `audit` stage, as a repository-root path
@@ -89,8 +89,7 @@ real-data migrations, secrets or external services.
 
 ## AUDIT after FIX
 
-Run AUDIT strictly by WORKFLOW.md with a new start fingerprint taken **after** FIX
-(`--base` = the previous audit's current snapshot).
+Run AUDIT strictly by WORKFLOW.md with a new start fingerprint taken **after** FIX.
 
 - **Incremental** (`rescan-scope` → `incremental`): the same agent in the same session. The scope
   is deterministic and `validate-report --root` checks every anchor; re-read the code of the

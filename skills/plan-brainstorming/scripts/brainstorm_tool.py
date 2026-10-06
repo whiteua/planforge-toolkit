@@ -1392,7 +1392,7 @@ def tree_diff(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
     return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
 
 
-SPEC_ITEM_RE =re.compile(r"^(?:[-*]|\d+\.)\s+(?P<text>.+)$")
+SPEC_ITEM_RE = re.compile(r"^(?:[-*]|\d+\.)\s+(?P<text>.+)$")
 FINDINGS_HEADING = "### Findings Traceability"
 
 

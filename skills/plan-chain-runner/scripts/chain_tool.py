@@ -1296,7 +1296,7 @@ def _dependency_wait(runner: Dict[str, Any], by_spec: Dict[str, Dict[str, Any]],
 
 CODE_STAGES = ("execution", "diffs", "audit", "commit")
 # Stages that read the code the holder of CODE_STAGES changes in the shared working copy (F2 of plan-refactoring-02):
-# the revision's diff guard compares the whole `git status`, so they wait for the holder; writing does not wait.
+# the revision's diff guard compares a snapshot of the whole tree, so they wait for the holder; writing does not wait.
 CODE_READING_STAGES = ("revision", "split")
 
 

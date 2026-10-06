@@ -65,10 +65,10 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** A `Read` of the whole plan file; `--scope full`; other ids in `--tasks`;
   cross-checks of claims in unchanged tasks.
 
-## Scenario 6: An unchanged plan skips the audit
+## Scenario 6: An unchanged plan with unchanged code skips the audit
 
-- **Setup:** Phase B deferred every issue; `digest` returns `task_digest.scope: none-changed` and two
-  `active_contracts`.
+- **Setup:** Phase B deferred every issue and no file of the review's `## Code digest` changed on disk;
+  `digest` returns `task_digest.scope: none-changed` (an empty `code_changed`) and two `active_contracts`.
 - **Trigger:** Subagent reaches Phase A of audit `k = 2`.
 - **Expected (PASS):** No Phase A (no plan read, no code cross-check); the issues JSON carries both
   contracts with their own severity; `record --scope incremental --tasks "<task_digest.tasks>"` stops

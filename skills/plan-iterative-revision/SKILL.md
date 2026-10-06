@@ -168,8 +168,10 @@ be implemented and audit 6 hits the limit gate if issues remain.
 
 **Incremental re-audit.** From the second audit on, `D.task_digest` compares the plan's tasks with the
 `## Task digest` table of the latest review (8-hex SHA-1 of each task body) and sets the scope:
-`none-changed` (the plan is byte for byte the one the latest review audited: Phase B applied nothing, no
-contract can have closed, so no Phase A runs and the carried set stops the run at `unchanged`);
+`none-changed` (the plan is byte for byte the one the latest review audited and no file of its `## Code
+digest` changed on disk: Phase B applied nothing, no contract can have closed, so no Phase A runs and the
+carried set stops the run at `unchanged`; an unchanged plan whose code changed is `incremental` with the
+tasks of those files in `code_changed`);
 `incremental` (Phase A reads the header and the tasks of `T.tasks` by `T.line_ranges`: the changed and
 new tasks, the tasks of the active contracts and every task that depends on a changed, new or removed
 one through `Preconditions`); `full` (`T.reason`: no or a broken table, more than half of the tasks

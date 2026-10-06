@@ -77,7 +77,7 @@ A failed unit is always handled before any other unit, so later units never run 
 
 ## Subagents
 
-Subagents may inspect code and return diff/status/logs. A subagent executes a unit only when the unit is delegated (EXECUTION-STRATEGY.md, Delegation: `delegable: true`, a `light` model given, a subagent tool present); it then changes only the unit's files and returns the changed files and the commands' output. The file check (`delegate-check`), the gate, `unit-finish` and every ledger change stay with the parent session, always.
+Subagents may inspect code and return diff/status/logs. A subagent executes a unit only when the unit is delegated (EXECUTION-STRATEGY.md, Delegation: `delegable: true`, a `light` model given, a subagent tool present); it then changes only the unit's files and returns the commands' output, ending with the `Written files:` block (EXECUTION-STRATEGY.md, Delegation). The file check (`delegate-check --reply` against the tree snapshot), the gate, `unit-finish` and every ledger change stay with the parent session, always.
 
 ## FINALIZE
 

@@ -97,7 +97,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 
 | Technique | Origin | How it's applied |
 |---|---|---|
-| Incremental re-audit by task hash | Incremental build / build avoidance (make, 1976; Bazel action cache); change impact analysis (Arnold & Bohner, 1993) | Each review stores the SHA-1 of every task body; the next audit reads only the changed and new tasks, the open contracts' tasks and their transitive dependents by `Preconditions`, skips an unchanged plan, and a clean incremental pass must be confirmed by one full pass before `converged` |
+| Incremental re-audit by task hash | Incremental build / build avoidance (make, 1976; Bazel action cache); change impact analysis (Arnold & Bohner, 1993) | Each review stores the SHA-1 of every task body; the next audit reads only the changed and new tasks, the open contracts' tasks and their transitive dependents by `Preconditions`, skips a plan that is unchanged and whose files did not change on disk either (Code digest), and a clean incremental pass must be confirmed by one full pass before `converged` |
 | Code digest between passes | Content-addressed build caches (Bazel, 2015); file integrity monitoring (Tripwire, 1992) | Each review stores a SHA-256 per path of the tasks' `Files` blocks (or `missing`, `dir`, `glob`, `outside`); the next `digest` puts the tasks whose files changed on disk, and their dependents, into the audit and the ratio, without git |
 
 ### Chain integration

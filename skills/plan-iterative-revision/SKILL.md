@@ -94,8 +94,8 @@ S = TOOL batch-summary --results <that file | ->                # worst result w
 
 Print `S` as the final output (autonomous; it replaces `R.final`), or a per-part table plus `S`
 (interactive). Never verify parts in parallel: the diff guard and the review numbering are per
-plan, not per run. `guard-begin`'s `changed_count` grows across parts because earlier parts' new
-files are uncommitted; that is expected.
+plan, not per run. `guard-begin`'s `files` grows across parts because earlier parts wrote their
+reviews; that is expected.
 
 ## Loop
 
@@ -115,6 +115,8 @@ MAX = B.config.max; S = B.config.stop_policy; k = 1; FULL = false
 GROOT = B.git_root, else B.dir     # the guard's root; without git guard-begin still keeps the plan's size (exit 3)
 DEFERRED = ""                      # "<id>:budget,…": the issues the last Phase B deferred for the budget
 BUDGET = {}                        # fingerprint → title of every issue deferred for the budget in this run
+FREE = null                        # other writers' pipeline files (guard-check free) in the previous pass's guard windows;
+                                   # below, len(X.free) is 0 for a guard-check answer without `free` (exit 3, no git)
 
 loop:
     TOOL guard-begin GROOT <B.basename>-phase-a --plan PLAN
@@ -132,6 +134,7 @@ loop:
                     --interaction I --lang B.lang --issues <json-file> --scope SCOPE
                     [--tasks "TASKS"]                  (only with SCOPE incremental; TASKS may be empty)
                     [--deferred "DEFERRED"]            (only when DEFERRED is not empty)
+                    [--free FREE]                      (only when FREE is not null)
     FULL = false
     if R.warnings: fix the issues JSON next time (unescaped code quotes); mention them in the summary
                    (`contracts-dropped`: the audit skipped an open contract, PHASE-A-AUDIT.md, Step 1;
@@ -140,7 +143,8 @@ loop:
                                  options +3 / +5 / stop.
                                  +n → MAX += n and re-run the same record command;
                                  stop → re-run it with --user-stop
-    TOOL guard-check GROOT <B.basename>-phase-a <R.review_path or R.completion_path or B.next_review>
+    GA = TOOL guard-check GROOT <B.basename>-phase-a <R.review_path or R.completion_path or B.next_review>
+    FREE = len(GA.free)                # a new pass: its own windows from here on
     journal: R.journal_event → journal-event; this audit's code findings → journal-finding (Chain journal below)
 
     if R.action == "full-audit-required": FULL = true; repeat the loop with the same k (no Phase B)
@@ -149,11 +153,11 @@ loop:
         DEFERRED = ""
         TOOL guard-begin GROOT <B.basename>-phase-b --plan PLAN
         Phase B (references/PHASE-B-IMPLEMENT.md) on R.review_path, issues in R.issues order, within R.budget
-        G = TOOL guard-check GROOT <B.basename>-phase-b PLAN
+        G = TOOL guard-check GROOT <B.basename>-phase-b PLAN;  FREE += len(G.free)
         if G.over_budget:                                  # one compression, in its own guard window
             TOOL guard-begin GROOT <B.basename>-phase-b --plan PLAN
             shorten the tasks of G.changed_tasks (PHASE-B-IMPLEMENT.md, Budget)
-            TOOL guard-check GROOT <B.basename>-phase-b PLAN
+            G2 = TOOL guard-check GROOT <B.basename>-phase-b PLAN;  FREE += len(G2.free)
         DEFERRED = the ids Phase B deferred for the budget, each as "<id>:budget", joined with ","
         BUDGET += their fingerprints and titles (from R.issues)
         k += 1
@@ -188,7 +192,18 @@ call, a chain run) is `autonomous`: `record --interaction autonomous` stops at t
 
 A `guard-check` violation means a phase touched a forbidden file: stop and report the paths.
 `BACKLOG.md` at the repository root is never a violation: it is a free file (Language).
-The guard sees only what `git status` sees (not ignored files, not paths outside the repository).
+The guard compares a snapshot of every file under the git root: size and SHA-256, the files git ignores and
+`docs/.plans/` included; `.git` and the directories `node_modules`, `.venv`, `venv`, `__pycache__`, `.pytest_cache`,
+`dist`, `build` (`TREE_SKIP_DIRS`) are skipped, and paths outside the repository are not seen. A changed file with a
+pipeline name (a plan, part, spec, review, completion, report, roadmap, `*-diffs.md`, `*-followups.json`, a
+`*-chain.json` and its lock) that is not one of this plan's own files is `free`, not a violation: another writer of
+the chain wrote it (a plan written in parallel, the runner's journal). This plan's own files (PLAN, its reviews,
+completion file, parts, roadmap and `<X>-diffs.md`) outside the allowed path stay violations. The plan comes from
+`guard-begin --plan`; without it (`plan-unknown`) nothing is `free`. Without git `guard-check` gives no `free`:
+`FREE` stays 0. The loop sums the `free` paths of a pass's guard
+windows (`FREE`) and passes the sum to the next `record --free`, which writes `**Concurrent pipeline files**: N
+(previous pass)` into the review. Without plan-brainstorming alongside (warning `tree-snapshot-unavailable`) the guard
+sees only what `git status` sees, as before.
 Without git (`guard-begin`/`guard-check` exit 3) it checks no files: say once that the guard is unavailable and list
 the files you changed yourself; the budget fields of `guard-check` (`--plan`) still come and are used as with git.
 
@@ -303,8 +318,9 @@ had no room for it in the budget of 150 000 bytes>" --backlog-root <root>` (`<ro
   `remaining_issues`, plus `escalated`, `stop_reason`, `flows`, `lenses_used`); in batch mode the
   `batch-summary` object instead (`result`, `remaining_issues`, `counts`, `parts`).
 - `interactive`: a short report in the plan's language: result and reason, review files created
-  in this run, remaining or escalated issues (id + title), the completion file if written. Add the
-  `R.final` JSON at the end.
+  in this run, remaining or escalated issues (id + title), the completion file if written, and the
+  concurrent pipeline files of the last pass (`FREE`: other writers' pipeline files its guard windows
+  saw). Add the `R.final` JSON at the end.
 
 ## Language
 

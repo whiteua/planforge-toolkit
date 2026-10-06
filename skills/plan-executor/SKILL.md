@@ -41,7 +41,7 @@ $T checkpoint-prune <exec_dir>            # after the run, with confirmation
 $T ledger-path <plan_path> --workdir <repo>   # commit mode: where this plan's ledger is; reads only
 $T commit-run  <exec_dir> --message-file <file> [--journal <journal>]   # commit mode only: the run's files + the audit's fixes, with hooks
 $T delegate-check <repo> --snapshot-out <exec_dir>/delegate-<unit>.json   # a delegated unit: the snapshot before its subagent
-$T delegate-check <repo> --snapshot <exec_dir>/delegate-<unit>.json --files <path>...   # after it: verdict pass|fail
+$T delegate-check <repo> --snapshot <exec_dir>/delegate-<unit>.json --reply <exec_dir>/delegate-<unit>-reply.md   # after it, its reply saved: verdict pass|fail
 ```
 
 Other commands (`ledger-next`, `ledger-mark`, `ledger-status`, `parse-tasks`, …) are listed in [TOOLING.md](references/TOOLING.md); the loop does not need them.

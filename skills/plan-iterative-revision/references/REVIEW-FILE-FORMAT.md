@@ -29,6 +29,7 @@ Review files are immutable history once written.
 **Issues found**: <total> (blocker: x, major: y, minor: z, nit: w)
 **Flow**: +new / -resolved / P persisted / X reintro | Profile: (B,M,m,n)
 **Status**: FINAL — ... | ESCALATED — ...   (only on a final review)
+**Concurrent pipeline files**: N (previous pass)   (record --free: other writers' pipeline files in the previous pass's guard windows; always the last header line)
 
 ## Audit state
 

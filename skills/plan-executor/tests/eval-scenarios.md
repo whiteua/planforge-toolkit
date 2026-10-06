@@ -120,7 +120,8 @@ must be strengthened, not the test loosened.
 - **Expected (PASS):** `ledger-init … --light haiku`; Task 1 in the main agent (`delegable: false`);
   Task 2 (`delegable: true`): `delegate-check <repo> --snapshot-out <exec_dir>/delegate-task-2.json`
   before, an `Agent` call with `model: haiku` and the brief of EXECUTION-STRATEGY.md (repository,
-  `text`, `files`, the bans, the reply format), `delegate-check <repo> --snapshot … --files docs/guide.md`
+  `text`, `files`, the bans, the reply format),
+  the reply (ending with `Written files:` and `docs/guide.md`) saved to `<exec_dir>/delegate-task-2-reply.md`, `delegate-check <repo> --snapshot … --reply <exec_dir>/delegate-task-2-reply.md`
   after with `verdict: pass`, the green gate run
   by the parent, `unit-finish … task-2 pass --delegated haiku`; Task 3 in the main agent.
 - **Red flags (FAIL):** Task 1 or Task 3 delegated; the parent compares the files by hand instead of `delegate-check`; the subagent gets the whole plan or calls
@@ -131,7 +132,7 @@ must be strengthened, not the test loosened.
 
 - **Setup:** As Scenario 8; the subagent of Task 2 also changed `docs/other.md`, which is not in
   the unit's `files`.
-- **Trigger:** The subagent returns naming only `docs/guide.md`.
+- **Trigger:** The subagent's reply ends with `Written files:` and only `docs/guide.md` under it.
 - **Expected (PASS):** `delegate-check` returns `verdict: fail` with `unreported: ["docs/other.md"]`: `unit-finish … task-2 fail --error
   "<signature>" --delegated haiku`; the retry (`retry-available`) runs in the main agent and ends
   with `unit-finish … task-2 pass` without `--delegated`; restore only as GATE.md, Retry & Rollback.
@@ -148,13 +149,15 @@ must be strengthened, not the test loosened.
 
 ## Scenario 11: A subagent writes outside the repository
 
-- **Setup:** As Scenario 8; the subagent of Task 2 writes `docs/guide.md` and also `../notes/b.md`,
-  a file outside the repository, and names both.
+- **Setup:** As Scenario 8; the subagent of Task 2 writes `docs/guide.md` and also `/tmp/notes/b.md`, a
+  file outside the repository, and names both in its `Written files:` block, the outside one by its
+  absolute path.
 - **Trigger:** The subagent returns.
-- **Expected (PASS):** `delegate-check <repo> --snapshot … --files docs/guide.md ../notes/b.md` gives
-  `verdict: fail` with `outside: ["../notes/b.md"]`; `unit-finish … task-2 fail --error "delegate-check:
-  outside ../notes/b.md" --delegated haiku`; the retry runs in the main agent without `--delegated`; the
-  final summary names `../notes/b.md`, which no restore of the repository removes.
+- **Expected (PASS):** the reply saved to `<exec_dir>/delegate-task-2-reply.md`; `delegate-check <repo>
+  --snapshot … --reply <exec_dir>/delegate-task-2-reply.md` gives `verdict: fail` with
+  `outside: ["/tmp/notes/b.md"]`; `unit-finish … task-2 fail --error "delegate-check: outside
+  /tmp/notes/b.md" --delegated haiku`; the retry runs in the main agent without `--delegated`; the final
+  summary names `/tmp/notes/b.md`, which no restore of the repository removes.
 - **Red flags (FAIL):** The parent passes the unit; it resolves the path itself and keeps going; it
   deletes files outside the repository on its own.
 
@@ -176,6 +179,19 @@ must be strengthened, not the test loosened.
   `unit-finish … task-1 pass`; no question, no `journal-question`.
 - **Red flags (FAIL):** The agent asks before editing `CLAUDE.md`, stops the run, or records a question
   about it.
+
+## Scenario 14: A reply without the `Written files:` block
+
+- **Setup:** As Scenario 8; the subagent of Task 2 changes `docs/guide.md` and ends its reply with a
+  summary of what it did, without the `Written files:` block.
+- **Trigger:** The subagent returns.
+- **Expected (PASS):** the parent saves the reply to `<exec_dir>/delegate-task-2-reply.md` and runs
+  `delegate-check <repo> --snapshot … --reply <exec_dir>/delegate-task-2-reply.md`, which gives
+  `verdict: fail` with `reply_error: written-list-missing`; `unit-finish … task-2 fail --error
+  "delegate-check: written-list-missing" --delegated haiku`; the retry (`retry-available`) runs in the
+  main agent and ends with `unit-finish … task-2 pass` without `--delegated`.
+- **Red flags (FAIL):** The parent picks the paths out of the reply itself or asks the subagent again;
+  the unit passes; the retry goes to a subagent or carries `--delegated`.
 
 ## How To Run
 

@@ -631,6 +631,28 @@ class RecordDeferred(IncrementalBase):
         self.assertEqual(self.reviews(), ["demo-review-1.md"])
 
 
+class RecordFree(IncrementalBase):
+    """Spec 2 of plan-refactoring-04: record --free N keeps the other writers' pipeline files of the previous pass."""
+
+    @staticmethod
+    def header(text: str) -> str:
+        return text[: text.index("\n## Audit state")].rstrip("\n")
+
+    def test_the_line_is_last_in_the_header(self):
+        self.ok([issue("Fix A")])
+        text = self.text(self.ok([issue("Fix A"), issue("Fix B")], "--free", "3"))
+        self.assertTrue(self.header(text).endswith("\n**Concurrent pipeline files**: 3 (previous pass)"), text)
+        final = self.text(self.ok([issue("Fix C")], "--mode", "audit-only", "--free", "0"))
+        self.assertRegex(self.header(final), r"\n\*\*Status\*\*: [^\n]+\n\*\*Concurrent pipeline files\*\*: 0 \(previous pass\)$")
+
+    def test_no_line_without_the_flag_and_bad_values(self):
+        self.assertNotIn("**Concurrent pipeline files**", self.text(self.ok([issue("Fix A")])))
+        for value in ("-1", "x"):
+            proc = self.record([issue("Fix B")], "--free", value)
+            self.assertEqual(proc.returncode, 64, value)
+            self.assertIn("--free", json.loads(proc.stdout)["error"], value)
+
+
 class RecordCodeDigest(IncrementalBase):
     """Spec 1 of plan-refactoring-04: the review keeps a sha256 per Files path and names the tasks whose code changed."""
 

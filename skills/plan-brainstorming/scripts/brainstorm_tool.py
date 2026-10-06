@@ -72,7 +72,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 
 REQUIRED_TEXT_FIELDS = ("file", "summary", "failure_scenario")
@@ -1336,7 +1336,63 @@ def _section_journals(root: str, section: str) -> List[str]:
     return sorted(found)
 
 
-SPEC_ITEM_RE = re.compile(r"^(?:[-*]|\d+\.)\s+(?P<text>.+)$")
+# Tree snapshot (spec 2 of plan-refactoring-04): every file under a root, for executor_tool.py delegate-check and the
+# diff guard of next_review_index.py (both load this file by path). Directories with these names are not walked, .git
+# never is; a write into them is seen only through the subagent's `Written files:` block.
+TREE_SKIP_DIRS = ("node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", "dist", "build")
+TREE_LARGE_BYTES = 8 * 1024 * 1024  # a larger file keeps its size and mtime, without a hash
+
+
+def _tree_file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _tree_entry(path: str) -> List[Any]:
+    """[size, sha256, mtime_ns, label] of one file (a link to a file counts by its target): label None with the hash;
+    `large` (size > TREE_LARGE_BYTES) with the mtime and no hash; `unreadable` when the file cannot be read (size None
+    when it cannot be stat-ed either, e.g. a broken link)."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return [None, None, None, "unreadable"]
+    if info.st_size > TREE_LARGE_BYTES:
+        return [info.st_size, None, info.st_mtime_ns, "large"]
+    try:
+        return [info.st_size, _tree_file_sha256(path), None, None]
+    except OSError:
+        return [info.st_size, None, None, "unreadable"]
+
+
+def tree_snapshot(root: str, skip: Iterable[str] = ()) -> Dict[str, List[Any]]:
+    """{root-relative path with forward slashes: [size, sha256 or None, mtime_ns or None, label]} of every file under
+    `root`, the files git ignores included. `.git` and the TREE_SKIP_DIRS names are skipped at any depth, links to
+    directories are not walked, and `skip` names root-relative paths to leave out (the caller's own snapshot file)."""
+    left_out = {str(path).replace("\\", "/") for path in skip}
+    skipped = set(TREE_SKIP_DIRS) | {".git"}
+    entries: Dict[str, List[Any]] = {}
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = sorted(name for name in dirs if name not in skipped)
+        for name in sorted(files):
+            if name == ".git":  # a worktree's or submodule's .git file
+                continue
+            path = os.path.join(directory, name)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            if rel not in left_out:
+                entries[rel] = _tree_entry(path)
+    return entries
+
+
+def tree_diff(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
+    """Paths of two tree_snapshot results that appeared, disappeared or changed (size, hash, the mtime of a `large`
+    file, the label), sorted."""
+    return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
+
+
+SPEC_ITEM_RE =re.compile(r"^(?:[-*]|\d+\.)\s+(?P<text>.+)$")
 FINDINGS_HEADING = "### Findings Traceability"
 
 

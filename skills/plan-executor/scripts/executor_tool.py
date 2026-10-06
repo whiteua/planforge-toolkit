@@ -948,8 +948,12 @@ def checkpoint_prune(workdir, run_id):
     return {"pruned": refs}
 
 
-# delegate-check (F14 of plan-refactoring-02): what a delegated unit's subagent changed against what it named.
-DELEGATE_SNAPSHOT_VERSION = 1
+# delegate-check (F14 of plan-refactoring-02): what a delegated unit's subagent changed against what it named. Version 2
+# (spec 2 of plan-refactoring-04): kind "tree", brainstorm_tool.tree_snapshot of every file under the root, ignored
+# files included; kind "git-status", the `git status` snapshot of _delegate_state, without plan-brainstorming
+# alongside (warning tree-snapshot-unavailable). A version 1 snapshot is snapshot-invalid.
+DELEGATE_SNAPSHOT_VERSION = 2
+DELEGATE_SNAPSHOT_KINDS = ("tree", "git-status")
 
 
 def _delegate_root(repo):
@@ -989,45 +993,102 @@ def _delegate_state(root, skip=()):
     return {rel: [status, hashes.get(rel)] for rel, status in entries.items()}
 
 
+def _delegate_tree(root, skip=()):
+    """(kind, entries, warnings) of a delegate-check snapshot of `root`: brainstorm_tool.tree_snapshot (kind "tree"),
+    or _delegate_state (kind "git-status", warning tree-snapshot-unavailable) without plan-brainstorming alongside.
+    `skip`: root-relative paths left out."""
+    snapshot = getattr(_load_brainstorm_tool(), "tree_snapshot", None)
+    if snapshot is None:
+        return "git-status", _delegate_state(root, skip), ["tree-snapshot-unavailable"]
+    return "tree", snapshot(root, skip=skip), []
+
+
 def delegate_snapshot(repo, out_path):
-    """`delegate-check <repo> --snapshot-out F`: the state before the subagent, written to F. F itself is left out
-    when it lies in the repository."""
+    """`delegate-check <repo> --snapshot-out F`: the state before the subagent (_delegate_tree), written to F. F itself
+    is left out when it lies in the repository."""
     root = _delegate_root(repo)
     own = _delegate_rel(root, os.path.abspath(out_path))
-    state = _delegate_state(root, {own} if own else ())
-    data = {"version": DELEGATE_SNAPSHOT_VERSION, "root": root, "entries": state}
+    kind, state, warnings = _delegate_tree(root, {own} if own else ())
+    data = {"version": DELEGATE_SNAPSHOT_VERSION, "root": root, "kind": kind, "entries": state}
     Path(out_path).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return {"ok": True, "snapshot": str(Path(out_path).resolve()), "root": root, "entries": len(state)}
+    return {"ok": True, "snapshot": str(Path(out_path).resolve()), "root": root, "kind": kind, "entries": len(state),
+            "warnings": warnings}
 
 
 def _load_delegate_snapshot(path, root):
-    """The entries of a delegate-check snapshot of `root`; snapshot-invalid (exit 2) for a file that cannot be read,
-    is not such a snapshot, or was taken in another repository."""
+    """(kind, entries) of a delegate-check snapshot of `root`; snapshot-invalid (exit 2) for a file that cannot be
+    read, is not a version 2 snapshot (a version 1 one included), or was taken in another repository."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise ToolError(f"snapshot-invalid: {path}: {exc}", 2) from exc
     entries = data.get("entries") if isinstance(data, dict) else None
     if (not isinstance(entries, dict) or data.get("version") != DELEGATE_SNAPSHOT_VERSION
-            or not isinstance(data.get("root"), str)):
-        raise ToolError(f"snapshot-invalid: {path}: not a delegate-check snapshot", 2)
+            or data.get("kind") not in DELEGATE_SNAPSHOT_KINDS or not isinstance(data.get("root"), str)):
+        raise ToolError(f"snapshot-invalid: {path}: not a delegate-check snapshot of version "
+                        f"{DELEGATE_SNAPSHOT_VERSION}", 2)
     if os.path.normcase(os.path.realpath(data["root"])) != os.path.normcase(root):
         raise ToolError(f"snapshot-invalid: {path}: taken in {data['root']}, not in {root}", 2)
-    return entries
+    return data["kind"], entries
 
 
-def delegate_check(repo, snapshot_path, files):
-    """`delegate-check <repo> --snapshot F --files P…`: the verdict of a delegated attempt. `changed`: paths whose
-    status or hash differs from the snapshot; `outside`: named paths that leave the root (_delegate_rel);
-    `unreported`: changed and not named, except the pipeline's files by name (_is_chain_file), which other agents
-    of a chain may write meanwhile; `phantom`: named and not changed. `fail` when any of the three is not empty."""
+# The block that ends a delegated subagent's reply (spec 2 of plan-refactoring-04): `Written files:` and one path per
+# line to the end (relative inside the repository, absolute outside it), or the single line `Written files: none`.
+_WRITTEN_HEAD = "Written files:"
+_WRITTEN_NONE = "Written files: none"
+
+
+def _written_files(text):
+    """The paths of the `Written files:` block that ends `text`, [] for `Written files: none`, None (written-list-missing)
+    when there is no such block, it is empty, or lines follow `none`. `\\r` and trailing spaces are dropped; trailing
+    blank lines and a closing ``` line are skipped; blank lines inside the block are skipped, and a line in it that
+    ends with `:` or opens a ``` fence means more text follows, so the block is not the last one. A path gets `/` for
+    `\\` and loses a leading `./`; a repeated path is kept once."""
+    lines = [line.rstrip() for line in text.replace("\r", "").split("\n")]
+    while lines and lines[-1].strip() in ("", "```"):
+        lines.pop()
+    heads = [index for index, line in enumerate(lines) if line.strip() in (_WRITTEN_HEAD, _WRITTEN_NONE)]
+    if not heads:
+        return None
+    rest = [line.strip() for line in lines[heads[-1] + 1:] if line.strip()]
+    if lines[heads[-1]].strip() == _WRITTEN_NONE:
+        return None if rest else []
+    if not rest or any(line.endswith(":") or line.startswith("```") for line in rest):
+        return None
+    paths = []
+    for line in rest:
+        path = line.replace("\\", "/")
+        while path.startswith("./"):
+            path = path[2:]
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def delegate_check(repo, snapshot_path, reply_path):
+    """`delegate-check <repo> --snapshot F --reply R`: the verdict of a delegated attempt. The named paths are the
+    `Written files:` block that ends the subagent's reply R (_written_files); without such a block `reply_error` is
+    written-list-missing and the attempt fails. `changed`: paths whose entry differs from the snapshot; `outside`:
+    named paths that leave the root (_delegate_rel); `unreported`: changed and not named, except the pipeline's files
+    by name (_is_chain_file), which other agents of a chain may write meanwhile; `phantom`: named and not changed.
+    `fail` when the block is missing or any of the three is not empty; reply-unreadable (exit 2) when R cannot be read.
+    The snapshot F and the reply R are left out of both trees when they lie in the repository (an `exec_dir` inside it,
+    git-ignored, is allowed): R is written after the snapshot and is not the subagent's work."""
     root = _delegate_root(repo)
-    before = _load_delegate_snapshot(snapshot_path, root)
-    own = _delegate_rel(root, os.path.abspath(snapshot_path))
-    after = _delegate_state(root, {own} if own else ())
+    kind, before = _load_delegate_snapshot(snapshot_path, root)
+    try:
+        files = _written_files(Path(reply_path).read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ToolError(f"reply-unreadable: {reply_path}: {exc}", 2) from exc
+    own = {rel for rel in (_delegate_rel(root, os.path.abspath(snapshot_path)),
+                           _delegate_rel(root, os.path.abspath(reply_path))) if rel}
+    now, after, warnings = _delegate_tree(root, own)
+    if now != kind:
+        raise ToolError(f"snapshot-invalid: {snapshot_path}: a {kind} snapshot, the check now takes a {now} one", 2)
+    before = {rel: entry for rel, entry in before.items() if rel not in own}
     changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
     outside, named = [], {}
-    for raw in files:
+    for raw in files or []:
         rel = _delegate_rel(root, raw)
         if rel is None:
             outside.append(str(raw))
@@ -1036,8 +1097,10 @@ def delegate_check(repo, snapshot_path, files):
     keys = {os.path.normcase(rel) for rel in changed}
     unreported = [rel for rel in changed if os.path.normcase(rel) not in named and not _is_chain_file(rel)]
     phantom = sorted(rel for key, rel in named.items() if key not in keys)
-    return {"ok": True, "verdict": "fail" if outside or unreported or phantom else "pass", "outside": outside,
-            "unreported": unreported, "phantom": phantom, "changed": changed}
+    reply_error = "written-list-missing" if files is None else None
+    return {"ok": True, "verdict": "fail" if reply_error or outside or unreported or phantom else "pass",
+            "reply_error": reply_error, "outside": outside, "unreported": unreported, "phantom": phantom,
+            "changed": changed, "warnings": warnings}
 
 
 def recommend_gate(weight):
@@ -2561,10 +2624,12 @@ def cmd_render_progress(args):
 
 def cmd_delegate_check(args):
     if args.snapshot_out:
-        if args.files is not None:
-            raise ToolError("delegate-check-usage: --files goes with --snapshot, not with --snapshot-out", 2)
+        if args.reply is not None:
+            raise ToolError("delegate-check-usage: --reply goes with --snapshot, not with --snapshot-out", 2)
         return delegate_snapshot(args.repo, args.snapshot_out)
-    return delegate_check(args.repo, args.snapshot, args.files or [])
+    if args.reply is None:
+        raise ToolError("delegate-check-usage: --snapshot needs --reply <the subagent's saved reply>", 2)
+    return delegate_check(args.repo, args.snapshot, args.reply)
 
 
 def _register(command, handler, configure):
@@ -2694,7 +2759,8 @@ def _configure_delegate_check(parser):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--snapshot-out", metavar="FILE", help="before the subagent: write the snapshot to FILE")
     mode.add_argument("--snapshot", metavar="FILE", help="after the subagent: compare the working tree with FILE")
-    parser.add_argument("--files", nargs="*", metavar="PATH", help="with --snapshot: every path the subagent named")
+    parser.add_argument("--reply", metavar="FILE",
+                        help="with --snapshot: the subagent's reply saved to FILE; it ends with the Written files: block")
 
 
 _register("accept-changes", cmd_accept_changes, _configure_accept_changes)

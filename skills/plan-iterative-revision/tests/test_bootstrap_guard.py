@@ -237,9 +237,57 @@ class Guard(unittest.TestCase):
         self.assertEqual(p.returncode, 1, p.stdout)
         self.assertEqual(json.loads(p.stdout)["violations"], ["code.py", "docs/BACKLOG.md"])
 
+    def test_ignored_files_and_the_plans_folder_are_seen(self):  # spec 2 of plan-refactoring-04
+        (self.root / ".gitignore").write_text("docs/.*/\n*.log\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.root), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "commit", "-qm", "ignore"], check=True)
+        p = run("guard-begin", str(self.root), "tree")
+        self.assertEqual((p.returncode, json.loads(p.stdout)["files"]), (0, 3))
+        (self.root / "build.log").write_text("x\n", encoding="utf-8")
+        notes = self.root / "docs" / ".plans" / "notes.md"
+        notes.parent.mkdir(parents=True)
+        notes.write_text("n\n", encoding="utf-8")
+        p = run("guard-check", str(self.root), "tree", str(self.root / "plan.md"))
+        out = json.loads(p.stdout)
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertEqual((out["changed"], out["free"], out["violations"]),
+                         (["build.log", "docs/.plans/notes.md"], [], ["build.log", "docs/.plans/notes.md"]))
+
     def test_check_without_begin(self):
         p = run("guard-check", str(self.root), "never-started", "plan.md")
         self.assertEqual(p.returncode, 2)
+
+
+class GuardSplit(unittest.TestCase):
+    """Spec 2 of plan-refactoring-04: other writers' pipeline files are free, this plan's own files are not."""
+
+    PLAN = "docs/.plans/g/g-1-impl.md"
+
+    def test_own_plan_files(self):
+        own = [self.PLAN, "docs/.plans/g/g-1-impl-review-3.md", "docs/.plans/g/g-1-impl-completion.md",
+               "docs/.plans/g/g-1-impl-a.md", "docs/.plans/g/g-1-impl-roadmap.md", "docs/.plans/g/g-1-diffs.md"]
+        other = ["docs/.plans/g/g-2-impl.md", "docs/.plans/g/g-2-impl-review-1.md", "docs/.plans/g/g-chain.json",
+                 "docs/.plans/g/g-1-spec.md", "docs/.plans/h/g-1-impl-review-1.md", "docs/.plans/g/g-1-impl-notes.md"]
+        self.assertEqual([path for path in own if nri.own_plan_file(path, self.PLAN)], own)
+        self.assertEqual([path for path in other if nri.own_plan_file(path, self.PLAN)], [])
+
+    def test_free_and_violations(self):
+        folder = "docs/.plans/g/"
+        changed = ["BACKLOG.md", "code.py", self.PLAN, folder + "g-1-impl-review-1.md", folder + "g-1-diffs.md",
+                   folder + "g-2-impl.md", folder + "g-2-impl-review-1.md", folder + "g-chain.json",
+                   folder + "g-chain.json.lock"]
+        free, violations = nri.guard_split(changed, [self.PLAN], self.PLAN)
+        self.assertEqual(free, [folder + "g-2-impl.md", folder + "g-2-impl-review-1.md", folder + "g-chain.json",
+                                folder + "g-chain.json.lock"])
+        self.assertEqual(violations, ["code.py", folder + "g-1-impl-review-1.md", folder + "g-1-diffs.md"])
+        free, violations = nri.guard_split(changed, [self.PLAN], None)  # plan-unknown: nothing is free
+        self.assertEqual((free, len(violations)), ([], 7))
+
+    def test_plan_rel_from_the_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            stored = {"plan": {"path": str(Path(d) / "docs" / ".plans" / "p-impl.md")}}
+            self.assertEqual(nri.guard_plan_rel(d, stored), "docs/.plans/p-impl.md")
+            self.assertEqual([nri.guard_plan_rel(d, item) for item in ({}, {"plan": None}, None)], [None, None, None])
 
 
 def budget_plan(pad: int = 0) -> str:
@@ -330,6 +378,66 @@ class GuardCheckBudget(unittest.TestCase):
             out = json.loads(p.stdout)
             self.assertEqual((p.returncode, out["git"], out["changed_tasks"], out["over_budget"]), (3, False, ["1"], False))
             self.assertEqual(run("guard-check", d, "check-nogit", str(plan)).returncode, 2)  # the snapshot is used up
+
+
+class GuardFree(unittest.TestCase):
+    """Spec 2 of plan-refactoring-04: guard-check sets other writers' pipeline files apart as free."""
+
+    setUp = Guard.setUp
+    tearDown = Guard.tearDown
+
+    def pipeline_files(self):
+        folder = self.root / "docs" / ".plans" / "g"
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in ("g-1-impl-review-1.md", "g-1-diffs.md", "g-2-impl.md", "g-2-impl-review-1.md",
+                     "g-chain.json", "g-chain.json.lock"):
+            (folder / name).write_text("x\n", encoding="utf-8")
+        (self.root / "BACKLOG.md").write_text("- [ ] note\n", encoding="utf-8")
+
+    def test_free_and_own_files(self):
+        plan = self.root / "docs" / ".plans" / "g" / "g-1-impl.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text(budget_plan(), encoding="utf-8")
+        run("guard-begin", str(self.root), "free", "--plan", str(plan))
+        plan.write_text(budget_plan().replace("do 1", "do 1 again"), encoding="utf-8")
+        self.pipeline_files()
+        p = run("guard-check", str(self.root), "free", str(plan))
+        out = json.loads(p.stdout)
+        self.assertEqual(p.returncode, 1, p.stdout)
+        folder = "docs/.plans/g/"
+        self.assertEqual(out["free"], [folder + name for name in ("g-2-impl-review-1.md", "g-2-impl.md",
+                                                                  "g-chain.json", "g-chain.json.lock")])
+        self.assertEqual(out["violations"], [folder + "g-1-diffs.md", folder + "g-1-impl-review-1.md"])
+        self.assertEqual((out["changed_tasks"], out["warnings"]), (["1"], []))
+
+    def test_without_plan_nothing_is_free(self):
+        run("guard-begin", str(self.root), "free-none")
+        self.pipeline_files()
+        out = json.loads(run("guard-check", str(self.root), "free-none", "plan.md").stdout)
+        self.assertEqual((out["free"], len(out["violations"]), out["warnings"]), ([], 6, ["plan-unknown"]))
+
+
+class GuardWithoutBrainstorm(unittest.TestCase):
+    """Spec 2 of plan-refactoring-04: without plan-brainstorming alongside the guard works by git status, with a warning."""
+
+    setUp = Guard.setUp
+    tearDown = Guard.tearDown
+
+    def test_git_status_with_a_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            copy = Path(d) / "skills" / "plan-iterative-revision" / "scripts" / "next_review_index.py"
+            copy.parent.mkdir(parents=True)
+            shutil.copyfile(str(TOOL), str(copy))
+            solo = lambda *args: subprocess.run([sys.executable, str(copy), *args], text=True, capture_output=True,
+                                                encoding="utf-8")
+            (self.root / ".gitignore").write_text("*.log\n", encoding="utf-8")
+            out = json.loads(solo("guard-begin", str(self.root), "solo").stdout)
+            self.assertEqual((out["changed_count"], out["warnings"]), (1, ["plan-unknown", "tree-snapshot-unavailable"]))
+            (self.root / "build.log").write_text("x\n", encoding="utf-8")
+            (self.root / "code.py").write_text("x = 5\n", encoding="utf-8")
+            out = json.loads(solo("guard-check", str(self.root), "solo", "plan.md").stdout)
+            self.assertEqual((out["changed"], out["violations"], out["free"]), (["code.py"], ["code.py"], []))
+            self.assertEqual(out["warnings"], ["plan-unknown", "tree-snapshot-unavailable"])
 
 
 class BootstrapJournal(unittest.TestCase):

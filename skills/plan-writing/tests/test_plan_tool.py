@@ -945,6 +945,18 @@ class TaskIdContractTest(unittest.TestCase):
             self.assertEqual(resolver.normalize_plan_task_id(value), expected.lower(), value)
 
 
+@unittest.skipUnless(all(os.path.isfile(p) for p in (EXECUTOR, REVISION)), "pipeline skills not installed alongside")
+class ChainFileReContractTest(unittest.TestCase):
+    """Spec 2 of plan-refactoring-04: the revision's diff guard knows the pipeline's file names by a copy of
+    executor_tool._CHAIN_FILE_RE."""
+
+    def test_the_copy_equals_the_executor_pattern(self):
+        executor = _load_by_path("executor_tool", EXECUTOR)
+        revision = _load_by_path("next_review_index", REVISION)
+        self.assertEqual((revision.CHAIN_FILE_RE.pattern, revision.CHAIN_FILE_RE.flags),
+                         (executor._CHAIN_FILE_RE.pattern, executor._CHAIN_FILE_RE.flags))
+
+
 class SkeletonHelperTest(unittest.TestCase):
     def test_code_blocks_and_unclosed_fence(self):
         lines = ["a", "```python", "x = 1", "```", "~~~", "y"]

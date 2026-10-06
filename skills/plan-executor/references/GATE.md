@@ -10,7 +10,7 @@ A checkpoint task (`### Task N: Checkpoint — …`) is gated by running its com
 
 ## Delegated Units
 
-A unit a subagent executed (EXECUTION-STRATEGY.md, Delegation) is gated by the parent, never by the subagent: first the file check (`delegate-check`, EXECUTION-STRATEGY.md, Delegation: `verdict: fail`, or a path of `changed` that is not a pipeline file (`BACKLOG.md`, the run's journal, the chain-file names of Foreign Changes) and is not in `files`, is `fail`), then the 🟢 green checks above, run by the parent itself: the subagent's command output is not evidence. Finish with `unit-finish <exec_dir> <unit> pass|fail [--error "<signature>"] --delegated <model>`. A `fail` goes to Retry & Rollback; the retry runs in the main agent without `--delegated`.
+A unit a subagent executed (EXECUTION-STRATEGY.md, Delegation) is gated by the parent, never by the subagent: first the file check (`delegate-check … --reply`, EXECUTION-STRATEGY.md, Delegation: `verdict: fail`, `written-list-missing` included, or a path of `changed` that is not a pipeline file (`BACKLOG.md`, the run's journal, the chain-file names of Foreign Changes) and is not in `files`, is `fail`), then the 🟢 green checks above, run by the parent itself: the subagent's command output is not evidence. Finish with `unit-finish <exec_dir> <unit> pass|fail [--error "<signature>"] --delegated <model>`. A `fail` goes to Retry & Rollback; the retry runs in the main agent without `--delegated`.
 
 ## External Units
 

@@ -2207,6 +2207,28 @@ class TestDelegationSchema(unittest.TestCase):
         self.assertIn("light", schema["properties"]["settings"]["description"])
 
 
+class TestWrittenFiles(unittest.TestCase):
+    """Spec 2 of plan-refactoring-04: the Written files: block that ends a delegated subagent's reply."""
+
+    def setUp(self):
+        self.parse = load_tool()._written_files
+
+    def test_the_block_that_ends_the_reply(self):
+        reply = ("Done.\r\n\r\nOutput:\r\n5 passed\r\n\r\nWritten files:\r\ndocs\\guide.md  \r\n./docs/new/a.md\r\n"
+                 "\r\n/abs/notes/b.md\r\ndocs/guide.md\r\n\r\n")
+        self.assertEqual(self.parse(reply), ["docs/guide.md", "docs/new/a.md", "/abs/notes/b.md"])
+        self.assertEqual(self.parse("```\nWritten files:\ndocs/guide.md\n```\n\n"), ["docs/guide.md"])
+        self.assertEqual(self.parse("All done.\n\nWritten files: none\n\n"), [])
+
+    def test_missing_empty_or_not_last(self):
+        for reply in ("Done, docs/guide.md changed.\n", "",
+                      "Written files:\ndocs/guide.md\n\nOutput:\n5 passed\n",
+                      "Written files:\ndocs/guide.md\n```\n$ pytest\n```\n",
+                      "Written files: none\ndocs/guide.md\n",
+                      "Written files:\n\n"):
+            self.assertIsNone(self.parse(reply), reply)
+
+
 @unittest.skipUnless(shutil.which("git"), "git required")
 class DelegateCase(unittest.TestCase):
     """A repository with docs/guide.md and app.py committed; app.py changed since (the run's earlier work)."""
@@ -2274,19 +2296,36 @@ class TestDelegateSnapshot(DelegateCase):
     def test_snapshot_records_root_and_entries(self):
         out = self.tool.delegate_snapshot(str(self.repo), self.snapshot)
         data = json.loads(Path(self.snapshot).read_text(encoding="utf-8"))
-        self.assertEqual((out["ok"], out["root"], out["entries"]), (True, self.root, 1))
-        self.assertEqual((data["version"], data["root"], sorted(data["entries"])), (1, self.root, ["app.py"]))
-        self.assertEqual(self.tool._load_delegate_snapshot(self.snapshot, self.root), data["entries"])
+        self.assertEqual((out["ok"], out["root"], out["kind"], out["entries"], out["warnings"]),
+                         (True, self.root, "tree", 2, []))
+        self.assertEqual((data["version"], data["root"], data["kind"], sorted(data["entries"])),
+                         (2, self.root, "tree", ["app.py", "docs/guide.md"]))
+        self.assertEqual(self.tool._load_delegate_snapshot(self.snapshot, self.root), ("tree", data["entries"]))
 
     def test_a_snapshot_inside_the_repository_leaves_itself_out(self):
         inside = self.repo / "delegate.json"
         self.tool.delegate_snapshot(str(self.repo), str(inside))
-        self.assertEqual(sorted(json.loads(inside.read_text(encoding="utf-8"))["entries"]), ["app.py"])
+        self.assertEqual(sorted(json.loads(inside.read_text(encoding="utf-8"))["entries"]), ["app.py", "docs/guide.md"])
+
+    def test_ignored_files_are_in_the_snapshot(self):  # spec 2 of plan-refactoring-04
+        self.write(".gitignore", "*.log\n")
+        self.write("build.log", "x\n")
+        self.tool.delegate_snapshot(str(self.repo), self.snapshot)
+        entries = json.loads(Path(self.snapshot).read_text(encoding="utf-8"))["entries"]
+        self.assertEqual(sorted(entries), [".gitignore", "app.py", "build.log", "docs/guide.md"])
+
+    def test_without_plan_brainstorming_the_snapshot_is_git_status(self):
+        self.tool._load_brainstorm_tool = lambda: None
+        out = self.tool.delegate_snapshot(str(self.repo), self.snapshot)
+        self.assertEqual((out["kind"], out["entries"], out["warnings"]),
+                         ("git-status", 1, ["tree-snapshot-unavailable"]))
 
     def test_invalid_snapshots(self):
         bad = self.base / "bad.json"
-        cases = [(self.base / "missing.json", None), (bad, "{"), (bad, '{"version": 2, "root": "x", "entries": {}}'),
-                 (bad, json.dumps({"version": 1, "root": str(self.base), "entries": {}}))]
+        cases = [(self.base / "missing.json", None), (bad, "{"),
+                 (bad, json.dumps({"version": 2, "root": self.root, "entries": {}})),  # no kind
+                 (bad, json.dumps({"version": 1, "root": self.root, "kind": "tree", "entries": {}})),
+                 (bad, json.dumps({"version": 2, "root": str(self.base), "kind": "tree", "entries": {}}))]
         for path, text in cases:
             if text is not None:
                 bad.write_text(text, encoding="utf-8")
@@ -2306,16 +2345,25 @@ class TestDelegateCheck(DelegateCase):
     def setUp(self):
         super().setUp()
         self.tool.delegate_snapshot(str(self.repo), self.snapshot)
+        self.reply_path = self.base / "delegate-task-1-reply.md"
 
-    def check(self, *files):
-        return self.tool.delegate_check(str(self.repo), self.snapshot, list(files))
+    def reply(self, *files, text=None):
+        if text is None:
+            text = ("Done.\n\nWritten files:\n" + "".join(f"{path}\n" for path in files) if files
+                    else "Done.\n\nWritten files: none\n")
+        self.reply_path.write_text(text, encoding="utf-8")
+        return str(self.reply_path)
+
+    def check(self, *files, text=None):
+        return self.tool.delegate_check(str(self.repo), self.snapshot, self.reply(*files, text=text))
 
     def test_an_honest_unit_passes(self):
         self.write("docs/guide.md", "v2\n")
         self.write("docs/new/a.md", "n\n")
         self.write("docs/g-chain.json", "{}\n")  # another agent of the chain wrote it: not reported
         out = self.check("docs/guide.md", "./docs/new/a.md")
-        self.assertEqual((out["verdict"], out["outside"], out["unreported"], out["phantom"]), ("pass", [], [], []))
+        self.assertEqual((out["verdict"], out["reply_error"], out["outside"], out["unreported"], out["phantom"]),
+                         ("pass", None, [], [], []))
         self.assertEqual(out["changed"], ["docs/g-chain.json", "docs/guide.md", "docs/new/a.md"])
 
     def test_unreported_and_phantom(self):
@@ -2328,25 +2376,83 @@ class TestDelegateCheck(DelegateCase):
         other = self.base / "other"
         far = self.write("x.md", "o\n", other)
         self.write("docs/guide.md", "v2\n")
-        out = self.check("docs/guide.md", "../other/x.md", str(far))
-        self.assertEqual((out["verdict"], out["outside"]), ("fail", ["../other/x.md", str(far)]))
+        out = self.check("docs/guide.md", "../other/x.md", far.as_posix())
+        self.assertEqual((out["verdict"], out["outside"]), ("fail", ["../other/x.md", far.as_posix()]))
         self.link("out", other)
         self.assertEqual(self.check("docs/guide.md", "out/x.md")["outside"], ["out/x.md"])
+
+    def test_an_ignored_file_not_named_is_unreported(self):  # spec 2 of plan-refactoring-04
+        self.write(".gitignore", "*.log\n")
+        self.tool.delegate_snapshot(str(self.repo), self.snapshot)
+        self.write("docs/guide.md", "v2\n")
+        self.write("build.log", "x\n")
+        out = self.check("docs/guide.md")
+        self.assertEqual((out["verdict"], out["unreported"], out["warnings"]), ("fail", ["build.log"], []))
+
+    def test_a_snapshot_of_another_kind_is_invalid(self):
+        real = self.tool._load_brainstorm_tool
+        self.tool._load_brainstorm_tool = lambda: None
+        self.tool.delegate_snapshot(str(self.repo), self.snapshot)
+        self.tool._load_brainstorm_tool = real
+        with self.assertRaises(ValueError) as ctx:
+            self.check()
+        self.assertEqual((ctx.exception.code, str(ctx.exception)[:17]), (2, "snapshot-invalid:"))
+
+    def test_snapshot_and_reply_in_an_ignored_exec_dir_inside_the_repository(self):
+        self.write(".gitignore", ".exec/\n")
+        snapshot = self.repo / ".exec" / "delegate-task-1.json"
+        snapshot.parent.mkdir()
+        self.tool.delegate_snapshot(str(self.repo), str(snapshot))
+        self.write("docs/guide.md", "v2\n")
+        reply = self.write(".exec/delegate-task-1-reply.md", "Done.\n\nWritten files:\ndocs/guide.md\n")
+        out = self.tool.delegate_check(str(self.repo), str(snapshot), str(reply))
+        self.assertEqual((out["verdict"], out["unreported"], out["phantom"], out["changed"]),
+                         ("pass", [], [], ["docs/guide.md"]))
+
+    def test_none_with_nothing_changed_passes(self):
+        out = self.check()
+        self.assertEqual((out["verdict"], out["reply_error"], out["changed"]), ("pass", None, []))
+
+    def test_a_reply_without_the_block_or_with_text_after_it_fails(self):
+        self.write("docs/guide.md", "v2\n")
+        for text in ("Done: docs/guide.md updated.\n", "Written files:\ndocs/guide.md\n\nOutput:\n1 passed\n"):
+            out = self.check(text=text)
+            self.assertEqual((out["verdict"], out["reply_error"]), ("fail", "written-list-missing"), text)
+            self.assertEqual(out["unreported"], ["docs/guide.md"], text)
+
+    def test_crlf_backslashes_and_a_fence_give_no_false_unreported(self):
+        self.write("docs/guide.md", "v2\n")
+        self.write("docs/new/a.md", "n\n")
+        out = self.check(text="Output:\r\n1 passed\r\n```\r\nWritten files:\r\ndocs\\guide.md  \r\n./docs/new/a.md\r\n```\r\n\r\n")
+        self.assertEqual((out["verdict"], out["unreported"], out["phantom"]), ("pass", [], []))
+
+    def test_an_unreadable_reply_is_exit_2(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.tool.delegate_check(str(self.repo), self.snapshot, str(self.base / "missing-reply.md"))
+        self.assertEqual((ctx.exception.code, str(ctx.exception)[:17]), (2, "reply-unreadable:"))
 
     def test_cli_modes_and_exit_codes(self):
         run = lambda *args: subprocess.run([sys.executable, str(TOOL_PATH), "delegate-check", *args],
                                            capture_output=True, text=True, encoding="utf-8", check=False)
         snapshot = str(self.base / "cli.json")
         proc = run(str(self.repo), "--snapshot-out", snapshot)
-        self.assertEqual((proc.returncode, json.loads(proc.stdout)["entries"]), (0, 1))
+        self.assertEqual((proc.returncode, json.loads(proc.stdout)["entries"]), (0, 2))
         self.write("docs/guide.md", "v2\n")
-        proc = run(str(self.repo), "--snapshot", snapshot, "--files", "docs/guide.md")
+        proc = run(str(self.repo), "--snapshot", snapshot, "--reply", self.reply("docs/guide.md"))
         self.assertEqual((proc.returncode, json.loads(proc.stdout)["verdict"]), (0, "pass"))
-        proc = run(str(self.repo), "--snapshot", snapshot, "--files")
+        proc = run(str(self.repo), "--snapshot", snapshot, "--reply", self.reply())
         self.assertEqual(json.loads(proc.stdout)["unreported"], ["docs/guide.md"])
-        self.assertEqual(run(str(self.repo), "--snapshot", str(self.base / "nope.json")).returncode, 2)
+        self.assertEqual(run(str(self.repo), "--snapshot", str(self.base / "nope.json"), "--reply",
+                             self.reply()).returncode, 2)
+        proc = run(str(self.repo), "--snapshot", snapshot, "--reply", str(self.base / "nope.md"))
+        self.assertEqual((proc.returncode, json.loads(proc.stdout)["errors"][0][:17]), (2, "reply-unreadable:"))
         self.assertEqual(run(str(self.base), "--snapshot-out", snapshot).returncode, 1)
-        self.assertEqual(run(str(self.repo), "--snapshot-out", snapshot, "--files", "a").returncode, 2)
+        for args in (("--snapshot", snapshot), ("--snapshot-out", snapshot, "--reply", self.reply())):
+            proc = run(str(self.repo), *args)
+            self.assertEqual((proc.returncode, json.loads(proc.stdout)["errors"][0][:21]), (2, "delegate-check-usage:"))
+        proc = run(str(self.repo), "--snapshot", snapshot, "--files", "docs/guide.md")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--files", proc.stderr)
 
 
 if __name__ == "__main__":

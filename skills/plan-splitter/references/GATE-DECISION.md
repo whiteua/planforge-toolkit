@@ -11,6 +11,11 @@ split without the gate; `never` → the splitter is not needed; `auto`, or no se
 gate. In a chain with `split=auto` the runner calls the same gate (`gate_verdict`) before it
 launches the splitter and skips the stage without an agent on `keep`, and on `borderline` when `silent_verdict` is `keep`.
 
+`never` has one exception: when the user answered `split` to the runner's question `plan-oversized: N tasks, M bytes
+(…)` of this plan (a `split=never` plan over 40 tasks or 150 000 bytes, spec 1 of plan-refactoring-04), the splitter
+splits as with `always`, and its `running` event carries `--reason user-request`. The answer is found in the journal
+file's `questions` (a question of the plan whose text starts with `plan-oversized:`, not `open`, answer `split`).
+
 ## Factors
 
 | Factor | How it is computed |

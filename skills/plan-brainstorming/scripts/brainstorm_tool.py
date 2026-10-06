@@ -152,6 +152,8 @@ PLAN_FILES_BLOCK_RE = re.compile(r"^\*\*(?:files|файлы):\*\*\s*$", re.IGNOR
 PLAN_FILE_ACTION_RE = re.compile(r"^\s*[-*]\s*(create|modify|test|delete|move|создать|изменить|тест)\s*:", re.IGNORECASE)
 PLAN_CODE_PATH_RE = re.compile(r"`([^`\s]+?\.[A-Za-z0-9]+)(?::(\d+(?:-\d+)?))?`")
 PLAN_MD_LINK_RE = re.compile(r"\[([^\]]+\.[A-Za-z0-9]+)\]\(([^)]+)\)")
+# A name with < or > (a placeholder such as <base>-diffs.md) is no path of an action line (spec 1 of plan-refactoring-04).
+PLAN_PLACEHOLDER_RE = re.compile(r"[<>]")
 PLAN_PRECONDITIONS_RE = re.compile(r"^\*\*Preconditions:\*\*")
 PLAN_TASK_REF_RE = re.compile(r"\b(?:Task|Задача)\s+(\d+(?:\.\d+)*)\b")
 PLAN_NUMERIC_ID_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
@@ -505,7 +507,10 @@ def _plan_environment(line: str, where: str, result: Dict[str, Any]) -> None:
 
 
 def _plan_task_files(lines: List[str]) -> List[Dict[str, Any]]:
-    """{path, action, lines} of the **Files:** block of a task, by the rules of executor_tool.extract_files."""
+    """{path, action, lines} of the **Files:** block of a task, by the rules of executor_tool.extract_files. On an
+    action line (Create, Modify, Test, Delete, Move and the Russian ones) the path is the first backticked name or
+    markdown link, the first two for Move:, and the rest of the line explains it; a name with < or > is a
+    placeholder, not a path. A line without an action gives every name (spec 1 of plan-refactoring-04)."""
     files: List[Dict[str, Any]] = []
     seen = set()
     in_scope = False
@@ -520,9 +525,13 @@ def _plan_task_files(lines: List[str]) -> List[Dict[str, Any]]:
         if not in_scope:
             continue
         action = PLAN_FILE_ACTION_RE.match(line)
-        candidates = [(m.group(1), None) for m in PLAN_MD_LINK_RE.finditer(line)]
-        candidates.extend((m.group(1), m.group(2)) for m in PLAN_CODE_PATH_RE.finditer(line))
-        for candidate, span in candidates:
+        candidates = [(m.start(), m.group(1), None) for m in PLAN_MD_LINK_RE.finditer(line)]
+        candidates.extend((m.start(), m.group(1), m.group(2)) for m in PLAN_CODE_PATH_RE.finditer(line))
+        candidates.sort(key=lambda item: item[0])
+        if action:
+            first = candidates[:2 if action.group(1).lower() == "move" else 1]
+            candidates = [item for item in first if not PLAN_PLACEHOLDER_RE.search(item[1])]
+        for _, candidate, span in candidates:
             path = candidate.strip().strip(".,;:")
             path = (path[2:] if path.startswith("./") else path).replace("\\", "/")
             if path and path not in seen:

@@ -12,7 +12,7 @@ Tiers change **how much task ceremony is expanded**, never the task **core**.
 
 Every task, regardless of tier, MUST have:
 
-- `Files:` — exact create/modify/test paths in backticks (checkpoint tasks excepted).
+- `Files:` — exact create/modify/test paths in backticks (checkpoint tasks excepted). The path of an action line is its first name in backticks or its first link (the first two for `Move:`); everything else on the line is explanation.
 - numbered `steps` — `- [ ] **Step N: ...**` with real content (no placeholders).
 - a **verifiable done-state** — either full `Postconditions` or a single
   `Done when:` line naming an observable, checkable result.

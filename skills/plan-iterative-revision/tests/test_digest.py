@@ -278,3 +278,111 @@ class TaskScopeVerdicts(TaskPlanCase):
         review = self.first_review(location="Task 77")
         self.plan.write_text(task_plan(refs=self.refs, edits={3: "changed"}), encoding="utf-8")
         self.assertEqual(self.scope(review)["reason"], "contract-without-task")
+
+
+class CodeDigestUnits(unittest.TestCase):
+    """Spec 1 of plan-refactoring-04: the states of the `## Code digest` table and what counts as a change."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "src" / "pkg.d").mkdir(parents=True)
+        (self.root / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_states(self):
+        root = str(self.root)
+        sha = hashlib.sha256((self.root / "src" / "a.py").read_bytes()).hexdigest()[:12]
+        paths = ("src/a.py", "src/pkg.d", "src/*.py", "../x.py", "/abs/x.py", "src/gone.py")
+        self.assertEqual([nri.code_state(root, path) for path in paths],
+                         [sha, "dir", "glob", "outside", "outside", "missing"])
+        with mock.patch.object(nri, "file_sha256_or_none", side_effect=OSError("denied")):
+            self.assertEqual(nri.code_state(root, "src/a.py"), "unreadable")
+
+    def test_table_round_trip_and_changes(self):
+        tasks = [{"id": "1", "files": [{"path": "src/a.py"}]},
+                 {"id": "2", "files": [{"path": "src/gone.py"}, {"path": "src/a.py"}]},
+                 {"id": "3", "files": [{"path": "src/pkg.d"}, {"path": "src/*.py"}]}]
+        rows = nri.code_digest_rows(tasks, str(self.root))
+        self.assertEqual([path for path, _ in rows], ["src/a.py", "src/gone.py", "src/pkg.d", "src/*.py"])
+        table = nri.parse_code_digest("## Code digest\n\n| Path | Hash |\n|---|---|\n"
+                                      + "".join(f"| {path} | {state} |\n" for path, state in rows))
+        self.assertEqual(table, dict(rows))
+        self.assertEqual(nri.code_changed_tasks(tasks, table, str(self.root)), [])
+        (self.root / "src" / "gone.py").write_text("now here\n", encoding="utf-8")  # missing → a file
+        self.assertEqual(nri.code_changed_tasks(tasks, table, str(self.root)), ["2"])
+        (self.root / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        self.assertEqual(nri.code_changed_tasks(tasks, table, str(self.root)), ["1", "2"])
+        self.assertIsNone(nri.parse_code_digest("## Task digest\n\n| Task | Hash |\n"))
+
+    def test_code_root_without_git_is_the_current_directory(self):
+        self.assertEqual(nri.code_root(str(self.root)), (str(Path.cwd()), ["code-root-cwd"]))
+
+
+class CodeScope(unittest.TestCase):
+    """Spec 1 of plan-refactoring-04: a file changed between passes puts its tasks and their dependents in scope.
+    Ten tasks: Task 1 names src/a.py, Task 2 src/b.py (missing at first), the rest src/c.py; Task 4 needs Task 1."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        (self.dir / "src").mkdir()
+        for name in ("a", "c"):
+            (self.dir / "src" / f"{name}.py").write_text(f"{name} = 1\n", encoding="utf-8")
+        blocks = ["# Demo plan\n"]
+        for number in range(1, 11):
+            name = {1: "a", 2: "b"}.get(number, "c")
+            block = [f"### Task {number}: Title {number}", "", "**Files:**", f"- Modify: `src/{name}.py`", ""]
+            block += ["**Preconditions:**", "- Task 1 is done", ""] if number == 4 else []
+            blocks.append("\n".join(block + [f"- [ ] **Step 1: do {number}**", ""]))
+        self.plan = self.dir / "demo.md"
+        self.plan.write_text("\n".join(blocks), encoding="utf-8")
+        payload = json.dumps({"summary": "S.", "issues": [plan_issue("Fix A", "Task 7, Step 1")]})
+        p = subprocess.run([sys.executable, str(TOOL), "record", str(self.plan), "--run-start", "1", "--max", "5",
+                            "--issues", "-"], text=True, capture_output=True, input=payload, encoding="utf-8",
+                           cwd=str(self.dir))  # outside git the current directory is the root of the Files paths
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.review = Path(json.loads(p.stdout)["review_path"])
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def scope(self):
+        text = self.review.read_text(encoding="utf-8")
+        sha = hashlib.sha256(self.plan.read_bytes()).hexdigest()
+        return nri.task_scope(self.plan.read_text(encoding="utf-8"), sha, text, nri.parse_review_issues(text),
+                              str(self.dir))
+
+    def test_same_code_and_plan_is_none_changed(self):
+        td = self.scope()
+        self.assertEqual((td["scope"], td["code_changed"], td["warnings"]), ("none-changed", [], []))
+
+    def test_changed_file_brings_its_task_and_dependents(self):
+        (self.dir / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        td = self.scope()
+        self.assertEqual((td["scope"], td["plan_sha_changed"], td["code_changed"]), ("incremental", False, ["1"]))
+        self.assertEqual((td["dependents"], td["tasks"], td["changed_ratio"]), (["4"], ["1", "4", "7"], 0.2))
+
+    def test_missing_file_appearing_is_a_change(self):
+        (self.dir / "src" / "b.py").write_text("b = 1\n", encoding="utf-8")
+        self.assertEqual(self.scope()["code_changed"], ["2"])
+
+    def test_more_than_half_of_the_tasks_is_full(self):
+        (self.dir / "src" / "c.py").write_text("c = 2\n", encoding="utf-8")
+        td = self.scope()
+        self.assertEqual((td["scope"], td["reason"]), ("full", "changed-ratio"))
+
+    def test_review_without_the_table(self):
+        self.review.write_text(self.review.read_text(encoding="utf-8").split("## Code digest")[0], encoding="utf-8")
+        (self.dir / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        td = self.scope()
+        self.assertEqual((td["scope"], td["code_changed"], td["warnings"]), ("none-changed", [], ["no-code-digest"]))
+
+    def test_digest_outside_git_reads_from_the_current_directory(self):
+        (self.dir / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        p = subprocess.run([sys.executable, str(TOOL), "digest", str(self.dir), "demo", "--since", "1"], text=True,
+                           capture_output=True, cwd=str(self.dir))
+        td = json.loads(p.stdout)["task_digest"]
+        self.assertEqual((td["code_changed"], td["warnings"]), (["1"], ["code-root-cwd"]))

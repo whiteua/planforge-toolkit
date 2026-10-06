@@ -14,7 +14,7 @@ Run orchestration (used by SKILL.md):
 
   record <plan> --run-start N0 --max M --issues <file|-> [--stop-policy S]
          [--mode full-cycle|audit-only] [--interaction interactive|autonomous] [--user-stop] [--lang ru|en]
-         [--scope full|incremental] [--tasks <ids>]
+         [--scope full|incremental] [--tasks <ids>] [--deferred "N.k:budget,..."]
       Takes the Phase A issues JSON, resolves 'carry' fingerprints, computes fingerprints, merges
       duplicates, applies ALL loop gates (single authority), renders + writes + strictly validates
       REVIEW(N) or the completion file, and prints {action, result, stop_reason, ..., final?,
@@ -22,11 +22,16 @@ Run orchestration (used by SKILL.md):
       input?} when the run stops (done: clean/converged), null while the loop continues.
       --scope incremental (a re-audit of the tasks in --tasks, comma-separated ids) without issues gives
       action full-audit-required: nothing is written and the same audit runs again in full.
+      --deferred: issues of the run's latest review that Phase B deferred for the budget; each gets
+      "[N.k] deferred: budget" under "## Deferred from previous review" and is carried when the audit left it out.
+      With action implement the output has budget {plan_bytes, tasks, max_bytes, max_tasks, headroom_bytes, limit}.
 
-  guard-begin <git-root> <label> / guard-check <git-root> <label> <allowed-path>...
+  guard-begin <git-root> <label> [--plan <plan>] / guard-check <git-root> <label> <allowed-path>...
       Diff guard with snapshots stored in the OS temp dir (never inside the repository).
       Use a label unique per plan and phase (e.g. "<basename>-phase-a"): concurrent runs
       in the same repository must not share a label.
+      --plan keeps the plan's bytes and task hashes in the snapshot (also without git, exit 3); guard-check then
+      adds plan_bytes_before, plan_bytes_after, changed_tasks and over_budget. Without --plan: warnings plan-unknown.
 
   parts <roadmap>
       Batch mode input: parse a plan-splitter '<base>-roadmap.md' and list its parts in table
@@ -142,6 +147,12 @@ TASK_DIGEST_ROW_RE = re.compile(r"^\|\s*(?P<id>[^|\s]+)\s*\|\s*(?P<hash>[0-9a-f]
 TASK_REF_RE = re.compile(r"\b(?:Task|Задача)\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
 NUMERIC_TASK_ID_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
 CARRIED_BY_RECORD = "not applicable — carried by record"
+# `## Code digest` (spec 1 of plan-refactoring-04): per Files path of the plan's tasks the first 12 hex of its sha256
+# or a state; the next `digest` compares it with the disk. dir, glob and outside never change the scope.
+CODE_DIGEST_HEADING = "## Code digest"
+CODE_STATIC_STATES = ("dir", "glob", "outside")
+CODE_DIGEST_ROW_RE = re.compile(
+    r"^\|\s*(?P<path>[^|]*?\S)\s*\|\s*(?P<state>[0-9a-f]{12}|missing|unreadable|dir|glob|outside)\s*\|$")
 
 
 def print_json(data: object) -> None:
@@ -776,6 +787,74 @@ def parse_task_digest(review_text: str) -> Optional[Dict[str, object]]:
     return {"tasks": tasks, "malformed": malformed}
 
 
+def code_state(root: str, path: str) -> str:
+    """The `## Code digest` value of one Files path under ROOT: `outside` (absolute, a leading `/`, a drive or a `..` part), `glob`
+    (`*`), `dir`, `missing`, `unreadable`, else the first 12 hex of the file's sha256."""
+    norm = path.replace("\\", "/")
+    if os.path.isabs(norm) or norm.startswith("/") or re.match(r"^[A-Za-z]:", norm) or ".." in norm.split("/"):
+        return "outside"  # a leading / is outside on every platform (Python 3.13 on Windows: isabs("/x") is False)
+    if "*" in norm:
+        return "glob"
+    full = os.path.join(root, *[part for part in norm.split("/") if part])
+    if norm.endswith("/") or os.path.isdir(full):
+        return "dir"
+    if not os.path.exists(full):
+        return "missing"
+    try:
+        digest = file_sha256_or_none(full)
+    except OSError:
+        return "unreadable"
+    return digest[:12] if digest else "unreadable"
+
+
+def code_root(directory: str) -> Tuple[str, List[str]]:
+    """The root the Files paths are read from: the git top-level of DIRECTORY, else the current directory with the
+    warning code-root-cwd."""
+    root = git_root_of(directory)
+    return (root, []) if root else (os.getcwd(), ["code-root-cwd"])
+
+
+def code_digest_rows(tasks: List[Dict[str, object]], root: str) -> List[Tuple[str, str]]:
+    """(path, code_state) of every distinct path of the tasks' Files blocks, in plan order: the `## Code digest`
+    table of record."""
+    rows: Dict[str, str] = {}
+    for task in tasks:
+        for entry in task.get("files") or []:  # type: ignore[union-attr]
+            path = str(entry["path"])
+            if path not in rows:
+                rows[path] = code_state(root, path)
+    return list(rows.items())
+
+
+def parse_code_digest(review_text: str) -> Optional[Dict[str, str]]:
+    """The `## Code digest` table of a review as {path: state}, None when the review has none. Like
+    parse_task_digest the last unindented heading counts; a row of another shape is skipped."""
+    lines = review_text.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.rstrip() == CODE_DIGEST_HEADING]
+    if not starts:
+        return None
+    rows: Dict[str, str] = {}
+    for line in lines[starts[-1] + 1:]:
+        if line.strip().startswith("## "):
+            break
+        match = CODE_DIGEST_ROW_RE.match(line.strip())
+        if match:
+            rows.setdefault(match.group("path"), match.group("state"))
+    return rows
+
+
+def code_changed_tasks(tasks: List[Dict[str, object]], table: Dict[str, str], root: str) -> List[str]:
+    """Ids, in plan order, of the tasks whose Files name a path the table recorded in another state than the disk
+    has now (a new hash, `missing` ↔ a file, `unreadable` ↔ a hash); `dir`, `glob` and `outside` never count."""
+    changed = set()
+    for path, old in table.items():
+        new = code_state(root, path)
+        if old not in CODE_STATIC_STATES and new not in CODE_STATIC_STATES and new != old:
+            changed.add(path)
+    return [str(task["id"]) for task in tasks
+            if any(str(entry["path"]) in changed for entry in task.get("files") or [])]  # type: ignore[union-attr]
+
+
 def dependents_closure(changed: Iterable[str], tasks: List[Dict[str, object]]) -> List[str]:
     """Tasks whose `refs` (Preconditions) name a changed task, then the tasks that name those, up to a
     fixed point. The seeds may include ids that are no longer in TASKS (removed tasks): their referrers
@@ -812,18 +891,21 @@ def task_scope_base(plan_sha_changed: bool, reason: Optional[str]) -> Dict[str, 
     """The `task_digest` block when nothing can be compared: scope `full`, `available: false`."""
     return {
         "available": False, "plan_sha_changed": plan_sha_changed, "changed": [], "new": [], "removed": [],
-        "unchanged": [], "focus": [], "dependents": [], "tasks": [], "line_ranges": {},
+        "unchanged": [], "focus": [], "dependents": [], "code_changed": [], "tasks": [], "line_ranges": {},
         "changed_ratio": None, "scope": "full", "reason": reason, "warnings": [],
     }
 
 
 def task_scope(plan_text: str, plan_sha: str, latest_review: str,
-               active_contracts: List[Dict[str, str]]) -> Dict[str, object]:
+               active_contracts: List[Dict[str, str]], root: Optional[str] = None) -> Dict[str, object]:
     """Scope of the next audit: the plan's tasks against the `## Task digest` table of the latest review.
     First match wins: no task index → `full`; plan SHA-256 equal to the review's → `none-changed`; no table
     or a malformed one → `full`; changed_ratio > FULL_SCOPE_RATIO or an active contract whose
     `Location in plan` names no known task → `full`; otherwise `incremental`. `tasks` = changed ∪ new ∪
-    focus ∪ dependents in plan order (the `--tasks` of `record`); `line_ranges` = those tasks + `header`."""
+    focus ∪ dependents in plan order (the `--tasks` of `record`); `line_ranges` = those tasks + `header`. With ROOT (spec 1 of plan-refactoring-04) the files of the
+    tasks' Files blocks are compared with the review's ## Code digest: code_changed counts like changed tasks, and an
+    unchanged plan whose code changed is not none-changed; ROOT None skips the check, a review without the table warns
+    no-code-digest."""
     sha_changed = plan_sha.lower() != (header_value(latest_review, "Plan SHA-256") or "").lower()
     tasks, reason = plan_task_index(plan_text)
     if tasks is None:
@@ -847,7 +929,14 @@ def task_scope(plan_text: str, plan_sha: str, latest_review: str,
     unchanged = list(order)
     ratio: Optional[float] = 0.0
     warnings: List[str] = []
-    if not sha_changed:
+    code_changed: List[str] = []
+    if root is not None:  # the code the tasks name (spec 1 of plan-refactoring-04)
+        code_table = parse_code_digest(latest_review)
+        if code_table is None:
+            warnings.append("no-code-digest")
+        else:
+            code_changed = code_changed_tasks(tasks, code_table, root)
+    if not sha_changed and not code_changed:
         scope, reason = "none-changed", None
     elif table is None or table["malformed"]:
         scope, reason, ratio, unchanged = "full", "no-task-digest" if table is None else "task-digest-malformed", None, []
@@ -856,19 +945,20 @@ def task_scope(plan_text: str, plan_sha: str, latest_review: str,
         changed = [task_id for task_id in order if task_id in previous and previous[task_id] != current[task_id]]
         new = [task_id for task_id in order if task_id not in previous]
         removed = [task_id for task_id in previous if task_id not in current]
-        dependents = dependents_closure(changed + new + removed, tasks)  # removed: their referrers now dangle
+        dependents = dependents_closure(changed + new + removed + code_changed, tasks)  # removed: referrers dangle
         unchanged = [task_id for task_id in order if previous.get(task_id) == current[task_id]]
-        ratio = len(set(changed) | set(new) | set(removed) | set(dependents)) / max(len(previous), 1)
+        ratio = (len(set(changed) | set(new) | set(removed) | set(dependents) | set(code_changed))
+                 / max(len(previous), 1))
         scope, reason = (("full", "changed-ratio") if ratio > FULL_SCOPE_RATIO
                          else ("full", "contract-without-task") if irreducible else ("incremental", None))
-    in_scope = set(changed) | set(new) | set(focus) | set(dependents)
+    in_scope = set(changed) | set(new) | set(focus) | set(dependents) | set(code_changed)
     first = min(int(task["line_start"]) for task in tasks)  # type: ignore[arg-type]
     line_ranges: Dict[str, List[int]] = {"header": [1, first - 1]} if first > 1 else {}
     line_ranges.update({str(task["id"]): [int(task["line_start"]), int(task["line_end"])]  # type: ignore[arg-type]
                         for task in tasks if str(task["id"]) in in_scope})
     return {
         "available": True, "plan_sha_changed": sha_changed, "changed": changed, "new": new, "removed": removed,
-        "unchanged": unchanged, "focus": focus, "dependents": dependents,
+        "unchanged": unchanged, "focus": focus, "dependents": dependents, "code_changed": code_changed,
         "tasks": [task_id for task_id in order if task_id in in_scope], "line_ranges": line_ranges,
         "changed_ratio": None if ratio is None else round(ratio, 4), "scope": scope, "reason": reason,
         "warnings": warnings,
@@ -884,7 +974,10 @@ def review_task_scope(directory: str, latest_review: str, active_contracts: List
         return task_scope_base(True, "plan-not-found")
     with open(path, "rb") as f:
         plan_sha = hashlib.sha256(f.read()).hexdigest()
-    return task_scope(read_text(path), plan_sha, latest_review, active_contracts)
+    root, root_warnings = code_root(directory)  # the Files paths are read from the git root (spec 1 of plan-refactoring-04)
+    scope = task_scope(read_text(path), plan_sha, latest_review, active_contracts, root)
+    scope["warnings"] = root_warnings + list(scope["warnings"])  # type: ignore[call-overload]
+    return scope
 
 
 def cmd_digest(directory: str, basename: str, since: int = 0) -> int:
@@ -1254,6 +1347,34 @@ def plan_incomplete(plan: str) -> Optional[str]:
             "finish it with plan-writing first")
 
 
+def plan_measure(plan: str) -> Optional[Dict[str, object]]:
+    """The plan as the budget sees it (spec 1 of plan-refactoring-04): `path`, `bytes` on disk, `task_count`, `tasks`
+    {id: 8-hex sha1} by brainstorm_tool.parse_plan_tasks and SIZE_BUDGET as `max_bytes`/`max_tasks`. None without
+    plan-brainstorming alongside (budget-unavailable) or when the plan cannot be read."""
+    tool = _load_brainstorm_tool()
+    budget = getattr(tool, "SIZE_BUDGET", None)
+    parser = getattr(tool, "parse_plan_tasks", None)
+    if budget is None or parser is None:
+        return None
+    try:
+        with open(plan, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    tasks = parser(raw.decode("utf-8", errors="replace"))["tasks"]
+    return {"path": os.path.abspath(plan), "bytes": len(raw), "task_count": len(tasks),
+            "tasks": {str(task["id"]): str(task["sha1"]) for task in tasks},
+            "max_bytes": int(budget["bytes"]), "max_tasks": int(budget["tasks"])}
+
+
+def record_budget(measure: Dict[str, object]) -> Dict[str, object]:
+    """`budget` of `record` with action implement: the plan's bytes and tasks now, SIZE_BUDGET and headroom_bytes =
+    max_bytes − bytes; limit `off` without headroom (the plan was over the budget before this revision)."""
+    headroom = int(measure["max_bytes"]) - int(measure["bytes"])  # type: ignore[arg-type]
+    return {"plan_bytes": measure["bytes"], "tasks": measure["task_count"], "max_bytes": measure["max_bytes"],
+            "max_tasks": measure["max_tasks"], "headroom_bytes": headroom, "limit": "on" if headroom > 0 else "off"}
+
+
 def cmd_bootstrap(plan: str, config_args: List[str]) -> int:
     if not os.path.isfile(plan):
         print_json({"valid": False, "error": f"plan not found: {plan}"})
@@ -1319,14 +1440,29 @@ def guard_snapshot_path(root: str, label: str) -> str:
     return os.path.join(folder, f"{safe_label}.json")
 
 
-def cmd_guard_begin(root: str, label: str) -> int:
+def cmd_guard_begin(root: str, label: str, plan: Optional[str] = None) -> int:
+    """Snapshot of `git status` for guard-check. With --plan it also keeps the plan's path, bytes and task hashes
+    (plan_measure, spec 1 of plan-refactoring-04), written even without git (exit 3 as before), so that guard-check
+    still gives the budget fields. Without --plan: warnings plan-unknown."""
+    if plan is not None and not os.path.isfile(plan):
+        print_json({"valid": False, "error": f"plan not found: {plan}"})
+        return 2
+    measure = plan_measure(plan) if plan is not None else None
+    warnings = ["plan-unknown"] if plan is None else [] if measure is not None else ["budget-unavailable"]
     code, snapshot = git_changed(root)
     if code != 0:
-        print_json({"valid": False, "git": False, "warning": "git status unavailable; check changed files manually", **snapshot})
+        if measure is not None:
+            with open(guard_snapshot_path(root, label), "w", encoding="utf-8") as f:
+                json.dump({"root": os.path.abspath(root), "git": False, "changed": [], "plan": measure}, f)
+        print_json({"valid": False, "git": False, "warning": "git status unavailable; check changed files manually",
+                    **snapshot, "warnings": warnings})
         return 3
+    if measure is not None:
+        snapshot["plan"] = measure
     with open(guard_snapshot_path(root, label), "w", encoding="utf-8") as f:
         json.dump(snapshot, f)
-    print_json({"valid": True, "git": True, "label": label, "changed_count": len(snapshot["changed"])})
+    print_json({"valid": True, "git": True, "label": label, "changed_count": len(snapshot["changed"]),
+                "warnings": warnings})
     return 0
 
 
@@ -1344,14 +1480,36 @@ def relative_to_root(root: str, path: str) -> str:
 GUARD_FREE_FILES = ("BACKLOG.md",)
 
 
+def guard_budget(before: object) -> Dict[str, object]:
+    """Budget fields of guard-check from the snapshot's `plan` (guard-begin --plan, spec 1 of plan-refactoring-04):
+    the plan's bytes before and after, `changed_tasks` (ids whose sha1 changed or that are new, plan order) and
+    `over_budget` (the plan had room before and is over max_bytes now; false while the limit was off). Without that
+    entry: warnings plan-unknown; without plan-brainstorming or a readable plan now: budget-unavailable."""
+    if not isinstance(before, dict) or not before.get("path"):
+        return {"warnings": ["plan-unknown"]}
+    after = plan_measure(str(before["path"]))
+    if after is None:
+        return {"warnings": ["budget-unavailable"]}
+    old = before.get("tasks") if isinstance(before.get("tasks"), dict) else {}
+    limit_on = int(before["max_bytes"]) - int(before["bytes"]) > 0
+    return {"plan_bytes_before": before["bytes"], "plan_bytes_after": after["bytes"],
+            "changed_tasks": [task_id for task_id, sha in after["tasks"].items() if old.get(task_id) != sha],  # type: ignore
+            "over_budget": limit_on and int(after["bytes"]) > int(after["max_bytes"]), "warnings": []}
+
+
 def cmd_guard_check(root: str, label: str, allowed: Sequence[str]) -> int:
     snapshot_path = guard_snapshot_path(root, label)
     if not os.path.isfile(snapshot_path):
         print_json({"valid": False, "error": f"no guard snapshot for label '{label}'; run guard-begin first"})
         return 2
+    with open(snapshot_path, "r", encoding="utf-8") as f:
+        stored = json.load(f)
+    budget = guard_budget(stored.get("plan") if isinstance(stored, dict) else None)
     code, after = git_changed(root)
-    if code != 0:
-        print_json({"valid": False, "git": False, "warning": "git status unavailable; check changed files manually", **after})
+    if code != 0:  # no git: the guard is unavailable, the budget fields of a --plan snapshot still come
+        os.remove(snapshot_path)
+        print_json({"valid": False, "git": False, "warning": "git status unavailable; check changed files manually",
+                    **after, **budget})
         return 3
     before = load_changed_map(snapshot_path)
     after_map = {
@@ -1361,7 +1519,7 @@ def cmd_guard_check(root: str, label: str, allowed: Sequence[str]) -> int:
     changed = sorted(path for path in set(before) | set(after_map) if before.get(path) != after_map.get(path))
     violations = [path for path in changed if not path_is_allowed(path, allowed_rel) and path not in GUARD_FREE_FILES]
     os.remove(snapshot_path)
-    print_json({"valid": not violations, "changed": changed, "allowed": allowed_rel, "violations": violations})
+    print_json({"valid": not violations, "changed": changed, "allowed": allowed_rel, "violations": violations, **budget})
     return 0 if not violations else 1
 
 
@@ -1567,9 +1725,15 @@ def render_review(
     status: Optional[str],
     audit_tasks: Optional[List[str]] = None,
     task_hashes: Optional[List[Tuple[str, str]]] = None,
+    budget_line: Optional[str] = None,
+    deferred: Optional[List[Tuple[str, str]]] = None,
+    code_changed: Optional[List[str]] = None,
+    code_hashes: Optional[List[Tuple[str, str]]] = None,
 ) -> str:
     """AUDIT_TASKS: the task ids of an incremental audit (None = a full audit, `all`); TASK_HASHES:
-    (id, 8-hex sha1) of every plan task for the `## Task digest` table (None = no table)."""
+    (id, 8-hex sha1) of every plan task for the `## Task digest` table (None = no table). BUDGET_LINE: the **Budget** header line
+    after **Audit tasks** (None = no line). CODE_CHANGED: the **Code changed tasks** ids (None = no line);
+    CODE_HASHES: (path, state) rows of the ## Code digest table (None = no table)."""
     counts = {severity: sum(1 for it in issues if it["severity"] == severity) for severity in SEVERITIES}
     with open(plan, "rb") as f:
         data = f.read()
@@ -1589,6 +1753,12 @@ def render_review(
         f"**Previous review**: {os.path.basename(prev_review) if prev_review else 'none'}",
         f"**Audit scope**: {'full' if audit_tasks is None else 'incremental'}",
         f"**Audit tasks**: {'all' if audit_tasks is None else ', '.join(audit_tasks) or 'none'}",
+    ]
+    if budget_line:  # the plan was over the budget before Phase B (spec 1 of plan-refactoring-04)
+        lines.append(budget_line)
+    if code_changed is not None:  # the tasks whose files changed since the previous review (spec 1 of plan-refactoring-04)
+        lines.append(f"**Code changed tasks**: {', '.join(code_changed) or 'none'}")
+    lines += [
         f"**Issues found**: {len(issues)} (blocker: {counts['blocker']}, major: {counts['major']}, "
         f"minor: {counts['minor']}, nit: {counts['nit']})",
         f"**Flow**: +{flows['new']} / -{flows['resolved']} / {flows['persisted']} persisted / "
@@ -1638,11 +1808,16 @@ def render_review(
             "",
         ]
     lines += ["## Deferred from previous review", ""]
-    lines += [f"- [{it['id']}] carried from {it['carried_from']}" for it in carried] or ["none"]
+    deferred_lines = [f"- [{it['id']}] carried from {it['carried_from']}" for it in carried]
+    deferred_lines += [f"- [{issue_id}] deferred: {reason}" for issue_id, reason in deferred or []]
+    lines += deferred_lines or ["none"]
     lines += ["", "## Notes for implementation", "", str(payload.get("notes") or "").strip() or "none", ""]
     if task_hashes:
         lines += [TASK_DIGEST_HEADING, "", "| Task | Hash |", "|---|---|"]
         lines += [f"| {task_id} | {sha} |" for task_id, sha in task_hashes] + [""]
+    if code_hashes is not None:
+        lines += [CODE_DIGEST_HEADING, "", "| Path | Hash |", "|---|---|"]
+        lines += [f"| {path} | {state} |" for path, state in code_hashes] + [""]
     return "\n".join(lines)
 
 
@@ -1759,6 +1934,25 @@ def carry_of(contract: Dict[str, str]) -> Dict[str, str]:
     }
 
 
+# record --deferred "N.k:budget,…" (spec 1 of plan-refactoring-04): issues of the run's latest review that its Phase B
+# deferred for the budget; budget is the only reason.
+DEFERRED_ITEM_RE = re.compile(r"^(?P<id>\d+\.\d+):(?P<reason>budget)$")
+
+
+def parse_deferred(value: str) -> List[Tuple[str, str]]:
+    """(issue id, reason) pairs of --deferred, once each, in the given order; RecordError on another form."""
+    items: List[Tuple[str, str]] = []
+    for raw in value.split(","):
+        if not raw.strip():
+            continue
+        match = DEFERRED_ITEM_RE.match(raw.strip())
+        if not match:
+            raise RecordError(f"--deferred: expected <N.k>:budget, got {raw.strip()!r}")
+        if (match.group("id"), match.group("reason")) not in items:
+            items.append((match.group("id"), match.group("reason")))
+    return items
+
+
 RECORD_OPTIONS = {
     "--run-start": "run_start",
     "--max": "max",
@@ -1769,6 +1963,7 @@ RECORD_OPTIONS = {
     "--lang": "lang",
     "--scope": "scope",
     "--tasks": "tasks",
+    "--deferred": "deferred",
 }
 
 
@@ -1829,6 +2024,7 @@ def parse_record_args(args: List[str]) -> Dict[str, object]:
         opts["tasks"] = list(dict.fromkeys(ids))
     else:
         opts["tasks"] = None  # a full audit names no tasks: --tasks is ignored
+    opts["deferred"] = parse_deferred(str(opts["deferred"])) if "deferred" in opts else []
     return opts
 
 
@@ -1852,6 +2048,7 @@ def cmd_record(args: List[str]) -> int:
             raise RecordError("issues JSON must be an object or a list")
         input_warnings: List[str] = []
         issues = normalize_input_issues(directory, basename, payload.get("issues", []), input_warnings)
+        raw_items = list(payload.get("issues", []))
     except (OSError, ValueError, RecordError) as exc:
         print_json({"error": str(exc)})
         return 2
@@ -1874,12 +2071,32 @@ def cmd_record(args: List[str]) -> int:
             dropped = dropped_contracts(directory, basename, run_start, plan_index, issues,
                                         opts["tasks"]) if plan_index else []  # type: ignore[arg-type]
             if dropped:
-                raw = list(payload.get("issues", [])) + [carry_of(contract) for contract in dropped]
-                issues = normalize_input_issues(directory, basename, raw)
+                raw_items += [carry_of(contract) for contract in dropped]
+                issues = normalize_input_issues(directory, basename, raw_items)
                 input_warnings.append("contracts-dropped: [" + ", ".join(c["fingerprint"] for c in dropped) + "]")
         except (OSError, ValueError, KeyError, RecordError) as exc:
             print_json({"error": f"contracts-carry-failed: {exc}"})
             return 64
+    if opts["deferred"]:  # an issue the last Phase B deferred for the budget stays open (spec 1 of plan-refactoring-04)
+        if not history:
+            print_json({"error": "--deferred: the first audit of a run has no previous review"})
+            return 64
+        latest = collect_review_files(directory, basename, run_start)[-1][1]
+        previous = {item["id"]: item for item in parse_review_issues(read_text(latest))}
+        unknown = [issue_id for issue_id, _ in opts["deferred"] if issue_id not in previous]  # type: ignore[union-attr]
+        if unknown:
+            print_json({"error": f"--deferred names issues the previous review does not have: {', '.join(unknown)}"})
+            return 64
+        present = {item["fingerprint"] for item in issues}
+        carries = [carry_of(previous[issue_id]) for issue_id, _ in opts["deferred"]  # type: ignore[union-attr]
+                   if previous[issue_id]["fingerprint"] not in present]
+        if carries:
+            raw_items += carries
+            try:
+                issues = normalize_input_issues(directory, basename, raw_items)
+            except (OSError, ValueError, KeyError, RecordError) as exc:
+                print_json({"error": f"contracts-carry-failed: {exc}"})
+                return 64
     decision = decide(
         history,
         issues,
@@ -1890,6 +2107,15 @@ def cmd_record(args: List[str]) -> int:
         bool(opts["user_stop"]),
         str(opts["scope"]),
     )
+    budget: Optional[Dict[str, object]] = None
+    if decision["action"] == "implement":  # Phase B's room in the budget (spec 1 of plan-refactoring-04)
+        measure = plan_measure(plan)
+        if measure is None:
+            input_warnings.append("budget-unavailable")
+        else:
+            budget = record_budget(measure)
+            if budget["limit"] == "off":
+                input_warnings.append(f"oversized-before-revision: {budget['plan_bytes']} bytes > {budget['max_bytes']}")
     lang = str(opts.get("lang") or detect_lang(read_text(plan)))
     run_reviews = [os.path.basename(path) for _n, path in collect_review_files(directory, basename, run_start)]
     out: Dict[str, object] = {
@@ -1903,15 +2129,28 @@ def cmd_record(args: List[str]) -> int:
         "completion_path": None,
         "issues": [],
         "warnings": input_warnings,
+        "budget": budget,
     }
 
     if decision.get("write_review"):
         n, prev = next_review_number(directory, basename)
         path = os.path.join(directory, f"{basename}-review-{n}.md")
+        code_hashes: Optional[List[Tuple[str, str]]] = None
+        code_changed: Optional[List[str]] = None
+        if plan_index:  # the code the tasks name, for the next digest (spec 1 of plan-refactoring-04)
+            root, _ = code_root(directory)  # code-root-cwd is a digest warning, not one of record
+            code_hashes = code_digest_rows(plan_index, root)
+            reviews = collect_review_files(directory, basename, run_start)
+            table = parse_code_digest(read_text(reviews[-1][1])) if reviews else None
+            code_changed = code_changed_tasks(plan_index, table, root) if table is not None else []
         text = render_review(
             n, basename, plan, lang, prev, issues, payload, decision["flows"], decision["status"],  # type: ignore[arg-type]
             audit_tasks=audit_tasks,  # type: ignore[arg-type]
             task_hashes=[(str(task["id"]), str(task["sha1"])) for task in plan_index] if plan_index else None,
+            budget_line=(f"**Budget**: off — oversized before revision ({budget['plan_bytes']} bytes > "
+                         f"{budget['max_bytes']})" if budget and budget["limit"] == "off" else None),
+            deferred=opts["deferred"],  # type: ignore[arg-type]
+            code_changed=code_changed, code_hashes=code_hashes,
         )
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -2014,10 +2253,13 @@ def main(argv: List[str]) -> int:
         return cmd_record(argv[2:])
 
     if cmd == "guard-begin":
-        if len(argv) != 4:
-            print("usage: next_review_index.py guard-begin <git-root> <label>", file=sys.stderr)
+        rest, plan = argv[2:], None
+        if len(rest) == 4 and rest[2] == "--plan":
+            rest, plan = rest[:2], rest[3]
+        if len(rest) != 2:
+            print("usage: next_review_index.py guard-begin <git-root> <label> [--plan <plan>]", file=sys.stderr)
             return 64
-        return cmd_guard_begin(argv[2], argv[3])
+        return cmd_guard_begin(rest[0], rest[1], plan)
 
     if cmd == "guard-check":
         if len(argv) < 5:

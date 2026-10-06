@@ -203,7 +203,7 @@ With `verify`, the skill runs `plan-iterative-revision` once over the roadmap (e
 
 **Gate decision:** `splitter_tool.py gate` decides by numbers (tasks, bytes, modules, dependency shape) and may decide the plan does NOT need splitting. This is a valid outcome — you'll get a `gate-pass` notice and can proceed directly to `plan-executor`. When the plan is split, the model only chooses the part boundaries from the task list; `split-write` writes the roadmap and the parts and copies every task's text byte for byte, and `validate-all` checks the copy.
 
-In a chain, the `split` setting decides: `always` skips the gate, `never` means no split. `**External:**`, `**Size:**` and `**Structural event:**` lines of tasks are copied into the parts verbatim.
+In a chain, the `split` setting decides: `always` skips the gate, `never` means no split (except after your answer `split` to the runner's `plan-oversized:` question: a `split=never` plan over 40 tasks or 150 000 bytes stops the chain on it). `**External:**`, `**Size:**` and `**Structural event:**` lines of tasks are copied into the parts verbatim.
 
 **Output** (alongside the original plan, which is never modified):
 
@@ -286,7 +286,7 @@ The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent t
 
 Stop decisions use only the reviews of the current run.
 
-**Incremental re-audits.** From the second audit on, the review's table of task hashes tells which tasks Phase B changed: the next audit reads the plan's header plus the changed and new tasks, the tasks of the open contracts and the tasks that depend on them through `Preconditions`, and cross-checks only those against the code. An unchanged plan skips the audit; more than half of the tasks touched, or a contract that names no task, makes it full. A clean incremental audit is always followed by one full audit, and only that one ends the run as `converged`. Without `plan-brainstorming` alongside every audit is full.
+**Incremental re-audits.** From the second audit on, the review's table of task hashes tells which tasks Phase B changed: the next audit reads the plan's header plus the changed and new tasks, the tasks of the open contracts and the tasks that depend on them through `Preconditions`, and cross-checks only those against the code. A plan unchanged byte for byte, with unchanged files in its tasks' `Files` blocks (the review's `## Code digest`), skips the audit, while a changed file puts its tasks into the scope; more than half of the tasks touched, or a contract that names no task, makes it full. A clean incremental audit is always followed by one full audit, and only that one ends the run as `converged`. Without `plan-brainstorming` alongside every audit is full.
 
 In a chain, the preset and the stop policy come from the `Chain` setting of the spec and are not asked; a run without a confirmation channel stops at the iteration limit. A read allowed for the whole run (`read=run`) lets the audit check that environment, read-only. A remark about the code rather than the plan goes to the chain journal and `BACKLOG.md` (`journal-finding`), and a stop that needs your decision is recorded there as a question.
 

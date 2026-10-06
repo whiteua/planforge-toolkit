@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -10,6 +11,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "scripts" / "next_review_index.py"
+
+_spec = importlib.util.spec_from_file_location("nri_guard", TOOL)
+nri = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(nri)
 
 
 def run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -235,6 +240,96 @@ class Guard(unittest.TestCase):
     def test_check_without_begin(self):
         p = run("guard-check", str(self.root), "never-started", "plan.md")
         self.assertEqual(p.returncode, 2)
+
+
+def budget_plan(pad: int = 0) -> str:
+    """A three-task plan with PAD characters in its header."""
+    return "# Plan\n\n" + "x" * pad + "\n\n" + "".join(f"### Task {n}: T{n}\n\n- [ ] **Step 1: do {n}**\n\n"
+                                                      for n in range(1, 4))
+
+
+class GuardBeginPlan(unittest.TestCase):
+    """Spec 1 of plan-refactoring-04: guard-begin --plan keeps the plan's size and task hashes, also without git."""
+
+    setUp = Guard.setUp
+    tearDown = Guard.tearDown
+
+    def snapshot(self, root, label):
+        path = Path(nri.guard_snapshot_path(str(root), label))
+        self.addCleanup(lambda: path.unlink() if path.exists() else None)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_plan_in_the_snapshot(self):
+        plan = self.root / "plan.md"
+        plan.write_text(budget_plan(), encoding="utf-8")
+        p = run("guard-begin", str(self.root), "begin-plan", "--plan", str(plan))
+        self.assertEqual((p.returncode, json.loads(p.stdout)["git"], json.loads(p.stdout)["warnings"]), (0, True, []))
+        stored = self.snapshot(self.root, "begin-plan")["plan"]
+        self.assertEqual((stored["bytes"], stored["task_count"], sorted(stored["tasks"])),
+                         (len(plan.read_bytes()), 3, ["1", "2", "3"]))
+        self.assertEqual((stored["max_bytes"], stored["max_tasks"]), (150000, 40))
+
+    def test_without_plan_warns_and_bad_plans_fail(self):
+        p = run("guard-begin", str(self.root), "begin-none")
+        self.assertEqual((p.returncode, json.loads(p.stdout)["warnings"]), (0, ["plan-unknown"]))
+        self.assertNotIn("plan", self.snapshot(self.root, "begin-none"))
+        self.assertEqual(run("guard-begin", str(self.root), "begin-x", "--plan", str(self.root / "none.md")).returncode, 2)
+        self.assertEqual(run("guard-begin", str(self.root), "begin-x", "--plan").returncode, 64)
+
+    def test_without_git_the_snapshot_is_still_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d) / "plan.md"
+            plan.write_text(budget_plan(), encoding="utf-8")
+            p = run("guard-begin", d, "begin-nogit", "--plan", str(plan))
+            self.assertEqual((p.returncode, json.loads(p.stdout)["git"]), (3, False))
+            stored = self.snapshot(d, "begin-nogit")
+            self.assertEqual((stored["git"], stored["changed"], stored["plan"]["task_count"]), (False, [], 3))
+
+
+class GuardCheckBudget(unittest.TestCase):
+    """Spec 1 of plan-refactoring-04: guard-check gives the budget fields of a snapshot taken with --plan."""
+
+    setUp = Guard.setUp
+    tearDown = Guard.tearDown
+
+    def window(self, label, before, after):
+        plan = self.root / "plan.md"
+        plan.write_text(before, encoding="utf-8")
+        run("guard-begin", str(self.root), label, "--plan", str(plan))
+        plan.write_text(after, encoding="utf-8")
+        p = run("guard-check", str(self.root), label, str(plan))
+        self.assertEqual(p.returncode, 0, p.stdout)
+        return json.loads(p.stdout)
+
+    def test_fields_after_phase_b(self):
+        after = budget_plan().replace("do 2", "do 2 better") + "### Task 4: T4\n\n- [ ] **Step 1: do 4**\n"
+        out = self.window("check-fields", budget_plan(), after)
+        self.assertEqual((out["changed_tasks"], out["over_budget"], out["warnings"]), (["2", "4"], False, []))
+        self.assertEqual(out["plan_bytes_after"], len((self.root / "plan.md").read_bytes()))
+        self.assertLess(out["plan_bytes_before"], out["plan_bytes_after"])
+
+    def test_over_budget_only_while_the_limit_was_on(self):
+        out = self.window("check-over", budget_plan(pad=149000), budget_plan(pad=151000))
+        self.assertEqual((out["over_budget"], out["changed_tasks"]), (True, []))
+        out = self.window("check-off", budget_plan(pad=151000), budget_plan(pad=152000))
+        self.assertFalse(out["over_budget"])  # limit off: the plan was over the budget before
+
+    def test_snapshot_without_plan_is_as_before(self):
+        run("guard-begin", str(self.root), "check-none")
+        out = json.loads(run("guard-check", str(self.root), "check-none", "plan-review-1.md").stdout)
+        self.assertEqual(out["warnings"], ["plan-unknown"])
+        self.assertNotIn("over_budget", out)
+
+    def test_without_git(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d) / "plan.md"
+            plan.write_text(budget_plan(), encoding="utf-8")
+            run("guard-begin", d, "check-nogit", "--plan", str(plan))
+            plan.write_text(budget_plan().replace("do 1", "do 1 again"), encoding="utf-8")
+            p = run("guard-check", d, "check-nogit", str(plan))
+            out = json.loads(p.stdout)
+            self.assertEqual((p.returncode, out["git"], out["changed_tasks"], out["over_budget"]), (3, False, ["1"], False))
+            self.assertEqual(run("guard-check", d, "check-nogit", str(plan)).returncode, 2)  # the snapshot is used up
 
 
 class BootstrapJournal(unittest.TestCase):

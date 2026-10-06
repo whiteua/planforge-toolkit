@@ -44,7 +44,7 @@ Two host tools let a stop of the runner reach the user away from the terminal. A
 | `github-copilot` | none known (Unverified) | text |
 | `fallback` | `PushNotification` when this session has it, else none | the question tool when this session has it, else text |
 
-- **Push:** one line, in the dialogue language, when the loop stops on questions and when the summary of a finished run is ready (LOOP.md, 7. End), e.g. "plan-refactoring-02: stopped, 2 questions — discuss" or "plan-refactoring-02: run complete". Nothing else is pushed: no progress lines, no push per question. The push is a host call, not a write; the runner sends it only at the End, when no audit agent runs.
+- **Push:** one line, in the dialogue language, when the loop stops on questions and when the summary of a finished run is ready (LOOP.md, 7. End), e.g. "plan-refactoring-02: stopped, 2 questions — discuss" or "plan-refactoring-02: run complete". A stop on a `plan-oversized:` question is named in it: "<goal>: stopped, plan over the budget — discuss". Nothing else is pushed: no progress lines, no push per question. The push is a host call, not a write; the runner sends it only at the End, when no audit agent runs.
 - **Questions with options:** the choices of the start (START.md: the card's confirm / edit, the start commit's yes / no, continue here / stop) and the question of `discuss` (DISCUSS.md: the options of one journal question) go through the question tool, the options in the dialogue language with one line of explanation each and the recommended one first; the user's own words stay possible. The tokens recorded in the journal stay as DISCUSS.md says.
 
 ## Host errors

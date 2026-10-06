@@ -24,6 +24,8 @@ Review files are immutable history once written.
 **Previous review**: <basename>-review-<N-1>.md | none
 **Audit scope**: full | incremental
 **Audit tasks**: all | <task ids of an incremental audit, comma-separated> | none
+**Budget**: off — oversized before revision (<bytes> bytes > 150000)   (only when the plan was over the budget before Phase B)
+**Code changed tasks**: <ids of the tasks whose Files changed on disk since the previous review> | none   (with the Task digest)
 **Issues found**: <total> (blocker: x, major: y, minor: z, nit: w)
 **Flow**: +new / -resolved / P persisted / X reintro | Profile: (B,M,m,n)
 **Status**: FINAL — ... | ESCALATED — ...   (only on a final review)
@@ -64,6 +66,7 @@ Review files are immutable history once written.
 ## Deferred from previous review
 
 - [N.k] carried from <review#id> | none
+- [M.j] deferred: budget            (an issue of the previous review its Phase B deferred for the budget; record --deferred)
 
 ## Notes for implementation
 
@@ -75,6 +78,13 @@ Review files are immutable history once written.
 |---|---|
 | 1 | 9f3c2a1b |
 | 1.1 | 0e77ad21 |
+
+## Code digest                      (with the Task digest)
+
+| Path | Hash |
+|---|---|
+| skills/x/scripts/tool.py | 3f9a0c21b7e4 |
+| skills/x/scripts/new.py | missing |
 ```
 
 ## Rules
@@ -93,6 +103,17 @@ Review files are immutable history once written.
   SHA-1 of its body (`brainstorm_tool.parse_plan_tasks`). The next `digest` compares it with the plan to
   scope the next audit. There is no table without plan-brainstorming, for a plan without tasks or with
   repeated task ids.
+- `**Budget**` (spec 1 of plan-refactoring-04): written by a `record` with `action: implement` when the plan was over
+  the budget of 150 000 bytes before Phase B (`limit: off`); a plan with room has no such line.
+- `**Code changed tasks**`: written with the Task digest; the tasks whose Files paths changed state on disk against the
+  `## Code digest` of the run's previous review (`none` on the first audit or without that table).
+- `## Code digest`: every distinct path of the Files blocks of the plan's tasks (the first name of an action line, two
+  for `Move:`), relative to the git root (outside git, the current directory), with the first 12 hex of its SHA-256
+  or a state: `missing`, `unreadable`, `dir`, `glob` (a `*`), `outside` (absolute or `..`). The next `digest` puts
+  the tasks of a path whose state changed, and their dependents, into the audit (`code_changed`); `dir`, `glob` and
+  `outside` never count. A row of another shape is skipped.
+- `[N.k] deferred: budget` under `## Deferred from previous review`: one line per id of `record --deferred`; the issue
+  stays open (carried when the audit left it out).
 
 ## Status markers
 

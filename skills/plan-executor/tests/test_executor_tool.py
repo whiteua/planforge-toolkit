@@ -1314,6 +1314,30 @@ class TestExtractFiles(unittest.TestCase):
             [{"path": "cli.py", "action": "modify", "lines": "4-6"}, {"path": "tests/test_cli.py", "action": "test", "lines": None}],
         )
 
+    def test_action_line_takes_its_first_path_only(self):  # spec 1 of plan-refactoring-04
+        text = "\n".join([
+            "### Task 1: Action lines",
+            "",
+            "**Files:**",
+            "- Modify: `a/cli.py:4-6` (сейчас: `executor_tool.py` / `-roadmap.md` / `parts.json`)",
+            "- Create: `<base>-diffs.md` (шаблон, затем `b/real.py`)",
+            "- Move: `old/x.py` → `new/x.py` (и `y.py`)",
+            "- Test: [test_cli.py](tests/test_cli.py) и `other.py`",
+            "- `notes.txt` и `<X>-diffs.md`",
+            "",
+            "**Preconditions:**",
+            "- `other.py` exists",
+            "",
+        ])
+        self.assertEqual(self.tool.extract_files(text), [
+            {"path": "a/cli.py", "action": "modify", "lines": "4-6"},
+            {"path": "old/x.py", "action": "move", "lines": None},
+            {"path": "new/x.py", "action": "move", "lines": None},
+            {"path": "test_cli.py", "action": "test", "lines": None},
+            {"path": "notes.txt", "action": None, "lines": None},
+            {"path": "<X>-diffs.md", "action": None, "lines": None},
+        ])
+
 
 @unittest.skipUnless(shutil.which("git"), "git required")
 class TestHiddenRefCheckpoints(CheckpointTestCase):

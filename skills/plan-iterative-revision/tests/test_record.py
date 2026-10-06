@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -563,6 +564,110 @@ class RecordEvidenceLength(RecordBase):
         self.assertEqual(len(out["issues"]), 1)
         self.assertEqual(len(out["warnings"]), 1)
         self.assertIn("evidence-too-long: 801 characters", out["warnings"][0])
+
+
+class RecordBudget(IncrementalBase):
+    """Spec 1 of plan-refactoring-04: record hands Phase B the plan's room in the budget."""
+
+    def test_budget_from_the_file_on_disk(self):
+        out = self.ok([issue("Fix A")])
+        size = len(self.plan.read_bytes())
+        self.assertEqual(out["budget"], {"plan_bytes": size, "tasks": 4, "max_bytes": 150000, "max_tasks": 40,
+                                         "headroom_bytes": 150000 - size, "limit": "on"})
+        self.assertNotIn("**Budget**", self.text(out))
+        self.plan.write_text(task_plan() + "\nGrown after the review.\n", encoding="utf-8")
+        out = self.ok([issue("Fix A"), issue("Fix B")])
+        self.assertEqual(out["budget"]["headroom_bytes"], 150000 - len(self.plan.read_bytes()))
+
+    def test_oversized_before_revision_turns_the_limit_off(self):
+        self.plan.write_text(task_plan() + "\n" + "x" * 150000 + "\n", encoding="utf-8")
+        size = len(self.plan.read_bytes())
+        out = self.ok([issue("Fix A")])
+        self.assertEqual((out["budget"]["limit"], out["budget"]["headroom_bytes"]), ("off", 150000 - size))
+        self.assertIn(f"oversized-before-revision: {size} bytes > 150000", out["warnings"])
+        self.assertIn(f"**Audit tasks**: all\n**Budget**: off — oversized before revision ({size} bytes > 150000)\n",
+                      self.text(out))
+
+    def test_budget_only_for_implement_and_without_plan_brainstorming(self):
+        self.assertIsNone(self.ok([])["budget"])  # clean: nothing to implement
+        issues_file = self.dir / "issues.json"
+        issues_file.write_text(json.dumps({"summary": "S.", "issues": [issue("Fix A")]}), encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.object(nri, "_load_brainstorm_tool", return_value=None), contextlib.redirect_stdout(out):
+            self.assertEqual(nri.main(["nri", "record", str(self.plan), "--run-start", "1", "--max", "5",
+                                       "--issues", str(issues_file)]), 0)
+        result = json.loads(out.getvalue())
+        self.assertEqual((result["action"], result["budget"]), ("implement", None))
+        self.assertIn("budget-unavailable", result["warnings"])
+
+
+class RecordDeferred(IncrementalBase):
+    """Spec 1 of plan-refactoring-04: --deferred keeps an issue Phase B deferred for the budget open."""
+
+    def test_deferred_issue_is_written_and_carried(self):
+        first = self.ok([issue("Fix A"), issue("Fix B", "minor")])
+        self.assertEqual([item["id"] for item in first["issues"]], ["1.1", "1.2"])
+        out = self.ok([issue("Fix A"), issue("Fix C")], "--deferred", "1.2:budget")
+        text = self.text(out)
+        self.assertIn("## Deferred from previous review\n\n", text)
+        self.assertIn("- [1.2] deferred: budget\n", text)
+        self.assertIn("**Carried from**: demo-review-1.md#1.2", text)
+        self.assertIn(nri.make_fingerprint("logic", "Fix B"), [item["fingerprint"] for item in out["issues"]])
+
+    def test_issue_already_in_the_audit_is_not_doubled(self):
+        self.ok([issue("Fix A"), issue("Fix B", "minor")])
+        out = self.ok([issue("Fix B", "minor"), issue("Fix C")], "--deferred", "1.2:budget")
+        self.assertEqual(len(out["issues"]), 2)
+        self.assertIn("- [1.2] deferred: budget\n", self.text(out))
+
+    def test_bad_values_exit_64(self):
+        proc = self.record([issue("Fix A")], "--deferred", "1.1:budget")
+        self.assertEqual(proc.returncode, 64)  # the first audit of a run has no previous review
+        self.ok([issue("Fix A")])
+        for value, message in (("1.9:budget", "1.9"), ("1.1:size", "--deferred"), ("1.1", "--deferred")):
+            proc = self.record([issue("Fix B")], "--deferred", value)
+            self.assertEqual(proc.returncode, 64, value)
+            self.assertIn(message, json.loads(proc.stdout)["error"], value)
+        self.assertEqual(self.reviews(), ["demo-review-1.md"])
+
+
+class RecordCodeDigest(IncrementalBase):
+    """Spec 1 of plan-refactoring-04: the review keeps a sha256 per Files path and names the tasks whose code changed."""
+
+    def setUp(self):
+        super().setUp()
+        (self.dir / "src").mkdir()
+        (self.dir / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")
+        self.plan.write_text(task_plan() + "\n### Task 5: Code\n\n**Files:**\n- Modify: `src/a.py` (сейчас: `x.py`)\n"
+                             "- Create: `src/new.py`\n\n- [ ] **Step 1: edit**\n", encoding="utf-8")
+
+    def record_here(self, issues):
+        """record with the plan's folder as the current directory: outside git it is the root of the Files paths."""
+        args = [sys.executable, str(TOOL), "record", str(self.plan), "--run-start", "1", "--max", "5", "--issues", "-"]
+        proc = subprocess.run(args, text=True, capture_output=True, encoding="utf-8", cwd=str(self.dir),
+                              input=json.dumps({"summary": "Summary.", "issues": issues}))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_table_and_changed_tasks(self):
+        out = self.record_here([issue("Fix A")])
+        text = self.text(out)
+        sha = hashlib.sha256((self.dir / "src" / "a.py").read_bytes()).hexdigest()[:12]
+        self.assertEqual(nri.parse_code_digest(text), {"src/a.py": sha, "src/new.py": "missing"})
+        self.assertIn("**Audit tasks**: all\n**Code changed tasks**: none\n", text)
+        self.assertLess(text.index("## Task digest"), text.index("## Code digest"))
+        self.assertNotIn("code-root-cwd", out["warnings"])
+        (self.dir / "src" / "new.py").write_text("n = 1\n", encoding="utf-8")
+        text = self.text(self.record_here([issue("Fix A"), issue("Fix B")]))
+        self.assertIn("**Audit tasks**: all\n**Code changed tasks**: 5\n", text)
+        self.assertEqual(nri.parse_code_digest(text)["src/new.py"],
+                         hashlib.sha256((self.dir / "src" / "new.py").read_bytes()).hexdigest()[:12])
+
+    def test_plan_without_tasks_has_neither(self):
+        self.plan.write_text("# Demo plan\n\nSome English plan text.\n", encoding="utf-8")
+        text = self.text(self.record_here([issue("Fix A")]))
+        self.assertNotIn("## Code digest", text)
+        self.assertNotIn("**Code changed tasks**", text)
 
 
 if __name__ == "__main__":

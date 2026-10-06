@@ -1882,5 +1882,36 @@ class RunnerMarksSchemaTest(unittest.TestCase):
         self.assertEqual(tuple(props["writing_resumes"]["items"]["required"]), ft.RUNNER_WRITING_RESUME_KEYS)
 
 
+ACTION_LINES_PLAN = "\n".join([
+    "### Task 1: Action lines",
+    "",
+    "**Files:**",
+    "- Modify: `a/cli.py:4-6` (сейчас: `executor_tool.py` / `-roadmap.md` / `parts.json`)",
+    "- Create: `<base>-diffs.md` (шаблон, затем `b/real.py`)",
+    "- Move: `old/x.py` → `new/x.py` (и `y.py`)",
+    "- Test: [test_cli.py](tests/test_cli.py) и `other.py`",
+    "- `notes.txt` и `<X>-diffs.md`",
+    "",
+    "- [ ] **Step 1: Do it**",
+    "",
+])
+ACTION_LINES_FILES = [
+    {"path": "a/cli.py", "action": "modify", "lines": "4-6"},
+    {"path": "old/x.py", "action": "move", "lines": None},
+    {"path": "new/x.py", "action": "move", "lines": None},
+    {"path": "test_cli.py", "action": "test", "lines": None},
+    {"path": "notes.txt", "action": None, "lines": None},
+    {"path": "<X>-diffs.md", "action": None, "lines": None},
+]
+
+
+class PlanTaskActionLinesTest(unittest.TestCase):
+    """Spec 1 of plan-refactoring-04: an action line gives its first name (two for Move:), never a placeholder;
+    a line without an action gives every name, as before."""
+
+    def test_action_lines(self):
+        self.assertEqual(ft.parse_plan_tasks(ACTION_LINES_PLAN)["tasks"][0]["files"], ACTION_LINES_FILES)
+
+
 if __name__ == "__main__":
     unittest.main()

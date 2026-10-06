@@ -99,7 +99,11 @@ parse the same ids.
 2. GATE DECISION (references/GATE-DECISION.md)
    S.chain.split == always → verdict "split" without the gate; say it comes from the settings.
    S.chain.split == never  → the splitter is not needed: without a confirmation channel exit
-                             without files; interactively ask whether to split anyway.
+                             without files; interactively ask whether to split anyway. Except
+                             when the journal file's `questions` hold a question of plan P whose
+                             text starts with `plan-oversized:`, not `open`, answered `split` (the
+                             user's answer to the runner, spec 1 of plan-refactoring-04): verdict
+                             "split" as with always; say it comes from that answer.
    otherwise: G = TOOL gate PLAN; tell the user the verdict with G.reasons.
      exit 1 no-tasks → journal: split skipped (why: no-tasks); exit without files (a roadmap
                        for a plan without task headings is written by hand).
@@ -169,7 +173,10 @@ parse the same ids.
 
 - **Start** (step 1, after preflight): `J journal-show <journal> --plan P`, stage `split`
   (`unknown-plan`, exit `2`: no event of this plan yet, every stage is `pending`):
-  `pending`, `failed`, `running`, `stopped` without open questions → `J journal-event <journal> --skill plan-splitter --plan P --stage split --status running`.
+  `pending`, `failed`, `running`, `stopped` without open questions → `J journal-event <journal> --skill plan-splitter --plan P --stage split --status running`;
+  with `S.chain.split == never` and the answered `plan-oversized:` question of step 2 add `--reason user-request`
+  (read from the journal file's `questions`: `journal-show` lists only open questions). The runner marks that
+  question applied; the splitter does not.
   `stopped` with open questions → with a confirmation channel ask each and record
   `J journal-answer <journal> <Qn> --answer "<answer>"`; without one stop and name the ids.
   Answered questions: apply each, `J journal-answer <journal> <Qn> --applied`, then `running`

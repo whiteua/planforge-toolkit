@@ -52,6 +52,7 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Self-review checklist | Author self-inspection (Wiegers, 1999) | Structured verification before handoff |
 | Size budget | Work-in-progress limits (Kanban); batch-size reduction (Reinertsen, 2009) | `plan-check` returns `size_class` and warns `plan-oversized` above 40 tasks or 150000 bytes (`brainstorm_tool.SIZE_BUDGET`, `--max-tasks`/`--max-bytes`); the hand-off advises decomposition instead of a task-count split rule, and a chain records the warning on the `writing` event without stopping |
 | Resumable plan writing | Application checkpoint/restart (HPC); completion markers of partial output (`.part` downloads, Hadoop `_SUCCESS` files) | The plan file is written task by task under a last-line marker `> Writing: in progress (spec sha256 <12 hex>)`; a relaunched writer continues after the last written task when the fingerprint matches the spec and writes anew otherwise; `plan-check`, `journal-reconcile`, the splitter, the executor and the revision refuse a plan that still carries the marker (`plan-incomplete`) |
+| Path of a Files action line | Single source of truth for a format (DRY); consumer-driven contract tests (Pact, 2013) | `parse_plan_tasks` and `extract_files` take from a `Files` action line only its first name in backticks or first link (two for `Move:`), never a `<…>` placeholder, so explanations and placeholders no longer reach the splitter's module count, the resolver's census or the executor's files; `plan-check` warns `files-placeholder`; a contract test on a copy of plan 03 holds the two parsers equal (57 paths) |
 
 ---
 
@@ -96,12 +97,14 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Technique | Origin | How it's applied |
 |---|---|---|
 | Incremental re-audit by task hash | Incremental build / build avoidance (make, 1976; Bazel action cache); change impact analysis (Arnold & Bohner, 1993) | Each review stores the SHA-1 of every task body; the next audit reads only the changed and new tasks, the open contracts' tasks and their transitive dependents by `Preconditions`, skips an unchanged plan, and a clean incremental pass must be confirmed by one full pass before `converged` |
+| Code digest between passes | Content-addressed build caches (Bazel, 2015); file integrity monitoring (Tripwire, 1992) | Each review stores a SHA-256 per path of the tasks' `Files` blocks (or `missing`, `dir`, `glob`, `outside`); the next `digest` puts the tasks whose files changed on disk, and their dependents, into the audit and the ratio, without git |
 
 ### Chain integration
 
 | Technique | Origin | How it's applied |
 |---|---|---|
 | Settings from the spec | Single source of truth | `bootstrap` returns the chain settings; preset and stop policy are taken from them without a question, and `read=run` allows read-only checks of that environment during the audit |
+| Budget held in revision | Work-in-progress limits (Kanban); error budgets (Google SRE, 2016) | `record` gives Phase B the plan's headroom to 150 000 bytes; an issue that does not fit is applied shorter or deferred (`record --deferred`, kept open), a plan pushed over the budget gets one compression of the tasks Phase B changed (`guard-check` `over_budget`, `changed_tasks`), and a budget-deferred issue still open at the end becomes a `budget:` finding |
 
 ---
 
@@ -183,8 +186,9 @@ This document maps the engineering techniques, methodologies, and prior art that
 | Model per role | Role specialisation (MetaGPT, 2023); cost-tiered workers | `~/.planforge/runner.json` maps each role to a model and effort; a full model id pins the version (`settings-load` `pinned`), an alias follows the newest model of its family; `model-pick --journal --unsupported` falls back to the role's `fallback` model from the journal's table or asks; `split` defaults to `sonnet`/low (it reads only the task list), and `execution` may name `light` for delegated green units (`model-pick --light`; a refusal turns delegation off without a question) |
 | Session lease with heartbeat | Leases (Gray & Cheriton, 1989); heartbeat failure detection; fencing tokens | The session file holds the session id and `heartbeat_at`; younger than 30 minutes means another runner is active, older means an abandoned run (asked about when a stage is still running); `--heartbeat`/`--end` with another id fail with `session-taken-over` |
 | ETA from history | Evidence-based scheduling (Joel Spolsky, 2007) | `run-eta` averages the journal's past stage durations and per-unit execution times |
-| Artifact-based cost accounting | Effective-token weighting (GitHub agentic workflows, 2026); cost per successful task | `run-stats` derives input/output token estimates from the artifacts each stage read and wrote (bytes / 3, output × 4) with a reads model that follows the artifacts (incremental scopes, script splits), keeps the host's actual usage when the runner recorded it (`basis: host`), pairs cost with quality (audit status, issues, retries) and compares with a baseline per task and per KB of plan; an incremental audit counts only the evidence changed since the previous report and the evidence of its re-audited tasks, and `journal_totals` covers every plan of the journal; the cost model, commands and baseline are in `docs/COST.md` |
+| Artifact-based cost accounting | Effective-token weighting (GitHub agentic workflows, 2026); cost per successful task | `run-stats` derives input/output token estimates from the artifacts each stage read and wrote (bytes / 3, output × 4) with a reads model that follows the artifacts (incremental scopes, script splits), keeps the host's actual usage when the runner recorded it (`basis: host`), pairs cost with quality (audit status, issues, retries) and compares with a baseline per task and per KB of plan; an incremental audit counts only the evidence changed since the previous report and the evidence of its re-audited tasks, and `journal_totals` covers every plan of the journal, both with `actual_tokens`, the sum of the host's counts; the cost model, commands and baseline are in `docs/COST.md` |
 | Machine-readable questions | Enumerated answers; command tokens in protocols | Questions the scheduler acts on start with fixed prefixes and take fixed tokens (`accept`/`fix`, `retry`/`stop`, `rewrite`/`keep`) |
+| Size gate before a skipped split | Admission control; work-in-progress limits (Kanban) | With `split=never`, `run-next` measures the plan before it skips the split; over 40 tasks or 150 000 bytes it stops the plan on one `plan-oversized:` question bound to the plan's SHA-256 (`continue`, `split`, `stop`), and a changed plan is asked again |
 
 ---
 

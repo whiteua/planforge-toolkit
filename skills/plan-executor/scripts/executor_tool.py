@@ -39,6 +39,7 @@ _FILES_BLOCK_RE = re.compile(r"^\*\*(files|файлы):\*\*\s*$", re.IGNORECASE)
 _FILE_ACTION_RE = re.compile(r"^\s*[-*]\s*(create|modify|test|delete|move|создать|изменить|тест)\s*:", re.IGNORECASE)
 _CODE_PATH_RE = re.compile(r"`([^`\s]+?\.[A-Za-z0-9]+)(?::(\d+(?:-\d+)?))?`")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+\.[A-Za-z0-9]+)\]\(([^)]+)\)")
+_PLACEHOLDER_RE = re.compile(r"[<>]")  # a placeholder such as <base>-diffs.md is no path of an action line
 _HEAVY_KEYWORDS_RE = re.compile(
     r"\b(refactor\w*|architect\w*|security|migrat\w*|concurren\w*|auth|authn|authz|authentication|authoriz\w*|oauth\w*)\b",
     re.IGNORECASE,
@@ -1073,7 +1074,10 @@ def _clean_path(value):
 def extract_files(text):
     """Paths from `## Inputs/Outputs/Files` sections and `**Files:**` blocks.
 
-    A `path:12-30` suffix inside backticks is split off into `lines`."""
+    A `path:12-30` suffix inside backticks is split off into `lines`. On an action line (Create, Modify, Test,
+    Delete, Move and the Russian ones) the path is the first backticked name or markdown link, the first two for
+    Move:, and the rest of the line explains it; a name with < or > is a placeholder, not a path. Other lines give
+    every name (spec 1 of plan-refactoring-04; brainstorm_tool._plan_task_files keeps the same rule)."""
     files = []
     seen = set()
     in_scope = False
@@ -1088,9 +1092,13 @@ def extract_files(text):
             continue
         action_match = _FILE_ACTION_RE.match(line)
         action = action_match.group(1).lower() if action_match else None
-        candidates = [(match.group(1), None) for match in _MARKDOWN_LINK_RE.finditer(line)]
-        candidates.extend((match.group(1), match.group(2)) for match in _CODE_PATH_RE.finditer(line))
-        for candidate, lines in candidates:
+        candidates = [(match.start(), match.group(1), None) for match in _MARKDOWN_LINK_RE.finditer(line)]
+        candidates.extend((match.start(), match.group(1), match.group(2)) for match in _CODE_PATH_RE.finditer(line))
+        candidates.sort(key=lambda item: item[0])
+        if action:
+            first = candidates[:2 if action == "move" else 1]
+            candidates = [item for item in first if not _PLACEHOLDER_RE.search(item[1])]
+        for _, candidate, lines in candidates:
             path = _clean_path(candidate)
             if path and path not in seen:
                 seen.add(path)

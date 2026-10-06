@@ -1008,7 +1008,8 @@ def _run_action(state: Dict[str, Any], stage: str, reason: Optional[str]) -> Dic
             "skill": _brainstorm().STAGE_OWNERS[stage], "args": args, "role": STAGE_ROLES[stage], "reason": reason}
 
 
-QUESTION_OPTIONS = {"open-audit": ["accept", "fix"], "stage-failed": ["retry", "stop"]}
+QUESTION_OPTIONS = {"open-audit": ["accept", "fix"], "stage-failed": ["retry", "stop"],
+                    "plan-oversized": ["continue", "split", "stop"]}
 
 
 def _failures(data: Dict[str, Any], plan_id: str, stage: str) -> int:
@@ -1166,15 +1167,68 @@ def _host_exhausted(data: Dict[str, Any], plan_id: str, stage: str) -> Optional[
     return None
 
 
+# plan-oversized (spec 1 of plan-refactoring-04): with split=never a plan over brainstorm_tool.SIZE_BUDGET stops on one
+# question before its split is skipped; the plan's sha256 in the text ties an answer to the plan it was given for.
+PLAN_OVERSIZED_RE = re.compile(r"^plan-oversized: (?P<tasks>\d+) tasks, (?P<bytes>\d+) bytes "
+                               r"\(budget \d+ / \d+; plan sha256 (?P<sha>[0-9a-f]{12})\)")
+
+
+def _plan_size(state: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """({tasks, bytes, sha, max_tasks, max_bytes}, None) of the plan file: tasks by parse_plan_tasks, its bytes, the
+    first 12 hex of its sha256 and SIZE_BUDGET; (None, "size-unavailable: <error>") when it cannot be measured."""
+    path = os.path.join(state.get("root") or "", state["entry"]["plan"])
+    try:
+        bt = _brainstorm()
+        budget = bt.SIZE_BUDGET
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        tasks = len(bt.parse_plan_tasks(raw.decode("utf-8", errors="replace"))["tasks"])
+    except (InputError, OSError, AttributeError) as exc:
+        return None, f"size-unavailable: {exc}"
+    return {"tasks": tasks, "bytes": len(raw), "sha": hashlib.sha256(raw).hexdigest()[:12],
+            "max_tasks": int(budget["tasks"]), "max_bytes": int(budget["bytes"])}, None
+
+
+def _oversized_reason(text: Any) -> Optional[str]:
+    """`plan-oversized: N tasks, M bytes` of a plan-oversized: question text, None for another text."""
+    match = PLAN_OVERSIZED_RE.match(str(text or ""))
+    return f"plan-oversized: {match.group('tasks')} tasks, {match.group('bytes')} bytes" if match else None
+
+
+def _oversized_step(state: Dict[str, Any], where: Dict[str, Any]) -> Dict[str, Any]:
+    """The pending split of a split=never plan: a skip within the budget (or with size-unavailable), else the
+    plan-oversized: question with the plan's sha256 and the options continue / split / stop. Its question of this sha256: open → wait,
+    continue → skip, split → run the splitter, stop or another answer → wait."""
+    size, warning = _plan_size(state)
+    if size is None:
+        return dict(where, kind="skip", why="split=never", warnings=[warning])
+    if size["tasks"] <= size["max_tasks"] and size["bytes"] <= size["max_bytes"]:
+        return dict(where, kind="skip", why="split=never")
+    reason = f"plan-oversized: {size['tasks']} tasks, {size['bytes']} bytes"
+    same = [q for q in state["questions"] if q.get("stage") == "split" and _oversized_reason(q.get("text"))
+            and PLAN_OVERSIZED_RE.match(str(q["text"])).group("sha") == size["sha"]]
+    if same:  # a question of another sha256 was given for another plan: asked again
+        question = same[-1]
+        if question.get("status") == "open":
+            return dict(where, kind="wait", why=reason)
+        if question.get("answer") == "continue":
+            return dict(where, kind="skip", why="plan-oversized: continue")
+        if question.get("answer") == "split":
+            return _run_action(state, "split", None)  # the splitter splits as with always (--reason user-request)
+        return dict(where, kind="wait", why="plan-oversized: stop")  # like stage-failed: stop, without a question
+    return dict(where, kind="ask", options=list(QUESTION_OPTIONS["plan-oversized"]),
+                prefix=f"{reason} (budget {size['max_tasks']} / {size['max_bytes']}; plan sha256 {size['sha']})")
+
+
 def _stage_step(data: Dict[str, Any], state: Dict[str, Any], stage: str, reason: Optional[str]) -> Dict[str, Any]:
     """The step for the plan's next stage (open questions are checked before): a run, a skip
-    (split=never, resolver=skip), an ask (rule 10: stage-failed; at once after an exhausted host wait) or {"kind": "wait", "why"}.
+    (split=never within the budget, resolver=skip; plan-oversized: over it, _oversized_step), an ask (rule 10: stage-failed; at once after an exhausted host wait) or {"kind": "wait", "why"}.
     A running audit started by an open-audit `fix` resumes as `fix`."""
     record = _record(state, stage)
     status = record.get("status", "pending")
     where = {"spec": state["spec"], "plan": state["entry"]["plan"], "stage": stage}
     if status == "pending" and stage == "split" and state["chain"].get("split") == "never":
-        return dict(where, kind="skip", why="split=never")
+        return _oversized_step(state, where)  # plan-oversized: before the skip (spec 1 of plan-refactoring-04)
     if status == "pending" and stage == "audit" and state["chain"].get("resolver") == "skip":
         return dict(where, kind="skip", why="resolver=skip")
     gate_warning = None
@@ -1391,8 +1445,10 @@ def _candidates(data: Dict[str, Any], runner: Dict[str, Any], states: List[Dict[
         left = _host_wait_left(data, state["entry"]["id"], stage)
         if left:  # a host error of its agent call: the pair waits until wait_until (spec plan-refactoring-03)
             why = f"host-wait: {left}s"
-        elif state["open"]:
-            why = "open-question: " + ", ".join(state["open"])
+        elif state["open"]:  # an open plan-oversized: question names the plan's size (spec 1 of plan-refactoring-04)
+            sized = [reason for q in state["questions"] if q.get("id") in state["open"] and q.get("stage") == "split"
+                     for reason in [_oversized_reason(q.get("text"))] if reason]
+            why = sized[-1] if sized else "open-question: " + ", ".join(state["open"])
         elif stage == "writing" and _record(state, "writing").get("status") == "pending":
             why = _dependency_wait(runner, by_spec, state, asks)
         if why is None and stage in CODE_STAGES + CODE_READING_STAGES and holder is not None and holder is not state:
@@ -1926,7 +1982,7 @@ def _roadmap_state(journal: str, data: Dict[str, Any], runner: Dict[str, Any]) -
 
 def run_status(journal: str) -> Dict[str, Any]:
     """Per plan: stage statuses, the next stage (rules 7 and 9), unit progress; open questions, waits
-    without a question of their own (stage-failed: stop, not-confirmed: stop, model: stop, code-busy, reading-busy, host-wait),
+    without a question of their own (stage-failed: stop, not-confirmed: stop, model: stop, code-busy, reading-busy, host-wait, plan-oversized),
     ETA, the session mark, the cost totals, the goal roadmap's state and the plans' # order. Reads only."""
     bt = _brainstorm()
     data, runner = _runner_journal(journal)
@@ -1949,7 +2005,7 @@ def run_status(journal: str) -> Dict[str, Any]:
     _candidates(data, runner, states, waiting, {})
     waits = [item for item in waiting
              if item["reason"] in ("stage-failed: stop", "not-confirmed: stop", "model: stop")
-             or item["reason"].startswith(("code-busy: ", "reading-busy: ", "host-wait: "))]
+             or item["reason"].startswith(("code-busy: ", "reading-busy: ", "host-wait: ", "plan-oversized: "))]
     totals = run_stats(journal, None)["totals"]
     roadmap = _roadmap_state(journal, data, runner)
     rows = roadmap.pop("rows") if roadmap is not None else {}
@@ -2035,26 +2091,32 @@ def _plan_stats(plan_path: str, journal_layer: Optional[Dict[str, Any]], warning
 
 
 def _stats_totals(plans: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Totals of run-stats over `plans`: per stage the summed bytes, effective tokens and minutes with their basis
-    (`mixed` when the plans differ), then the sums over the stages."""
+    """Totals of run-stats over `plans`: per stage the summed bytes, effective tokens, host tokens and minutes with
+    their basis (`mixed` when the plans differ), then the sums over the stages. `actual_tokens` (spec 1 of
+    plan-refactoring-04) sums the host's counts that exist: a stage's `tokens.actual`, a plan's `totals.actual_tokens`;
+    null when none of them has one."""
     stages: Dict[str, Dict[str, Any]] = {}
     for item in plans:
         for stage, record in item["stages"].items():
             agg = stages.setdefault(stage, {"bytes_read_est": 0, "bytes_written": 0, "effective_tokens_est": 0,
-                                            "minutes": None, "bases": set()})
+                                            "actual_tokens": None, "minutes": None, "bases": set()})
             agg["bytes_read_est"] += record["bytes_read_est"]
             agg["bytes_written"] += record["bytes_written"]
             agg["effective_tokens_est"] += record["tokens"]["effective_est"]
             agg["bases"].add(record["basis"])
+            if record["tokens"].get("actual") is not None:
+                agg["actual_tokens"] = (agg["actual_tokens"] or 0) + record["tokens"]["actual"]
             if record.get("minutes") is not None:
                 agg["minutes"] = round((agg["minutes"] or 0) + record["minutes"], 1)
     for agg in stages.values():
         bases = agg.pop("bases")
         agg["basis"] = bases.pop() if len(bases) == 1 else "mixed" if bases else "estimate"
+    actual = [p["totals"]["actual_tokens"] for p in plans if p["totals"].get("actual_tokens") is not None]
     return {"tasks": sum(p["tasks"] for p in plans), "plan_bytes": sum(p["plan_bytes"] for p in plans),
             "bytes_read_est": sum(s["bytes_read_est"] for s in stages.values()),
             "bytes_written": sum(s["bytes_written"] for s in stages.values()),
             "effective_tokens_est": sum(s["effective_tokens_est"] for s in stages.values()),
+            "actual_tokens": sum(actual) if actual else None,
             "minutes": (round(sum(s["minutes"] for s in stages.values() if s["minutes"] is not None), 1)
                         if any(s["minutes"] is not None for s in stages.values()) else None),
             "basis": "host" if any(p["totals"]["basis"] == "host" for p in plans) else "estimate",

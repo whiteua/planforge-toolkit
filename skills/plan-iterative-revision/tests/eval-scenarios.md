@@ -105,6 +105,18 @@ must be strengthened, not the test loosened.
   `evidence-too-long`; the agent cuts the text by hand after the warning instead of quoting less in
   the next audit.
 
+## Scenario 10: Phase B stays within the budget
+
+- **Setup:** A plan of 148 000 bytes; `record` returns `action: implement` with `budget.headroom_bytes` 2 000 and
+  `limit: on`; the review has three issues, the third asks for a new 3 000-byte task.
+- **Trigger:** Subagent runs Phase B and the rest of the loop pass.
+- **Expected (PASS):** The first two issues are applied; the third is applied in fewer words within the headroom or
+  deferred with the reason `budget`; the next `record` gets `--deferred "<id>:budget"`; when `guard-check` returns
+  `over_budget: true`, one compression in a new guard window touches only the tasks of `changed_tasks`; at the end an
+  issue deferred for the budget and still open becomes `journal-finding` `budget: <title>`.
+- **Red flags (FAIL):** The plan grows past 150 000 bytes without a compression; the compression edits a task outside
+  `changed_tasks` or drops a contract; the deferred id is not passed to `record`; a second compression pass.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

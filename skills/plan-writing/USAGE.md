@@ -53,6 +53,7 @@ The input spec **must** have:
 - Exceeds limit → split into sub-tasks (Task N.1, N.2, ...)
 - Cannot be split → `**Size:** <N> lines — <reason>` in the task; without it `plan-check` warns above 100 lines of code and fails above 150
 - Creates or modifies `CLAUDE.md` → `**Structural event:** <skill|script|contract|convention|artifact> — <reason>` in the task; without it `plan-check` warns `claude-md-edit`, another key is an error
+- A `Files` action line (`Create:`, `Modify:`, `Test:`, …) → its first name in backticks or first link is the path (`Move:` takes two), the rest of the line explains it; a `<…>` placeholder there is no path and `plan-check` warns `files-placeholder: line N: <name>`
 
 ## Tier Effect on Tasks
 

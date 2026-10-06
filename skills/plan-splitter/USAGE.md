@@ -39,7 +39,7 @@ dependency roadmap, each part executable in a single agent pass.
 
 ```
 1. BOOTSTRAP        — language, write preflight, existing artifacts
-2. GATE DECISION    — split setting: always → split, never → not needed; auto or none → `gate` (numbers: tasks, bytes, modules, dependency shape; "keep" is a normal outcome; without a confirmation channel `silent_verdict` decides borderline)
+2. GATE DECISION    — split setting: always → split, never → not needed (except after your answer split to the runner's plan-oversized: question: then as always); auto or none → `gate` (numbers: tasks, bytes, modules, dependency shape; "keep" is a normal outcome; without a confirmation channel `silent_verdict` decides borderline)
 3. ANALYSIS         — boundaries from `plan-tasks` (the plan is not read): dependency graph, parallel groups, weights 🔴/🟡/🟢
 4. DRAFT & CONFIRM  — in a dialogue you approve the split table (one retry); without a confirmation channel nothing is shown or asked, and the table goes to the journal as `parts_table`
 5. GENERATE         — `split-write`: <base>-roadmap.md + <base>-a.md, -b.md, …, task texts copied byte for byte

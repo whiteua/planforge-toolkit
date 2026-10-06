@@ -1150,5 +1150,49 @@ class SkeletonCliTest(unittest.TestCase):
         self.assertIn("warning: no-tasks", err)
 
 
+class FilesPlaceholderTest(unittest.TestCase):
+    """Spec 1 of plan-refactoring-04: a placeholder as the first name of an action line is a warning, not a path."""
+
+    LINE = "- Modify: `<base>-diffs.md` (сейчас: шаблон)"
+
+    def test_placeholder_first_name_warns(self):
+        text = VALID.replace("- Modify: `cli.py:4-6`\n", self.LINE + "\n")
+        number = text.splitlines().index(self.LINE) + 1
+        result = pt.check_plan(text)
+        self.assertEqual((result["ok"], result["errors"]), (True, []))
+        self.assertEqual(result["warnings"], [f"files-placeholder: line {number}: <base>-diffs.md"])
+        with tempfile.TemporaryDirectory() as tmp:
+            warnings = pt.check_plan(text, tmp)["warnings"]
+        self.assertIn(f"files-placeholder: line {number}: <base>-diffs.md", warnings)
+        self.assertFalse(any("<base>-diffs.md" in w and "not found" in w for w in warnings), warnings)
+
+
+FILES_CONTRACT = os.path.join(HERE, "fixtures", "plan-files-contract.md")
+
+
+@unittest.skipUnless(all(os.path.isfile(p) for p in (BRAINSTORM, EXECUTOR)), "pipeline skills not installed alongside")
+class FilesContractTest(unittest.TestCase):
+    """Spec 1 of plan-refactoring-04: the path of a Files action line is its first name, and the two parsers that read
+    it (brainstorm_tool._plan_task_files, executor_tool.extract_files) agree on a real plan (a copy of plan 03)."""
+
+    def setUp(self):
+        with open(FILES_CONTRACT, encoding="utf-8") as fh:
+            self.text = fh.read()
+        self.tasks = _load_by_path("brainstorm_tool", BRAINSTORM).parse_plan_tasks(self.text)["tasks"]
+
+    def test_paths_of_the_fixture(self):
+        entries = [entry for task in self.tasks for entry in task["files"]]
+        self.assertEqual(len(entries), 57)
+        self.assertEqual([e["path"] for e in entries if "/" not in e["path"] or "<" in e["path"] or ">" in e["path"]], [])
+        self.assertEqual([e["path"] for e in entries if not e["action"]], [])
+
+    def test_executor_reads_the_same_files(self):
+        executor = _load_by_path("executor_tool", EXECUTOR)
+        lines = self.text.splitlines()
+        for task in self.tasks:
+            body = "\n".join(lines[task["line_start"] - 1:task["line_end"]])
+            self.assertEqual(executor.extract_files(body), task["files"], task["id"])
+
+
 if __name__ == "__main__":
     unittest.main()

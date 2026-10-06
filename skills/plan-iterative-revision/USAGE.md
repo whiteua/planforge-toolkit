@@ -71,10 +71,14 @@ allowed for the whole run (`read=run`) lets the audit check that environment, re
 ```
 bootstrap (numbering, language, config, write check; a plan still carrying plan-writing's marker is plan-incomplete)
   → Phase A: audit plan + code → issues JSON
-  → record: gates + write review-N.md (with the hash of every task)
-  → Phase B: apply review-N to the plan
-  → digest: which tasks changed → the next audit reads only them, their dependents and the
-    open contracts' tasks (incremental); an unchanged plan skips the audit
+  → record: gates + write review-N.md (with the hash of every task and of every file the tasks name);
+    with issues to apply it also returns the plan's room in the budget of 150 000 bytes
+  → Phase B: apply review-N to the plan within that room; an issue that does not fit is deferred
+    (budget) and stays open in the next review; a plan pushed over the budget gets one compression
+    of the tasks Phase B changed
+  → digest: which tasks changed, and which tasks' files changed on disk → the next audit reads only
+    them, their dependents and the open contracts' tasks (incremental); an unchanged plan with
+    unchanged code skips the audit
   → repeat; a clean incremental audit is followed by one full audit before `converged`
 ```
 
@@ -98,7 +102,7 @@ Only reviews created in the current run count for these gates.
 
 - `<plan-basename>-review-N.md` — one per audit with issues (immutable history)
 - `<plan-basename>-completion.md` — when the cycle converges
-- `<goal>-chain.json` next to the spec — the chain journal: the `revision` stage (running, done with the last review and the completion file, stopped at a gate that needs you, with an open question when nobody could answer) and the code defects found on the way (also appended to `BACKLOG.md`)
+- `<goal>-chain.json` next to the spec — the chain journal: the `revision` stage (running, done with the last review and the completion file, stopped at a gate that needs you, with an open question when nobody could answer) and the code defects found on the way, plus the issues deferred for the budget that stayed open (`budget: <title>`) (also appended to `BACKLOG.md`)
 
 ## Prerequisites
 

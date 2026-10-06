@@ -55,7 +55,7 @@ FINALIZE:   <X>-diffs.md at the path run-diff returns (what this run changed), f
 COMMIT:     /plan-executor <plan> commit (after the audit) → diff report with the audit's fixes → commit-run → offer to prune snapshots
 ```
 
-Per unit the agent calls the tool twice and reads only that unit's section and files, not the whole plan.
+Per unit the agent calls the tool twice and reads only that unit's section and files, not the whole plan. The unit's files are the paths of its `Files` action lines: the first name of each line (two for `Move:`), not the names in the line's explanation or a `<…>` placeholder.
 
 ## Gates, Retries and Rollback
 

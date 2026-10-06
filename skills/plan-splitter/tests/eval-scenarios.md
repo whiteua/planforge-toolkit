@@ -61,6 +61,18 @@ must be strengthened, not the test loosened.
 - **Red flags (FAIL):** A question "split or keep?" or "confirm the table?"; the stage left `stopped`; `parts_table[]`
   as a list; the plan file read whole.
 
+## Scenario 6: never, but the user answered split
+
+- **Setup:** A plan of 45 tasks with `split=never`; the chain journal holds the runner's answered question
+  `plan-oversized: 45 tasks, … bytes (budget 40 / 150000; plan sha256 …)` of this plan with the answer `split`; run
+  without a confirmation channel (as a chain agent).
+- **Trigger:** `/plan-splitter <plan>`.
+- **Expected (PASS):** The `running` event of `split` carries `--reason user-request`; the gate decision is "split" as
+  with always, named as the user's answer; `parts.json` from `plan-tasks`, `split-write`, `split: done` with `roadmap`,
+  `parts[]`, `split_method=script`; the question is not marked `--applied` by the splitter.
+- **Red flags (FAIL):** `split: skipped` with `why: split=never`; a new question "split anyway?"; `running` without
+  the reason; the splitter marks the runner's question applied.
+
 ## How To Run
 
 For each scenario: dispatch a fresh subagent with the skill loaded, paste

@@ -63,7 +63,8 @@ stdlib only. If `python` is unavailable, stop and tell the user.
    marker `> Writing: in progress`: `/plan-writing <spec>` finishes it).
 5. Gate decisions come only from `record`. Never continue after `action: "stop"` and never stop
    on your own while it says `implement` (except when the user interrupts).
-6. Wrap each phase in the diff guard when `git_root` is not null.
+6. Wrap each phase in the diff guard (`GROOT`, Loop). Without git it checks no files (exit 3) but still measures the
+   plan for the budget.
 7. External systems: Phase A may run read-only checks only on an environment with `read=run` in
    `B.settings.environments` (references/PHASE-A-AUDIT.md, Step 3); anything else that reaches an
    external system needs the user's explicit permission for that environment.
@@ -111,9 +112,12 @@ if B.settings and not B.settings.ok and PLAN has `**External:**` lines:
     interactive → ask which environments the audit may read
     autonomous  → final output {"result": null, "error": "<B.settings.errors>"} and stop
 MAX = B.config.max; S = B.config.stop_policy; k = 1; FULL = false
+GROOT = B.git_root, else B.dir     # the guard's root; without git guard-begin still keeps the plan's size (exit 3)
+DEFERRED = ""                      # "<id>:budget,…": the issues the last Phase B deferred for the budget
+BUDGET = {}                        # fingerprint → title of every issue deferred for the budget in this run
 
 loop:
-    TOOL guard-begin B.git_root <B.basename>-phase-a
+    TOOL guard-begin GROOT <B.basename>-phase-a --plan PLAN
     SCOPE = full; TASKS = ""
     if k > 1:
         D = TOOL digest B.dir B.basename --since B.run_start;  T = D.task_digest
@@ -127,22 +131,31 @@ loop:
     R = TOOL record PLAN --run-start B.run_start --max MAX --stop-policy S --mode MODE
                     --interaction I --lang B.lang --issues <json-file> --scope SCOPE
                     [--tasks "TASKS"]                  (only with SCOPE incremental; TASKS may be empty)
+                    [--deferred "DEFERRED"]            (only when DEFERRED is not empty)
     FULL = false
     if R.warnings: fix the issues JSON next time (unescaped code quotes); mention them in the summary
-                   (`contracts-dropped`: the audit skipped an open contract, PHASE-A-AUDIT.md, Step 1)
+                   (`contracts-dropped`: the audit skipped an open contract, PHASE-A-AUDIT.md, Step 1;
+                   `budget-unavailable`, `oversized-before-revision`: the budget, not the JSON, PHASE-B-IMPLEMENT.md)
     if R.action == "ask_limit":  ask "MAX review passes done, N issues still open. Continue?"
                                  options +3 / +5 / stop.
                                  +n → MAX += n and re-run the same record command;
                                  stop → re-run it with --user-stop
-    TOOL guard-check B.git_root <B.basename>-phase-a <R.review_path or R.completion_path or B.next_review>
+    TOOL guard-check GROOT <B.basename>-phase-a <R.review_path or R.completion_path or B.next_review>
     journal: R.journal_event → journal-event; this audit's code findings → journal-finding (Chain journal below)
 
     if R.action == "full-audit-required": FULL = true; repeat the loop with the same k (no Phase B)
     if R.action == "stop":       go to Final output
     if R.action == "implement":
-        TOOL guard-begin B.git_root <B.basename>-phase-b
-        Phase B (references/PHASE-B-IMPLEMENT.md) on R.review_path, issues in R.issues order
-        TOOL guard-check B.git_root <B.basename>-phase-b PLAN
+        DEFERRED = ""
+        TOOL guard-begin GROOT <B.basename>-phase-b --plan PLAN
+        Phase B (references/PHASE-B-IMPLEMENT.md) on R.review_path, issues in R.issues order, within R.budget
+        G = TOOL guard-check GROOT <B.basename>-phase-b PLAN
+        if G.over_budget:                                  # one compression, in its own guard window
+            TOOL guard-begin GROOT <B.basename>-phase-b --plan PLAN
+            shorten the tasks of G.changed_tasks (PHASE-B-IMPLEMENT.md, Budget)
+            TOOL guard-check GROOT <B.basename>-phase-b PLAN
+        DEFERRED = the ids Phase B deferred for the budget, each as "<id>:budget", joined with ","
+        BUDGET += their fingerprints and titles (from R.issues)
         k += 1
 ```
 
@@ -163,6 +176,12 @@ task-parser-unavailable` (plan-brainstorming not installed alongside) means ever
 interactive: say so once in the short report; autonomous: nothing is added, the final output stays
 `R.final`. In batch mode each part has its own table and scope.
 
+From the second audit on, `T.code_changed` also names the tasks whose files (the paths of their `Files` blocks) changed
+on disk since the latest review's `## Code digest` (a SHA-256 per path, or `missing`, `unreadable`, `dir`, `glob`,
+`outside`): they and their dependents are read like changed tasks and count toward the ratio, so a plan unchanged
+byte for byte whose code changed is no longer `none-changed`. A review without that table warns `no-code-digest` and
+skips the check; outside git the paths are read from the current directory (`code-root-cwd`).
+
 The limit question needs a confirmation channel. A run without one (no question tool, a subagent
 call, a chain run) is `autonomous`: `record --interaction autonomous` stops at the limit with
 `result: limit` and never asks.
@@ -170,7 +189,8 @@ call, a chain run) is `autonomous`: `record --interaction autonomous` stops at t
 A `guard-check` violation means a phase touched a forbidden file: stop and report the paths.
 `BACKLOG.md` at the repository root is never a violation: it is a free file (Language).
 The guard sees only what `git status` sees (not ignored files, not paths outside the repository).
-Without git, say that the guard is unavailable and list the files you changed yourself.
+Without git (`guard-begin`/`guard-check` exit 3) it checks no files: say once that the guard is unavailable and list
+the files you changed yourself; the budget fields of `guard-check` (`--plan`) still come and are used as with git.
 
 ## Chain journal
 
@@ -271,6 +291,12 @@ History is limited to the current run (`--run-start`); reviews from earlier runs
 The pragmatic `drain` never hides real problems: it fires only when every open issue is `nit`.
 
 ## Final output
+
+**Budget findings.** Before the final output, when there is a journal (`<journal>`, Chain journal): for each
+fingerprint in `BUDGET` that is among the fingerprints of the last `record`'s `issues` (an issue still open; none when
+that record wrote no review) record `J journal-finding <journal> --skill plan-iterative-revision --plan P --file <PLAN
+from the repository root> --summary "budget: <its title>" --failure-scenario "<the contract stays unapplied: the plan
+had no room for it in the budget of 150 000 bytes>" --backlog-root <root>` (`<root>` as for code findings).
 
 - `autonomous`: no progress messages; the final message is exactly one JSON object, `R.final`
   (schema `assets/result.schema.json`: `result`, `iterations` = review files written in this run,

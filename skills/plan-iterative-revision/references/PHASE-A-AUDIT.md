@@ -20,13 +20,13 @@ file; `record` writes the review.
 - `incremental`: read the header (`D.task_digest.line_ranges.header`) and every task of
   `D.task_digest.tasks` by its range (`Read` with `offset` = start and `limit` = end − start + 1), never
   the whole file. These are the changed and new tasks, the tasks of the active contracts (`focus`) and
-  the tasks whose `Preconditions` lead to a changed, new or removed task (`dependents`). Tasks in
+  the tasks whose `Preconditions` lead to a changed, new or removed task (`dependents`) and the tasks whose files changed on disk since the latest review's `## Code digest` (`code_changed`, with their dependents). Tasks in
   `unchanged` keep their status from the earlier audits of the run: the skill never changes code inside
-  a run (SKILL.md, invariant 3), and a change made by a human between audits is caught by the full audit
+  a run (SKILL.md, invariant 3), and a change made by a human between audits is caught by `code_changed` and by the full audit
   that must come before `converged`. Tasks in `removed` are gone: their referrers are in `dependents`
   (a Precondition that names a deleted task is a defect to record there).
 - `none-changed` (`D.task_digest.scope`): no Phase A. The plan is byte for byte the one the latest
-  review audited, so no contract can have closed. The issues JSON is one carry per `D.active_contracts`
+  review audited and the files of its tasks have not changed on disk (`code_changed` is empty), so no contract can have closed. The issues JSON is one carry per `D.active_contracts`
   entry with its own severity, `code_cross_check` `not applicable — plan unchanged` and a `problem` that
   says the plan has not changed since the review; `record` gets `--scope incremental --tasks
   "<D.task_digest.tasks>"` and stops the run at `unchanged`.
@@ -131,7 +131,7 @@ Objects the plan itself creates (new tables, endpoints, files) are `not applicab
 that nothing with the same name already exists, since a collision is an issue.
 
 Reuse inside a run: the skill never changes code, so a claim you verified in an earlier audit
-stays verified while its text in the plan is unchanged. Always re-check claims that were
+stays verified while its text in the plan is unchanged and its task is not in `code_changed` (the code under it changed: check every claim of such a task again). Always re-check claims that were
 `not found` or `ambiguous`, and raise the depth to at least `read` for them. In an incremental audit
 the cross-check covers only the claims of the header and of the tasks in scope; the claims of
 `unchanged` tasks keep their status.

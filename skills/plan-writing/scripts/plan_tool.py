@@ -591,6 +591,9 @@ def check_plan(text: str, root: Optional[str] = None, plan_path: Optional[str] =
                 continue
             kind = file_match.group("kind")
             rel = path_match.group("path").strip()
+            if "<" in rel or ">" in rel:  # a placeholder (`<base>-diffs.md`) is not a path (spec 1 of plan-refactoring-04)
+                warnings.append(f"files-placeholder: line {n}: {rel}")
+                continue
             if kind in ("Create", "Modify") and rel.replace("\\", "/").rsplit("/", 1)[-1] == "CLAUDE.md":
                 edits_claude_md = True
             if kind == "Create":

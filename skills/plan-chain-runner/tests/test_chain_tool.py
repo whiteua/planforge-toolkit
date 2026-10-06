@@ -759,9 +759,11 @@ def _t2_failed_events(plan_id, stage, count):
 class StageStepTest(unittest.TestCase):
     def test_skips_by_chain(self):
         state = _t2_state(_t2_plan("a-spec.md"), chain={"split": "never", "resolver": "skip"})
-        self.assertEqual(ct._stage_step({"events": []}, state, "split", None),
+        step = ct._stage_step({"events": []}, state, "split", None)
+        self.assertEqual({key: step[key] for key in ("spec", "plan", "stage", "kind", "why")},
                          {"spec": "a-spec.md", "plan": "a-impl.md", "stage": "split", "kind": "skip",
                           "why": "split=never"})
+        self.assertTrue(step["warnings"][0].startswith("size-unavailable: "), step)  # no plan file: not measured
         self.assertEqual(ct._stage_step({"events": []}, state, "audit", None)["why"], "resolver=skip")
 
     def test_rule8_stopped_without_open_questions_resumes(self):
@@ -1048,6 +1050,8 @@ class RunNextScenarioTest(_T2Case):
     def test_skip_actions(self):
         path = self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", done=("writing", "revision"))],
                             chains={"a-spec.md": "split=never; resolver=skip"})
+        with open(os.path.join(self.tmp, "a-impl.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Plan\n\n**Spec:** a-spec.md\n\n### Task 1: x\n")  # within the budget: the skip of before
         self.assertEqual(ct.run_next(path, 3)["actions"],
                          [{"kind": "skip", "spec": "a-spec.md", "plan": "a-impl.md", "stage": "split",
                            "why": "split=never"}])
@@ -2242,6 +2246,34 @@ class RunStatsTest(_T2Case):
         self.assertEqual(ct.run_status(path)["cost"]["bytes_total"], out["totals"]["bytes_written"])
         self.assertIsNone(ct.run_stats(None, os.path.join(self.tmp, "a-impl.md"))["journal_totals"])
 
+    def test_actual_tokens_in_the_totals(self):  # spec 1 of plan-refactoring-04
+        for name in ("a-impl.md", "b-impl.md", "c-impl.md"):
+            self.plan_folder(name=name)
+        plans = [_t2_plan("a-spec.md", done=("writing", "revision")), _t2_plan("b-spec.md", done=("writing",)),
+                 _t2_plan("c-spec.md", done=("writing",))]
+        for plan, stage, tokens in ((0, "writing", "100"), (0, "revision", "250"), (1, "writing", "40"),
+                                    (2, "writing", "7")):
+            plans[plan]["stages"][stage]["artifacts"] = {"cost_tokens": tokens, "cost_source": "claude-code"}
+        path = self.journal(["a-spec.md", "b-spec.md", "c-spec.md"], plans=plans)
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["runner"]["specs"] = ["a-spec.md", "b-spec.md"]  # c is a plan of an earlier run
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        out = ct.run_stats(path, None)
+        self.assertEqual([p["totals"]["actual_tokens"] for p in out["plans"]], [350, 40, 7])
+        self.assertEqual((out["totals"]["actual_tokens"], out["journal_totals"]["actual_tokens"]), (390, 397))
+        self.assertEqual((out["totals"]["stages"]["writing"]["actual_tokens"],
+                          out["journal_totals"]["stages"]["writing"]["actual_tokens"]), (140, 147))
+        self.assertEqual(out["totals"]["stages"]["revision"]["actual_tokens"], 250)
+        self.assertIsNone(out["totals"]["stages"]["split"]["actual_tokens"])
+
+    def test_actual_tokens_null_without_the_host(self):
+        self.plan_folder()
+        out = ct.run_stats(self.journal(["a-spec.md"], plans=[_t2_plan("a-spec.md", done=("writing",))]), None)
+        self.assertEqual((out["totals"]["actual_tokens"], out["journal_totals"]["actual_tokens"]), (None, None))
+        self.assertIsNone(ct.run_stats(None, os.path.join(self.tmp, "a-impl.md"))["totals"]["actual_tokens"])
+
 
 class RunStatsCliTest(RunStatsTest):
     def test_errors(self):
@@ -3121,6 +3153,85 @@ class HostStatusTest(_HostCase):
         with open(plan, "w", encoding="utf-8") as fh:
             fh.write("# P\n\n### Task 1: One\n")
         self.assertIsNone(ct.run_stats(None, plan)["plans"][0]["stages"]["writing"]["host_waits"])
+
+
+OVERSIZED_PLAN = "# P\n\n**Spec:** a-spec.md\n\n" + "".join(f"### Task {n}: t{n}\n\nx\n\n" for n in range(1, 42))
+
+
+class PlanOversizedTest(_T2Case):
+    """Spec 1 of plan-refactoring-04: with split=never a plan over SIZE_BUDGET stops on plan-oversized: before the skip."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_plan(OVERSIZED_PLAN)
+        raw = OVERSIZED_PLAN.encode("utf-8")
+        self.reason = f"plan-oversized: 41 tasks, {len(raw)} bytes"
+        self.text = f"{self.reason} (budget 40 / 150000; plan sha256 {hashlib.sha256(raw).hexdigest()[:12]})"
+
+    def write_plan(self, text):
+        with open(os.path.join(self.tmp, "a-impl.md"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+
+    def run_next(self, *questions, chain="split=never"):
+        plans = [_t2_plan("a-spec.md", done=("writing", "revision")), _t2_plan("b-spec.md")]
+        path = self.journal(["a-spec.md", "b-spec.md"], plans=plans, questions=list(questions),
+                            chains={"a-spec.md": chain})
+        return path, ct.run_next(path, 3)
+
+    def of_plan(self, out, plan="a-impl.md"):
+        return next(item for item in out["actions"] + out["waiting"] if item["plan"] == plan)
+
+    def test_over_the_budget_asks_with_the_plan_hash(self):
+        action = self.of_plan(self.run_next()[1])
+        self.assertEqual((action["kind"], action["stage"], action["prefix"], action["options"]),
+                         ("ask", "split", self.text, ["continue", "split", "stop"]))
+
+    def test_within_the_budget_or_unmeasured_skips_as_before(self):
+        self.write_plan("# P\n\n**Spec:** a-spec.md\n\n### Task 1: t\n\nx\n")
+        self.assertEqual(self.of_plan(self.run_next()[1]),
+                         {"kind": "skip", "spec": "a-spec.md", "plan": "a-impl.md", "stage": "split", "why": "split=never"})
+        os.remove(os.path.join(self.tmp, "a-impl.md"))
+        action = self.of_plan(self.run_next()[1])
+        self.assertEqual((action["kind"], action["why"]), ("skip", "split=never"))
+        self.assertTrue(action["warnings"][0].startswith("size-unavailable: "), action)
+
+    def test_split_auto_never_asks(self):
+        self.assertEqual(self.of_plan(self.run_next(chain="split=auto")[1])["kind"], "run")
+
+    def question(self, answer=None, text=None):
+        return _t2_question("Q1", "a-impl", "split", (text or self.text) + " — the plan is over the budget", answer=answer)
+
+    def test_answers(self):
+        out = self.run_next(self.question("continue"))[1]
+        self.assertEqual((self.of_plan(out)["kind"], self.of_plan(out)["why"]), ("skip", "plan-oversized: continue"))
+        action = self.of_plan(self.run_next(self.question("split"))[1])
+        self.assertEqual((action["kind"], action["skill"], action["args"], action["reason"]),
+                         ("run", "plan-splitter", ["a-impl.md"], None))
+
+    def test_stop_holds_only_this_plan(self):
+        out = self.run_next(self.question("stop"))[1]
+        self.assertEqual(self.of_plan(out)["reason"], "plan-oversized: stop")
+        other = self.of_plan(out, "b-impl.md")
+        self.assertEqual((other["kind"], other["stage"]), ("run", "writing"))
+
+    def test_open_question_of_this_plan_waits(self):
+        state = _t2_state(_t2_plan("a-spec.md", done=("writing", "revision")), questions=[self.question()],
+                          chain={"split": "never", "resolver": "audit"}, root=self.tmp)
+        self.assertEqual(ct._stage_step({"events": []}, state, "split", None)["why"], self.reason)
+
+    def test_answer_for_another_plan_hash_asks_again(self):
+        stale = self.text.replace(self.text[-13:-1], "0" * 12)  # the plan changed after the answer
+        action = self.of_plan(self.run_next(self.question("continue", text=stale))[1])
+        self.assertEqual((action["kind"], action["prefix"]), ("ask", self.text))
+
+    def test_wait_reason_in_run_next_and_run_status(self):
+        path, out = self.run_next(self.question())
+        self.assertEqual(self.of_plan(out)["reason"], self.reason)
+        status = ct.run_status(path)
+        self.assertIn({"spec": "a-spec.md", "plan": "a-impl.md", "stage": "split", "reason": self.reason}, status["waits"])
+        self.assertEqual([q["id"] for q in status["open_questions"]], ["Q1"])
+        path, _ = self.run_next(self.question("stop"))
+        self.assertIn("plan-oversized: stop", [item["reason"] for item in ct.run_status(path)["waits"]])
 
 
 if __name__ == "__main__":

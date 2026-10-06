@@ -34,8 +34,11 @@ Run orchestration (used by SKILL.md):
       in the same repository must not share a label.
       --plan keeps the plan's bytes and task hashes in the snapshot (also without git, exit 3); guard-check then
       adds plan_bytes_before, plan_bytes_after, changed_tasks and over_budget. Without --plan: warnings plan-unknown.
-      The snapshot is every file under the git root (brainstorm_tool.tree_snapshot: size and sha256, ignored files
-      included, TREE_SKIP_DIRS skipped; guard-begin prints files), or git status without plan-brainstorming alongside.
+      The snapshot is brainstorm_tool.worktree_snapshot of the git root (HEAD, `git status` with blob hashes, the
+      ignored files of the --plan plan's folder with sha256; guard-begin prints files; snapshot-failed is exit 1), or
+      git status without plan-brainstorming alongside (warning snapshot-unavailable). guard-check also prints
+      ignored_changed (ignored paths outside the plan's folder: information, no violation) and the violation HEAD
+      when HEAD moved.
       guard-check also prints free: changed files with a pipeline name (CHAIN_FILE_RE) that are not the plan's own
       (own_plan_file; the plan of --plan), which are no violation; without --plan nothing is free.
 
@@ -1446,37 +1449,52 @@ def guard_snapshot_path(root: str, label: str) -> str:
     return os.path.join(folder, f"{safe_label}.json")
 
 
-def guard_tree_tools() -> Optional[Tuple[object, object]]:
-    """brainstorm_tool.tree_snapshot and tree_diff (spec 2 of plan-refactoring-04), or None without plan-brainstorming
-    alongside: the guard then works by `git status` as before."""
+def guard_snapshot_tool() -> Optional[object]:
+    """brainstorm_tool with worktree_snapshot and worktree_diff (spec 1 of plan-refactoring-05), or None without
+    plan-brainstorming alongside: the guard then works by `git status` as before (warning snapshot-unavailable)."""
     tool = _load_brainstorm_tool()
-    snapshot, diff = getattr(tool, "tree_snapshot", None), getattr(tool, "tree_diff", None)
-    return (snapshot, diff) if snapshot is not None and diff is not None else None
+    names = ("worktree_snapshot", "worktree_diff", "SnapshotError")
+    return tool if all(getattr(tool, name, None) is not None for name in names) else None
+
+
+def guard_plan_dir(top: str, plan: Optional[str]) -> Optional[str]:
+    """Root-relative folder of the --plan plan ("" for the root); None without --plan or for a plan outside `top`."""
+    if plan is None:
+        return None
+    rel = relative_to_root(top, os.path.abspath(plan))
+    if rel == ".." or rel.startswith("../") or os.path.isabs(rel):
+        return None
+    return rel.rpartition("/")[0]
 
 
 def cmd_guard_begin(root: str, label: str, plan: Optional[str] = None) -> int:
-    """Snapshot for guard-check: every file under the git root by brainstorm_tool.tree_snapshot (spec 2 of
-    plan-refactoring-04; `files` counts them), or `git status` without plan-brainstorming alongside (`changed_count`).
-    With --plan it also keeps the plan's path, bytes and task hashes (plan_measure, spec 1 of plan-refactoring-04),
-    written even without git (exit 3 as before), so that guard-check still gives the budget fields. Without --plan:
-    warnings plan-unknown."""
+    """Snapshot for guard-check: brainstorm_tool.worktree_snapshot of the git root with the --plan plan's folder (spec 1
+    of plan-refactoring-05; `files` counts its entries; snapshot-failed is exit 1), or `git status` without
+    plan-brainstorming alongside (`changed_count`, warning snapshot-unavailable). With --plan it also keeps the plan's
+    path, bytes and task hashes (plan_measure, spec 1 of plan-refactoring-04), written even without git (exit 3 as
+    before), so that guard-check still gives the budget fields. Without --plan: warnings plan-unknown."""
     if plan is not None and not os.path.isfile(plan):
         print_json({"valid": False, "error": f"plan not found: {plan}"})
         return 2
     measure = plan_measure(plan) if plan is not None else None
     warnings = ["plan-unknown"] if plan is None else [] if measure is not None else ["budget-unavailable"]
-    top, tools = git_root_of(root), guard_tree_tools()
-    if top is not None and tools is not None:
-        tree = tools[0](top)  # type: ignore[operator]
-        stored: Dict[str, object] = {"root": top, "tree": tree}
+    top, tool = git_root_of(root), guard_snapshot_tool()
+    if top is not None and tool is not None:
+        try:
+            snapshot = tool.worktree_snapshot(top, guard_plan_dir(top, plan))  # type: ignore[attr-defined]
+        except tool.SnapshotError as exc:  # type: ignore[attr-defined]
+            print_json({"valid": False, "error": str(exc), "warnings": warnings})
+            return 1
+        stored: Dict[str, object] = {"root": top, "snapshot": snapshot}
         if measure is not None:
             stored["plan"] = measure
         with open(guard_snapshot_path(root, label), "w", encoding="utf-8") as f:
             json.dump(stored, f)
-        print_json({"valid": True, "git": True, "label": label, "files": len(tree), "warnings": warnings})
+        print_json({"valid": True, "git": True, "label": label, "files": len(snapshot["entries"]),
+                    "warnings": warnings + list(snapshot["warnings"])})
         return 0
-    if tools is None:
-        warnings.append("tree-snapshot-unavailable")
+    if tool is None:
+        warnings.append("snapshot-unavailable")
     code, snapshot = git_changed(root)
     if code != 0:
         if measure is not None:
@@ -1507,13 +1525,18 @@ def relative_to_root(root: str, path: str) -> str:
 # moment, so its change during a phase is never a violation. Any other path outside `allowed` still is.
 GUARD_FREE_FILES = ("BACKLOG.md",)
 
+# Copy of executor_tool.BACKLOG_TEMP_RE (spec 1 of plan-refactoring-05; plan-writing/tests holds the copies equal): the
+# temp file of BACKLOG.md's atomic write, free at the root like BACKLOG.md.
+BACKLOG_TEMP_RE = re.compile(r"\.BACKLOG\.md\.[a-z0-9_]+\.tmp")
+
 
 # Copy of executor_tool._CHAIN_FILE_RE (spec 2 of plan-refactoring-04; plan-writing/tests holds the two equal): the
 # names of the pipeline's files. In guard-check a changed file with such a name that is not one of this plan's own
 # files (own_plan_file) is `free`: another writer of the chain wrote it (a plan written in parallel, the goal's journal).
 CHAIN_FILE_RE = re.compile(
-    r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
-    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
+    r"(\.)?.+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
+    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)(?(1)\.[a-z0-9_]+\.tmp)"
+    r"|\.splitter-[a-z0-9_]+\.tmp|\.splitter-probe-[a-z0-9_]+|\..+-review-write-test-\d+(?:-\d+)?\.tmp")
 
 
 def own_plan_file(path: str, plan_rel: str) -> bool:
@@ -1548,7 +1571,7 @@ def guard_split(changed: Sequence[str], allowed_rel: Sequence[str],
     free: List[str] = []
     violations: List[str] = []
     for path in changed:
-        if path_is_allowed(path, allowed_rel) or path in GUARD_FREE_FILES:
+        if path_is_allowed(path, allowed_rel) or path in GUARD_FREE_FILES or BACKLOG_TEMP_RE.fullmatch(path):
             continue
         chain_name = CHAIN_FILE_RE.fullmatch(path.rpartition("/")[2]) is not None
         if plan_rel is not None and chain_name and not own_plan_file(path, plan_rel):
@@ -1576,9 +1599,11 @@ def guard_budget(before: object) -> Dict[str, object]:
 
 
 def cmd_guard_check(root: str, label: str, allowed: Sequence[str]) -> int:
-    """Changed paths since guard-begin, split by guard_split into `free` (other writers' pipeline files) and
-    `violations`, plus the budget fields of a --plan snapshot. A tree snapshot is compared with the tree now
-    (tree_diff, spec 2 of plan-refactoring-04); a `git status` snapshot as before."""
+    """Changed paths since guard-begin, split into `free` (other writers' pipeline files, guard_split) and
+    `violations`, plus the budget fields of a --plan snapshot. A worktree_snapshot is compared with one taken now by
+    brainstorm_tool.worktree_diff (spec 1 of plan-refactoring-05): an ignored path outside the plan's folder is
+    `ignored_changed` (information, never written into the review), a moved HEAD is the violation `HEAD`; a
+    `git status` snapshot as before (`ignored_changed` empty)."""
     snapshot_path = guard_snapshot_path(root, label)
     if not os.path.isfile(snapshot_path):
         print_json({"valid": False, "error": f"no guard snapshot for label '{label}'; run guard-begin first"})
@@ -1586,31 +1611,45 @@ def cmd_guard_check(root: str, label: str, allowed: Sequence[str]) -> int:
     with open(snapshot_path, "r", encoding="utf-8") as f:
         stored = json.load(f)
     budget = guard_budget(stored.get("plan") if isinstance(stored, dict) else None)
-    tree = stored.get("tree") if isinstance(stored, dict) else None
-    tools = guard_tree_tools()
-    if isinstance(tree, dict) and tools is not None:
+    before_snapshot = stored.get("snapshot") if isinstance(stored, dict) else None
+    tool = guard_snapshot_tool()
+    ignored_changed: List[str] = []
+    if isinstance(before_snapshot, dict) and tool is not None:
         base = str(stored["root"])
-        changed = sorted(tools[1](tree, tools[0](base)))  # type: ignore[operator]
+        allowed_rel = [relative_to_root(base, path) for path in allowed]
+        plan_rel = guard_plan_rel(base, stored)
+        plan_dir = before_snapshot.get("plan_dir")
+        try:
+            after = tool.worktree_snapshot(base, plan_dir)  # type: ignore[attr-defined]
+        except tool.SnapshotError as exc:  # type: ignore[attr-defined]
+            os.remove(snapshot_path)
+            print_json({"valid": False, "error": str(exc), **budget})
+            return 1
+        diff = tool.worktree_diff(before_snapshot, after, allowed_rel, plan_dir,  # type: ignore[attr-defined]
+                                  free=lambda path: not guard_split([path], allowed_rel, plan_rel)[1])
+        ignored_changed = diff["ignored_changed"]
+        changed = [path for path in diff["changed"] if path not in ignored_changed]
+        free = guard_split(diff["free"], allowed_rel, plan_rel)[0]
+        violations = diff["violations"] + (["HEAD"] if diff["head_moved"] else [])
     else:
-        if tools is None:
-            budget["warnings"] = list(budget["warnings"]) + ["tree-snapshot-unavailable"]  # type: ignore[call-overload]
-        code, after = git_changed(root)
+        if tool is None:
+            budget["warnings"] = list(budget["warnings"]) + ["snapshot-unavailable"]  # type: ignore[call-overload]
+        code, now = git_changed(root)
         if code != 0:  # no git: the guard is unavailable, the budget fields of a --plan snapshot still come
             os.remove(snapshot_path)
             print_json({"valid": False, "git": False, "warning": "git status unavailable; check changed files manually",
-                        **after, **budget})
+                        **now, **budget})
             return 3
         before = load_changed_map(snapshot_path)
         after_map = {
-            normalize_path(item["path"]): {"status": item["status"], "sha256": item["sha256"]} for item in after["changed"]
+            normalize_path(item["path"]): {"status": item["status"], "sha256": item["sha256"]} for item in now["changed"]
         }
         changed = sorted(path for path in set(before) | set(after_map) if before.get(path) != after_map.get(path))
-        base = root
-    allowed_rel = [relative_to_root(base, path) for path in allowed]
-    free, violations = guard_split(changed, allowed_rel, guard_plan_rel(base, stored))
+        allowed_rel = [relative_to_root(root, path) for path in allowed]
+        free, violations = guard_split(changed, allowed_rel, guard_plan_rel(root, stored))
     os.remove(snapshot_path)
     print_json({"valid": not violations, "changed": changed, "allowed": allowed_rel, "free": free,
-                "violations": violations, **budget})
+                "violations": violations, "ignored_changed": ignored_changed, **budget})
     return 0 if not violations else 1
 
 

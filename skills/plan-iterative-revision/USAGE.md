@@ -79,10 +79,11 @@ bootstrap (numbering, language, config, write check; a plan still carrying plan-
   → digest: which tasks changed, and which tasks' files changed on disk → the next audit reads only
     them, their dependents and the open contracts' tasks (incremental); an unchanged plan with
     unchanged code skips the audit
-  → each phase runs inside the diff guard: a snapshot of every file under the git root, ignored ones
-    and `docs/.plans/` included; a change outside the phase's own file stops the run, while other
-    plans' pipeline files (a plan written in parallel, the chain journal) are only counted in the next
-    review's `**Concurrent pipeline files**` line
+  → each phase runs inside the diff guard: a snapshot of the working tree by `git status` (HEAD,
+    every changed path git does not ignore, the plan folder's ignored files with their hashes); a
+    change outside the phase's own file or a commit stops the run, a new ignored file elsewhere is
+    only reported, while other plans' pipeline files (a plan written in parallel, the chain journal)
+    are only counted in the next review's `**Concurrent pipeline files**` line
   → repeat; a clean incremental audit is followed by one full audit before `converged`
 ```
 

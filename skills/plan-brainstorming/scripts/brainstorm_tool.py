@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime
+import fnmatch
 import hashlib
 import json
 import os
@@ -1336,14 +1337,22 @@ def _section_journals(root: str, section: str) -> List[str]:
     return sorted(found)
 
 
-# Tree snapshot (spec 2 of plan-refactoring-04): every file under a root, for executor_tool.py delegate-check and the
-# diff guard of next_review_index.py (both load this file by path). Directories with these names are not walked, .git
-# never is; a write into them is seen only through the subagent's `Written files:` block.
-TREE_SKIP_DIRS = ("node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", "dist", "build")
-TREE_LARGE_BYTES = 8 * 1024 * 1024  # a larger file keeps its size and mtime, without a hash
+# Worktree snapshot (spec 1 of plan-refactoring-05): what the guards compare — executor_tool.py delegate-check and
+# next_review_index.py guard-begin/guard-check, which load this file by path. With git: HEAD and `git status`; outside
+# the plan folder an ignored path is seen only as `--ignored=matching` lists it (a new ignored file or directory, not a
+# write inside one: the accepted blind spot), the plan folder's ignored files one by one with size, mtime and sha256.
+# Without git: a walk with stat, ignored files by the root .gitignore only.
+SNAPSHOT_IGNORED = "!!"
 
 
-def _tree_file_sha256(path: str) -> str:
+def _in_plan_dir(path: str, plan_dir: Optional[str]) -> bool:
+    """True for a path of the plan folder: any depth below a folder, only the top-level files for the root ("")."""
+    if plan_dir is None:
+        return False
+    return "/" not in path if plan_dir == "" else path.startswith(plan_dir + "/")
+
+
+def _snapshot_sha256(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
@@ -1351,45 +1360,211 @@ def _tree_file_sha256(path: str) -> str:
     return digest.hexdigest()
 
 
-def _tree_entry(path: str) -> List[Any]:
-    """[size, sha256, mtime_ns, label] of one file (a link to a file counts by its target): label None with the hash;
-    `large` (size > TREE_LARGE_BYTES) with the mtime and no hash; `unreadable` when the file cannot be read (size None
-    when it cannot be stat-ed either, e.g. a broken link)."""
+def _snapshot_file(root: str, rel: str, status: str, with_hash: bool, warnings: List[str]) -> List[Any]:
+    """[status, size, mtime_ns] of a file, plus its sha256 with `with_hash`; [status, "unreadable"] and a warning
+    when it cannot be read."""
+    path = os.path.join(root, rel)
     try:
         info = os.stat(path)
+        return [status, info.st_size, info.st_mtime_ns] + ([_snapshot_sha256(path)] if with_hash else [])
     except OSError:
-        return [None, None, None, "unreadable"]
-    if info.st_size > TREE_LARGE_BYTES:
-        return [info.st_size, None, info.st_mtime_ns, "large"]
+        warnings.append(f"unreadable: {rel}")
+        return [status, "unreadable"]
+
+
+class SnapshotError(Exception):
+    """snapshot-failed: `git status` or `git hash-object` failed; the guard window is not opened."""
+
+
+def _snapshot_git(root: str, *args: str, stdin: Optional[str] = None, check: bool = True) -> Optional[str]:
+    """stdout of `git <args>` in `root`; a failure is SnapshotError, or None with check=False."""
+    result = subprocess.run(["git", *args], cwd=root, input=stdin, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", check=False)
+    if result.returncode != 0:
+        if not check:
+            return None
+        raise SnapshotError(f"snapshot-failed: {result.stderr.strip() or 'git ' + args[0] + ' failed'}")
+    return result.stdout
+
+
+def _snapshot_top(root: str) -> Optional[str]:
+    """Real path of the git top level of `root`; None outside git or without git installed."""
     try:
-        return [info.st_size, _tree_file_sha256(path), None, None]
+        top = _snapshot_git(root, "rev-parse", "--show-toplevel", check=False)
     except OSError:
-        return [info.st_size, None, None, "unreadable"]
+        return None
+    return os.path.realpath(top.strip()) if top and top.strip() else None
 
 
-def tree_snapshot(root: str, skip: Iterable[str] = ()) -> Dict[str, List[Any]]:
-    """{root-relative path with forward slashes: [size, sha256 or None, mtime_ns or None, label]} of every file under
-    `root`, the files git ignores included. `.git` and the TREE_SKIP_DIRS names are skipped at any depth, links to
-    directories are not walked, and `skip` names root-relative paths to leave out (the caller's own snapshot file)."""
+def _snapshot_blobs(root: str, paths: List[str], warnings: List[str]) -> Dict[str, Optional[str]]:
+    """{path: blob hash} by one `git hash-object --stdin-paths` (the filters of git add, no command-line limit); a path
+    that is not a file gets None, a file that cannot be opened "unreadable" and a warning."""
+    blobs: Dict[str, Optional[str]] = {}
+    files: List[str] = []
+    for rel in paths:
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            blobs[rel] = None
+            continue
+        try:
+            with open(path, "rb"):
+                files.append(rel)
+        except OSError:
+            blobs[rel] = "unreadable"
+            warnings.append(f"unreadable: {rel}")
+    if files:
+        out = _snapshot_git(root, "hash-object", "--stdin-paths", stdin="\n".join(files) + "\n") or ""
+        blobs.update(zip(files, out.split()))
+    return blobs
+
+
+def _snapshot_status(root: str, *extra: str) -> List[Tuple[str, str]]:
+    """[(XY, path)] of `git status --porcelain=v1 -z --untracked-files=all --no-renames` with `extra`."""
+    out = _snapshot_git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", *extra) or ""
+    return [(item[:2], item[3:]) for item in out.split("\0") if len(item) > 3]
+
+
+def worktree_snapshot(root: str, plan_dir: Optional[str] = None, skip: Iterable[str] = ()) -> Dict[str, Any]:
+    """{"origin", "root", "plan_dir", "head", "entries", "warnings"} of the working tree of `root` (spec 1 of
+    plan-refactoring-05). With git (`origin: git`, `root` the real top level): `head` {sha, branch}; `entries` from
+    `git status --ignored=matching`: [XY, blob hash] of a listed path that is not ignored, ["!!"] of an ignored file or
+    directory (`dir/`) outside the plan folder; the plan folder's ignored files come one by one from a second
+    `git status --ignored -- <plan_dir>` as ["!!", size, mtime_ns, sha256] (a plan at the root: no second call, the
+    ignored top-level files get them). `plan_dir` is root-relative ("" for the root), None for no protected folder;
+    `skip` names root-relative paths to leave out (the guard's own files). A path that cannot be read is
+    [status, "unreadable"] with a line in `warnings`. Without git: _walk_snapshot. SnapshotError when git fails."""
     left_out = {str(path).replace("\\", "/") for path in skip}
-    skipped = set(TREE_SKIP_DIRS) | {".git"}
+    top = _snapshot_top(root)
+    if top is None:
+        return _walk_snapshot(os.path.realpath(root), plan_dir, left_out)
+    warnings: List[str] = []
+    listed = [(xy, path) for xy, path in _snapshot_status(top, "--ignored=matching") if path not in left_out]
+    blobs = _snapshot_blobs(top, [path for xy, path in listed if xy != SNAPSHOT_IGNORED], warnings)
     entries: Dict[str, List[Any]] = {}
+    for xy, path in listed:
+        if xy != SNAPSHOT_IGNORED:
+            entries[path] = [xy, blobs.get(path)]
+        elif plan_dir == "" and "/" not in path:
+            entries[path] = _snapshot_file(top, path, xy, True, warnings)
+        elif not (plan_dir and path.startswith(plan_dir + "/")):
+            entries[path] = [xy]
+    if plan_dir:
+        for xy, path in _snapshot_status(top, "--ignored", "--", ":(top,literal)" + plan_dir):
+            if xy == SNAPSHOT_IGNORED and path not in left_out:
+                entries[path] = [xy] if path.endswith("/") else _snapshot_file(top, path, xy, True, warnings)
+    head = {"sha": (_snapshot_git(top, "rev-parse", "--verify", "-q", "HEAD", check=False) or "").strip() or None,
+            "branch": (_snapshot_git(top, "symbolic-ref", "-q", "--short", "HEAD", check=False) or "").strip() or None}
+    return {"origin": "git", "root": top, "plan_dir": plan_dir, "head": head, "entries": entries, "warnings": warnings}
+
+
+# The root .gitignore for the walk without git, copied from resolver_tool.py (load_gitignore_patterns,
+# matches_gitignore): `!` lines are dropped, nested .gitignore files and .git/info/exclude are not read.
+def _gitignore_patterns(root: str) -> List[str]:
+    path = os.path.join(root, ".gitignore")
+    patterns: List[str] = []
+    if not os.path.isfile(path):
+        return patterns
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return patterns
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("!"):
+            continue
+        patterns.append(stripped)
+    return patterns
+
+
+def _gitignore_match(rel_path: str, is_dir: bool, patterns: List[str]) -> bool:
+    rel_path = rel_path.replace("\\", "/")
+    basename = rel_path.rsplit("/", 1)[-1]
+    for raw_pattern in patterns:
+        pattern = raw_pattern.replace("\\", "/")
+        dir_only = pattern.endswith("/")
+        if dir_only:
+            pattern = pattern.rstrip("/")
+        anchored = pattern.startswith("/")
+        if anchored:
+            pattern = pattern.lstrip("/")
+        if dir_only and not is_dir:
+            continue
+        if anchored:
+            if fnmatch.fnmatch(rel_path, pattern) or rel_path.startswith(pattern + "/"):
+                return True
+        elif "/" in pattern:
+            if fnmatch.fnmatch(rel_path, pattern) or rel_path.startswith(pattern.rstrip("*") + "/"):
+                return True
+        else:
+            if fnmatch.fnmatch(basename, pattern) or any(fnmatch.fnmatch(part, pattern) for part in rel_path.split("/")):
+                return True
+    return False
+
+
+def _walk_snapshot(root: str, plan_dir: Optional[str], left_out: Iterable[str]) -> Dict[str, Any]:
+    """worktree_snapshot without git (`origin: walk`, `head` None): every file under `root` but `.git` as
+    [status, size, mtime_ns], plus sha256 in the plan folder; status "!!" when the root .gitignore ignores the file or
+    a folder above it, else ""."""
+    patterns = _gitignore_patterns(root)
+    entries: Dict[str, List[Any]] = {}
+    warnings: List[str] = []
+    ignored_dirs: Dict[str, bool] = {"": False}
     for directory, dirs, files in os.walk(root):
-        dirs[:] = sorted(name for name in dirs if name not in skipped)
+        here = os.path.relpath(directory, root).replace(os.sep, "/")
+        here = "" if here == "." else here
+        dirs[:] = sorted(name for name in dirs if name != ".git")
+        for name in dirs:
+            rel = f"{here}/{name}" if here else name
+            ignored_dirs[rel] = ignored_dirs[here] or _gitignore_match(rel, True, patterns)
         for name in sorted(files):
-            if name == ".git":  # a worktree's or submodule's .git file
+            rel = f"{here}/{name}" if here else name
+            if name == ".git" or rel in left_out:
                 continue
-            path = os.path.join(directory, name)
-            rel = os.path.relpath(path, root).replace(os.sep, "/")
-            if rel not in left_out:
-                entries[rel] = _tree_entry(path)
-    return entries
+            ignored = ignored_dirs[here] or _gitignore_match(rel, False, patterns)
+            entries[rel] = _snapshot_file(root, rel, SNAPSHOT_IGNORED if ignored else "", _in_plan_dir(rel, plan_dir),
+                                          warnings)
+    return {"origin": "walk", "root": root, "plan_dir": plan_dir, "head": None, "entries": entries,
+            "warnings": warnings}
 
 
-def tree_diff(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
-    """Paths of two tree_snapshot results that appeared, disappeared or changed (size, hash, the mtime of a `large`
-    file, the label), sorted."""
-    return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
+def worktree_diff(before: Dict[str, Any], after: Dict[str, Any], allowed: Iterable[str] = (),
+                  plan_dir: Optional[str] = None, free: Optional[Callable[[str], bool]] = None) -> Dict[str, Any]:
+    """The changes between two worktree_snapshot results (spec 1 of plan-refactoring-05): `changed` (every path whose
+    entry differs, sorted); outside `allowed` (a path, or a folder ending in `/`) each goes to `free` when the
+    consumer's `free(path)` says so, else to `ignored_changed` when it is ignored outside `plan_dir` (by the snapshot
+    after, a vanished path by the one before; plan_dir None: every ignored path), else to `violations`. `head_moved`
+    is a flag only, never a path of `violations`; `origin` is the snapshot after's."""
+    old, new = before.get("entries") or {}, after.get("entries") or {}
+    allowed_paths = [str(path).replace("\\", "/") for path in allowed]
+    result: Dict[str, Any] = {"changed": [], "violations": [], "ignored_changed": [], "free": [],
+                              "head_moved": before.get("head") != after.get("head"), "origin": after.get("origin")}
+    for path in sorted(set(old) | set(new)):
+        if old.get(path) == new.get(path):
+            continue
+        result["changed"].append(path)
+        if any(path == item or (item.endswith("/") and path.startswith(item)) for item in allowed_paths):
+            continue
+        entry = new[path] if path in new else old[path]
+        if free is not None and free(path):
+            result["free"].append(path)
+        elif entry[0] == SNAPSHOT_IGNORED and not _in_plan_dir(path, plan_dir):
+            result["ignored_changed"].append(path)
+        else:
+            result["violations"].append(path)
+    return result
+
+
+def worktree_ignored(snapshot: Dict[str, Any], path: str) -> bool:
+    """True when `snapshot` holds `path`, or a folder above it, as ignored outside its plan folder: a write there may
+    be unseen (the blind spot), so a guard does not call such a named path a phantom."""
+    path = str(path).replace("\\", "/")
+    if _in_plan_dir(path, snapshot.get("plan_dir")):
+        return False
+    entries = snapshot.get("entries") or {}
+    parts = path.split("/")
+    keys = [path] + ["/".join(parts[:index]) + "/" for index in range(1, len(parts))]
+    return any((entries.get(key) or [None])[0] == SNAPSHOT_IGNORED for key in keys)
 
 
 SPEC_ITEM_RE = re.compile(r"^(?:[-*]|\d+\.)\s+(?P<text>.+)$")

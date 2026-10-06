@@ -1196,9 +1196,14 @@ def path_inside(root: str, path: str) -> bool:
 # rule (executor_tool._CHAIN_FILE_RE, _is_run_artifact). A file with such a name elsewhere is ordinary evidence.
 # CHAIN_FILE_RE is a copy for a resolver installed without plan-executor; a contract test keeps the two equal.
 CHAIN_FILE_RE = re.compile(
-    r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
-    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
+    r"(\.)?.+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
+    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)(?(1)\.[a-z0-9_]+\.tmp)"
+    r"|\.splitter-[a-z0-9_]+\.tmp|\.splitter-probe-[a-z0-9_]+|\..+-review-write-test-\d+(?:-\d+)?\.tmp")
 FREE_FILES = ("BACKLOG.md",)
+
+# Copy of executor_tool.BACKLOG_TEMP_RE (spec 1 of plan-refactoring-05; plan-writing/tests holds the copies equal): the
+# temp file of BACKLOG.md's atomic write, free at the root like BACKLOG.md.
+BACKLOG_TEMP_RE = re.compile(r"\.BACKLOG\.md\.[a-z0-9_]+\.tmp")
 
 
 def plan_dir_of(plan: str, root: str) -> Optional[str]:
@@ -1210,9 +1215,10 @@ def plan_dir_of(plan: str, root: str) -> Optional[str]:
 
 
 def is_pipeline_file(path: str, plan_dir: Optional[str]) -> bool:
-    """BACKLOG.md at the root, or a CHAIN_FILE_RE name in `plan_dir` (root-relative; None: no folder matches)."""
+    """BACKLOG.md and its temp file (BACKLOG_TEMP_RE) at the root, or a CHAIN_FILE_RE name in `plan_dir`
+    (root-relative; None: no folder matches)."""
     path = path.replace("\\", "/")
-    if path in FREE_FILES:
+    if path in FREE_FILES or BACKLOG_TEMP_RE.fullmatch(path):
         return True
     folder, _, name = path.rpartition("/")
     return plan_dir is not None and folder == plan_dir and bool(CHAIN_FILE_RE.fullmatch(name))

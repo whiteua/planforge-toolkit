@@ -224,16 +224,16 @@ given to the subagent as fixed JSON when the script is not under test.
 - **Red flags (FAIL):** Edges proposed with reasons as in the dialogue without a roadmap; the order of the
   file numbers (1, 2, 3); `run-init` without `--roadmap`; the roadmap edited.
 
-## Scenario 17: Roadmap notes reach writing and revision, not execution
+## Scenario 17: Roadmap notes reach writing and execution, not split
 
 - **Setup:** The run of Scenario 16 after `run-init`. `run-next` returns a `run` of `/plan-writing
   g-2-spec.md` (role `writing`); later a `run` of `/plan-executor g-1-impl.md` (role `execution`).
 - **Trigger:** The runner launches both agents (LOOP.md, Brief).
 - **Expected (PASS):** `roadmap-parse g-roadmap.md` at the launch of the writing agent; its brief has the
   `roadmap` item with "write after 3: it reuses 3's parser" verbatim, the handoff of g-3 and "the spec
-  outranks the notes". The executor's brief has no `roadmap` item.
-- **Red flags (FAIL):** The notes paraphrased or cut; a `roadmap` item in an execution, audit or commit
-  brief; the roadmap copied into the journal.
+  outranks the notes". The executor's brief has the `execution` variant of the item (LOOP.md, Brief, 10) with the same notes and handoff; a split brief has none.
+- **Red flags (FAIL):** The notes paraphrased or cut; the writing variant in the executor's brief; a `roadmap` item
+  in a split brief; the roadmap copied into the journal.
 
 ## Scenario 18: A changed roadmap on `continue`
 
@@ -341,3 +341,44 @@ given to the subagent as fixed JSON when the script is not under test.
   wait that needs no action.
 - **Red flags (FAIL):** A's execution launched while B's revision runs; C's revision started before A takes the code
   stages; `reading-busy` reported as a stop with a way out by hand.
+
+## Scenario 27: An execution note that changes a task is a question
+
+- **Setup:** The run of Scenario 16; g-1's notes say "keep the old parser: g-2 imports it", and Task 3 of
+  `g-1-impl.md` deletes that parser. `run-next` returns `/plan-executor g-1-impl.md` (role `execution`).
+- **Trigger:** The executor agent runs with the brief (LOOP.md, Brief, 10).
+- **Expected (PASS):** The brief has the `execution` item with the notes verbatim. The executor reaches Task 3,
+  records `J journal-question … --stage execution --text "<the note against Task 3>"` without `--answer` and stops
+  before changing the parser.
+- **Red flags (FAIL):** The parser deleted as planned without a question; the plan edited to follow the note; a
+  `journal-finding` instead of the question.
+
+## Scenario 28: A difference in wording is a finding, not a question
+
+- **Setup:** As Scenario 27, but the notes say "copy the .gitignore parser" and Task 3 says "duplicate
+  `load_gitignore_patterns` in the second script": the same action in other words.
+- **Trigger:** The executor agent runs with the brief.
+- **Expected (PASS):** Task 3 is done as planned; one `J journal-finding` names the wording difference; no
+  `journal-question`, the run goes on.
+- **Red flags (FAIL):** A question that stops the run; the difference not recorded at all.
+
+## Scenario 29: The audit takes the notes as context
+
+- **Setup:** g-1 executed; its notes say "the resolver copy is deleted in spec 2", and the plan keeps the copy as
+  the notes demand. `run-next` returns `/plan-resolver g-1-impl.md auto` (role `audit`); the notes also mention a
+  file the plan does not touch.
+- **Trigger:** The audit agent runs with the brief.
+- **Expected (PASS):** The brief has the `audit` item ("as context … the measure of the audit is the plan"). The
+  report measures the code against the plan; the mismatch between the notes and the plan is one `journal-finding`;
+  no `journal-question`.
+- **Red flags (FAIL):** An issue in the report for following the plan instead of the notes; a question that stops
+  the audit.
+
+## Scenario 30: The commit brief carries only the notes
+
+- **Setup:** g-1 audited; `run-next` returns `/plan-executor g-1-impl.md commit` (role `commit`); g-1 depends on g-0,
+  whose handoff is long.
+- **Trigger:** The runner launches the commit agent.
+- **Expected (PASS):** The brief has "Roadmap: notes of this spec: <notes verbatim>." and nothing of the handoff.
+- **Red flags (FAIL):** The handoff of g-0 in the commit brief; the writing variant with "a contradiction is recorded
+  with `journal-question`".

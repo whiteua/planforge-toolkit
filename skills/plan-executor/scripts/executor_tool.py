@@ -938,22 +938,37 @@ def checkpoint_restore_paths(workdir, tree_ish, paths, plan_dir=None, own=()):
     return {"restored_to": tree_ish, "restored": restored, "removed": removed, "paths": statuses}
 
 
-def checkpoint_prune(workdir, run_id):
-    if checkpoint_detect(workdir)["vcs"] != "git":
-        return {"pruned": []}
-    prefix = f"refs/plan-executor/{_REF_UNSAFE_RE.sub('-', run_id)}/"
-    refs = [line for line in _git(workdir, "for-each-ref", "--format=%(refname)", prefix).splitlines() if line]
-    for ref in refs:
-        _git(workdir, "update-ref", "-d", ref)
-    return {"pruned": refs}
+# The files of delegate-check in <exec_dir> (EXECUTION-STRATEGY.md, Delegation): the snapshot and the saved reply.
+_DELEGATE_FILE_RE = re.compile(r"delegate-.*(?:\.json|-reply\.md)")
 
 
-# delegate-check (F14 of plan-refactoring-02): what a delegated unit's subagent changed against what it named. Version 2
-# (spec 2 of plan-refactoring-04): kind "tree", brainstorm_tool.tree_snapshot of every file under the root, ignored
-# files included; kind "git-status", the `git status` snapshot of _delegate_state, without plan-brainstorming
-# alongside (warning tree-snapshot-unavailable). A version 1 snapshot is snapshot-invalid.
-DELEGATE_SNAPSHOT_VERSION = 2
-DELEGATE_SNAPSHOT_KINDS = ("tree", "git-status")
+def checkpoint_prune(workdir, run_id, exec_dir=None):
+    """Delete the run's refs/plan-executor/<run>/* (with git) and the delegate-check files at the top level of
+    `exec_dir`, also without git (spec 1 of plan-refactoring-05). A file that cannot be removed is
+    `delegate-remove-failed: <name>` in `warnings`; the others are still removed."""
+    removed, warnings = [], []
+    folder = Path(exec_dir) if exec_dir else None
+    for path in sorted(folder.iterdir()) if folder and folder.is_dir() else []:
+        if _DELEGATE_FILE_RE.fullmatch(path.name) and path.is_file():
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except OSError:
+                warnings.append(f"delegate-remove-failed: {path.name}")
+    refs = []
+    if checkpoint_detect(workdir)["vcs"] == "git":
+        prefix = f"refs/plan-executor/{_REF_UNSAFE_RE.sub('-', run_id)}/"
+        refs = [line for line in _git(workdir, "for-each-ref", "--format=%(refname)", prefix).splitlines() if line]
+        for ref in refs:
+            _git(workdir, "update-ref", "-d", ref)
+    return {"pruned": refs, "removed": removed, "warnings": warnings}
+
+
+# delegate-check (F14 of plan-refactoring-02): what a delegated unit's subagent changed against what it named. Version 3
+# (spec 1 of plan-refactoring-05): brainstorm_tool.worktree_snapshot of the repository root — HEAD, the `git status`
+# entries with blob hashes, the plan folder's ignored files with sha256 — the plan folder taken from the ledger next to
+# the snapshot file. Versions 1 and 2 are snapshot-invalid; without plan-brainstorming alongside: snapshot-unavailable.
+DELEGATE_SNAPSHOT_VERSION = 3
 
 
 def _delegate_root(repo):
@@ -977,59 +992,61 @@ def _delegate_rel(root, path):
     return None if rel in (None, ".") else rel
 
 
-def _delegate_state(root, skip=()):
-    """{path: [status, blob hash or None]} of every path `git status --porcelain=v1 --untracked-files=all
-    --no-renames` lists (untracked files one by one); a path that is not a file has no hash. `skip`: paths left out."""
-    out = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
-    entries = {item[3:]: item[:2] for item in out.split("\0") if len(item) > 3 and item[3:] not in skip}
-    files = [rel for rel in sorted(entries) if os.path.isfile(os.path.join(root, rel))]
-    hashes = {}
-    if files:  # one hash-object for all paths: the same filters as git add, no command-line limit
-        result = subprocess.run(["git", "hash-object", "--stdin-paths"], cwd=root, input="\n".join(files) + "\n",
-                                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
-        if result.returncode != 0:
-            raise ToolError(f"hash-object-failed: {result.stderr.strip()}", 1)
-        hashes = dict(zip(files, result.stdout.split()))
-    return {rel: [status, hashes.get(rel)] for rel, status in entries.items()}
+def _delegate_tool():
+    """brainstorm_tool with worktree_snapshot; snapshot-unavailable (exit 1) without plan-brainstorming alongside."""
+    module = _load_brainstorm_tool()
+    if getattr(module, "worktree_snapshot", None) is None:
+        raise ToolError("snapshot-unavailable: plan-brainstorming is not installed alongside; delegate-check needs "
+                        "brainstorm_tool.worktree_snapshot", 1)
+    return module
 
 
-def _delegate_tree(root, skip=()):
-    """(kind, entries, warnings) of a delegate-check snapshot of `root`: brainstorm_tool.tree_snapshot (kind "tree"),
-    or _delegate_state (kind "git-status", warning tree-snapshot-unavailable) without plan-brainstorming alongside.
-    `skip`: root-relative paths left out."""
-    snapshot = getattr(_load_brainstorm_tool(), "tree_snapshot", None)
-    if snapshot is None:
-        return "git-status", _delegate_state(root, skip), ["tree-snapshot-unavailable"]
-    return "tree", snapshot(root, skip=skip), []
+def _delegate_take(root, plan_dir, skip):
+    """brainstorm_tool.worktree_snapshot of `root`; its SnapshotError is snapshot-failed (exit 1)."""
+    module = _delegate_tool()
+    try:
+        return module.worktree_snapshot(root, plan_dir, skip=skip)
+    except module.SnapshotError as exc:
+        raise ToolError(str(exc), 1) from exc
+
+
+def _delegate_plan_dir(out_path, root):
+    """The plan folder (_plan_dir) of the run whose ledger lies next to the snapshot file (`<exec_dir>/state.json`);
+    None without a readable ledger there: then no folder is protected."""
+    try:
+        led = _load(os.path.dirname(os.path.abspath(out_path)))
+    except ToolError:
+        return None
+    return _plan_dir(led, top=root)
 
 
 def delegate_snapshot(repo, out_path):
-    """`delegate-check <repo> --snapshot-out F`: the state before the subagent (_delegate_tree), written to F. F itself
+    """`delegate-check <repo> --snapshot-out F`: the state before the subagent (_delegate_take), written to F. F itself
     is left out when it lies in the repository."""
     root = _delegate_root(repo)
     own = _delegate_rel(root, os.path.abspath(out_path))
-    kind, state, warnings = _delegate_tree(root, {own} if own else ())
-    data = {"version": DELEGATE_SNAPSHOT_VERSION, "root": root, "kind": kind, "entries": state}
-    Path(out_path).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return {"ok": True, "snapshot": str(Path(out_path).resolve()), "root": root, "kind": kind, "entries": len(state),
-            "warnings": warnings}
+    snapshot = _delegate_take(root, _delegate_plan_dir(out_path, root), {own} if own else ())
+    Path(out_path).write_text(json.dumps(dict(snapshot, version=DELEGATE_SNAPSHOT_VERSION), ensure_ascii=False),
+                              encoding="utf-8")
+    return {"ok": True, "snapshot": str(Path(out_path).resolve()), "root": root, "origin": snapshot["origin"],
+            "plan_dir": snapshot["plan_dir"], "entries": len(snapshot["entries"]), "warnings": snapshot["warnings"]}
 
 
 def _load_delegate_snapshot(path, root):
-    """(kind, entries) of a delegate-check snapshot of `root`; snapshot-invalid (exit 2) for a file that cannot be
-    read, is not a version 2 snapshot (a version 1 one included), or was taken in another repository."""
+    """The delegate-check snapshot of `root`; snapshot-invalid (exit 2) for a file that cannot be read, is not a
+    version 3 snapshot with git (versions 1 and 2 included), or was taken in another repository."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise ToolError(f"snapshot-invalid: {path}: {exc}", 2) from exc
     entries = data.get("entries") if isinstance(data, dict) else None
     if (not isinstance(entries, dict) or data.get("version") != DELEGATE_SNAPSHOT_VERSION
-            or data.get("kind") not in DELEGATE_SNAPSHOT_KINDS or not isinstance(data.get("root"), str)):
+            or data.get("origin") != "git" or not isinstance(data.get("root"), str)):
         raise ToolError(f"snapshot-invalid: {path}: not a delegate-check snapshot of version "
                         f"{DELEGATE_SNAPSHOT_VERSION}", 2)
     if os.path.normcase(os.path.realpath(data["root"])) != os.path.normcase(root):
         raise ToolError(f"snapshot-invalid: {path}: taken in {data['root']}, not in {root}", 2)
-    return data["kind"], entries
+    return data
 
 
 # The block that ends a delegated subagent's reply (spec 2 of plan-refactoring-04): `Written files:` and one path per
@@ -1068,25 +1085,28 @@ def _written_files(text):
 def delegate_check(repo, snapshot_path, reply_path):
     """`delegate-check <repo> --snapshot F --reply R`: the verdict of a delegated attempt. The named paths are the
     `Written files:` block that ends the subagent's reply R (_written_files); without such a block `reply_error` is
-    written-list-missing and the attempt fails. `changed`: paths whose entry differs from the snapshot; `outside`:
-    named paths that leave the root (_delegate_rel); `unreported`: changed and not named, except the pipeline's files
-    by name (_is_chain_file), which other agents of a chain may write meanwhile; `phantom`: named and not changed.
-    `fail` when the block is missing or any of the three is not empty; reply-unreadable (exit 2) when R cannot be read.
-    The snapshot F and the reply R are left out of both trees when they lie in the repository (an `exec_dir` inside it,
-    git-ignored, is allowed): R is written after the snapshot and is not the subagent's work."""
+    written-list-missing and the attempt fails. brainstorm_tool.worktree_diff of the snapshot F and the tree now, with
+    F's plan folder: `outside`: named paths that leave the root (_delegate_rel); `unreported`: changed and not named,
+    except the pipeline's files by name (_is_chain_file), which other agents of a chain may write meanwhile, and the
+    ignored paths outside the plan folder (`ignored_changed`, information); `phantom`: named and not changed, except a
+    path ignored outside the plan folder by the snapshot now (worktree_ignored: a write there may be unseen);
+    `head_moved`: HEAD changed (a commit, reset or checkout). `fail` when the block is missing, HEAD moved or any of
+    the three lists is not empty; reply-unreadable (exit 2) when R cannot be read. `changed` leaves out
+    `ignored_changed`. The snapshot F and the reply R are left out of both snapshots when they lie in the repository
+    (an `exec_dir` inside it, git-ignored, is allowed): R is written after the snapshot and is not the subagent's
+    work."""
     root = _delegate_root(repo)
-    kind, before = _load_delegate_snapshot(snapshot_path, root)
+    before = _load_delegate_snapshot(snapshot_path, root)
     try:
         files = _written_files(Path(reply_path).read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError) as exc:
         raise ToolError(f"reply-unreadable: {reply_path}: {exc}", 2) from exc
     own = {rel for rel in (_delegate_rel(root, os.path.abspath(snapshot_path)),
                            _delegate_rel(root, os.path.abspath(reply_path))) if rel}
-    now, after, warnings = _delegate_tree(root, own)
-    if now != kind:
-        raise ToolError(f"snapshot-invalid: {snapshot_path}: a {kind} snapshot, the check now takes a {now} one", 2)
-    before = {rel: entry for rel, entry in before.items() if rel not in own}
-    changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
+    after = _delegate_take(root, before.get("plan_dir"), own)
+    before = dict(before, entries={rel: entry for rel, entry in before["entries"].items() if rel not in own})
+    module = _delegate_tool()
+    diff = module.worktree_diff(before, after, (), before.get("plan_dir"), free=_is_chain_file)
     outside, named = [], {}
     for raw in files or []:
         rel = _delegate_rel(root, raw)
@@ -1094,13 +1114,15 @@ def delegate_check(repo, snapshot_path, reply_path):
             outside.append(str(raw))
         else:
             named.setdefault(os.path.normcase(rel), rel)
-    keys = {os.path.normcase(rel) for rel in changed}
-    unreported = [rel for rel in changed if os.path.normcase(rel) not in named and not _is_chain_file(rel)]
-    phantom = sorted(rel for key, rel in named.items() if key not in keys)
+    keys = {os.path.normcase(rel) for rel in diff["changed"]}
+    unreported = [rel for rel in diff["violations"] if os.path.normcase(rel) not in named]
+    phantom = sorted(rel for key, rel in named.items() if key not in keys and not module.worktree_ignored(after, rel))
     reply_error = "written-list-missing" if files is None else None
-    return {"ok": True, "verdict": "fail" if reply_error or outside or unreported or phantom else "pass",
-            "reply_error": reply_error, "outside": outside, "unreported": unreported, "phantom": phantom,
-            "changed": changed, "warnings": warnings}
+    failed = reply_error or outside or unreported or phantom or diff["head_moved"]
+    return {"ok": True, "verdict": "fail" if failed else "pass", "reply_error": reply_error, "outside": outside,
+            "unreported": unreported, "phantom": phantom, "head_moved": diff["head_moved"],
+            "changed": [rel for rel in diff["changed"] if rel not in diff["ignored_changed"]],
+            "ignored_changed": diff["ignored_changed"], "origin": diff["origin"], "warnings": after["warnings"]}
 
 
 def recommend_gate(weight):
@@ -1971,9 +1993,20 @@ def cmd_ledger_path(args):
 # change and a rollback never deletes or rewrites them. Any other file stays watched, in the plan's folder
 # too (diffs and commits leave out these names only in the plan folder: _is_run_artifact), and so does a name like
 # api/openapi-spec.md elsewhere.
+#
+# The skills' temporary files are pipeline files too (spec 1 of plan-refactoring-05), each beside the file it belongs
+# to; this is the one list of them: `.<name>.<random>.tmp` of brainstorm_tool._atomic_write_text (<name> a pipeline
+# file: the journal, `<goal>-followups.json`, the goal roadmap; the `(\.)?…(?(1)…)` group: with a leading dot the name
+# must end in `.<random>.tmp`), `.splitter-<random>.tmp` of splitter_tool._atomic_write, `.splitter-probe-<random>` of
+# splitter_tool's write probe and `.<plan>-review-write-test-<pid>[-<n>].tmp` of next_review_index.py's write probes.
+# BACKLOG_TEMP_RE is `.BACKLOG.md.<random>.tmp` of the atomic write of BACKLOG.md, free at the root like BACKLOG.md.
+# Not here: the ledger's temp file (it lies in <exec_dir>, outside the working tree) and the journal's `.lock.stale-*`
+# and `.corrupt-*` files.
 _CHAIN_FILE_RE = re.compile(
-    r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
-    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
+    r"(\.)?.+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
+    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)(?(1)\.[a-z0-9_]+\.tmp)"
+    r"|\.splitter-[a-z0-9_]+\.tmp|\.splitter-probe-[a-z0-9_]+|\..+-review-write-test-\d+(?:-\d+)?\.tmp")
+BACKLOG_TEMP_RE = re.compile(r"\.BACKLOG\.md\.[a-z0-9_]+\.tmp")
 
 
 def _is_chain_file(rel, plan_dir=None, own=()):
@@ -1981,7 +2014,7 @@ def _is_chain_file(rel, plan_dir=None, own=()):
     and for a _CHAIN_FILE_RE name in `plan_dir` (repository-root-relative, "" for the root; _plan_dir).
     Without plan_dir (no ledger) the name alone decides, in any folder."""
     rel = str(rel).replace("\\", "/")
-    if rel in _FOREIGN_IGNORED or rel in own:
+    if rel in _FOREIGN_IGNORED or rel in own or BACKLOG_TEMP_RE.fullmatch(rel):
         return True
     folder, _, name = rel.rpartition("/")
     return bool(_CHAIN_FILE_RE.fullmatch(name)) and (plan_dir is None or folder == plan_dir)
@@ -1994,7 +2027,7 @@ def _is_run_artifact(rel, plan_dir, own=()):
     plan. With plan_dir None (a plan outside the repository) no name is left out."""
     rel = str(rel).replace("\\", "/")
     if plan_dir is None:
-        return rel in _FOREIGN_IGNORED or rel in own
+        return rel in _FOREIGN_IGNORED or rel in own or bool(BACKLOG_TEMP_RE.fullmatch(rel))
     return _is_chain_file(rel, plan_dir, own)
 
 
@@ -2603,7 +2636,7 @@ def cmd_accept_changes(args):
 
 def cmd_checkpoint_prune(args):
     led = _load(args.exec_dir)
-    return checkpoint_prune(led.get("workdir") or args.workdir or ".", led["run_id"])
+    return checkpoint_prune(led.get("workdir") or args.workdir or ".", led["run_id"], args.exec_dir)
 
 
 def cmd_recommend_gate(args):

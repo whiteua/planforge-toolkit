@@ -122,6 +122,14 @@ class TestRunArtifact(unittest.TestCase):
                     "docs/plans/deep/g-impl.md", "sub/BACKLOG.md", "src/app.py"):
             self.assertFalse(self.tool._is_run_artifact(rel, "docs/plans"), rel)
 
+    def test_temp_files_of_the_skills_and_of_backlog(self):  # spec 1 of plan-refactoring-05
+        for rel, plan_dir in ((".BACKLOG.md.k2j3_x9a.tmp", "docs/plans"), (".BACKLOG.md.k2j3_x9a.tmp", None),
+                              ("docs/plans/.g-chain.json.ab12cd_3.tmp", "docs/plans")):
+            self.assertTrue(self.tool._is_run_artifact(rel, plan_dir), rel)
+        self.assertFalse(self.tool._is_run_artifact("docs/.BACKLOG.md.k2j3_x9a.tmp", "docs"))
+        self.assertTrue(self.tool._is_chain_file(".BACKLOG.md.k2j3_x9a.tmp", "docs/plans"))
+        self.assertFalse(self.tool._is_chain_file("docs/.BACKLOG.md.k2j3_x9a.tmp"))
+
     def test_plan_at_the_root_or_outside_the_repository(self):
         self.assertTrue(self.tool._is_run_artifact("g-impl-report-1.md", ""))
         self.assertFalse(self.tool._is_run_artifact("docs/g-impl.md", ""))

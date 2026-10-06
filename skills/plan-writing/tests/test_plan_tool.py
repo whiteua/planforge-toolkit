@@ -24,6 +24,7 @@ SETTINGS_SPEC = os.path.join(HERE, "fixtures", "settings01-spec.md")
 SETTINGS_PLAN = os.path.join(HERE, "fixtures", "settings01-impl.md")
 SPLITTER = os.path.abspath(os.path.join(HERE, "..", "..", "plan-splitter", "scripts", "splitter_tool.py"))
 REVISION = os.path.abspath(os.path.join(HERE, "..", "..", "plan-iterative-revision", "scripts", "next_review_index.py"))
+CHAIN_TOOL = os.path.abspath(os.path.join(HERE, "..", "..", "plan-chain-runner", "scripts", "chain_tool.py"))
 
 
 def _load_module():
@@ -945,16 +946,74 @@ class TaskIdContractTest(unittest.TestCase):
             self.assertEqual(resolver.normalize_plan_task_id(value), expected.lower(), value)
 
 
-@unittest.skipUnless(all(os.path.isfile(p) for p in (EXECUTOR, REVISION)), "pipeline skills not installed alongside")
+@unittest.skipUnless(all(os.path.isfile(p) for p in (EXECUTOR, REVISION, RESOLVER, CHAIN_TOOL)),
+                     "pipeline skills not installed alongside")
 class ChainFileReContractTest(unittest.TestCase):
-    """Spec 2 of plan-refactoring-04: the revision's diff guard knows the pipeline's file names by a copy of
-    executor_tool._CHAIN_FILE_RE."""
+    """Spec 2 of plan-refactoring-04 and spec 1 of plan-refactoring-05: the pipeline's file names, the skills' temp
+    files included, are one pattern in four scripts (executor_tool._CHAIN_FILE_RE and its copies), BACKLOG.md's temp
+    file one pattern in three."""
 
-    def test_the_copy_equals_the_executor_pattern(self):
-        executor = _load_by_path("executor_tool", EXECUTOR)
-        revision = _load_by_path("next_review_index", REVISION)
-        self.assertEqual((revision.CHAIN_FILE_RE.pattern, revision.CHAIN_FILE_RE.flags),
-                         (executor._CHAIN_FILE_RE.pattern, executor._CHAIN_FILE_RE.flags))
+    def setUp(self):
+        self.executor = _load_by_path("executor_tool", EXECUTOR)
+        self.revision = _load_by_path("next_review_index", REVISION)
+        self.resolver = _load_by_path("resolver_tool", RESOLVER)
+        self.chain = _load_by_path("chain_tool", CHAIN_TOOL)
+
+    def test_the_copies_equal_the_executor_patterns(self):
+        original = self.executor._CHAIN_FILE_RE
+        for copy in (self.revision.CHAIN_FILE_RE, self.resolver.CHAIN_FILE_RE, self.chain._CHAIN_FILE_FALLBACK_RE):
+            self.assertEqual((copy.pattern, copy.flags), (original.pattern, original.flags))
+        backlog = self.executor.BACKLOG_TEMP_RE
+        for copy in (self.revision.BACKLOG_TEMP_RE, self.resolver.BACKLOG_TEMP_RE):
+            self.assertEqual((copy.pattern, copy.flags), (backlog.pattern, backlog.flags))
+
+    def test_the_temp_files_of_the_skills(self):
+        regex = self.executor._CHAIN_FILE_RE
+        for name in (".g-chain.json.ab12cd_3.tmp", ".g-followups.json.k2j3_x9a.tmp", ".g-roadmap.md.q1w2e3r4.tmp",
+                     ".splitter-a1b2c3d4.tmp", ".splitter-probe-a1b2c3d4", ".x-impl-review-write-test-123.tmp",
+                     ".x-impl-review-write-test-123-2.tmp", "g-chain.json", "x-impl.md"):
+            self.assertIsNotNone(regex.fullmatch(name), name)
+        for name in (".notes.md.abc.tmp", "g-chain.json.abc.tmp", ".BACKLOG.md.abc.tmp"):
+            self.assertIsNone(regex.fullmatch(name), name)
+        self.assertIsNotNone(self.executor.BACKLOG_TEMP_RE.fullmatch(".BACKLOG.md.k2j3_x9a.tmp"))
+
+
+@unittest.skipUnless(os.path.isfile(BRAINSTORM) and shutil.which("git"), "plan-brainstorming or git missing")
+class SnapshotOriginsContractTest(unittest.TestCase):
+    """Spec 1 of plan-refactoring-05: on one tree the snapshot with git and the walk without git (root .gitignore
+    without `!` and `**`, no core.excludesFile, nothing in the blind spot) classify the changes alike."""
+
+    def classes(self, use_git):
+        tool = _load_by_path("brainstorm_tool", BRAINSTORM)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.realpath(tmp)
+
+            def write(rel, data):
+                path = os.path.join(root, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as fh:
+                    fh.write(data)
+
+            write(".gitignore", b"docs/.*/\n*.log\n")
+            write("app.py", b"a = 1\n")
+            write("docs/.plans/g/p.md", b"p\n")
+            if use_git:
+                for args in (["init", "-q"], ["config", "core.excludesFile", ""], ["add", "-A"],
+                             ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]):
+                    subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
+            before = tool.worktree_snapshot(root, "docs/.plans/g")
+            write("app.py", b"a = 22\n")
+            write("new.py", b"n\n")
+            write("top.log", b"l\n")
+            write("docs/.plans/g/p.md", b"pp\n")
+            out = tool.worktree_diff(before, tool.worktree_snapshot(root, "docs/.plans/g"), plan_dir="docs/.plans/g")
+            return before["origin"], out["violations"], out["ignored_changed"]
+
+    def test_git_and_walk_classify_alike(self):
+        with_git, walk = self.classes(True), self.classes(False)
+        self.assertEqual((with_git[0], walk[0]), ("git", "walk"))
+        self.assertEqual(with_git[1:], walk[1:])
+        self.assertEqual(walk[1:], (["app.py", "docs/.plans/g/p.md", "new.py"], ["top.log"]))
 
 
 class SkeletonHelperTest(unittest.TestCase):

@@ -1317,7 +1317,10 @@ class PipelineFileTests(unittest.TestCase):
         for path, plan_dir, expected in (("BACKLOG.md", "docs", True), ("docs/BACKLOG.md", "docs", False),
                                          ("docs/g-chain.json", "docs", True), ("docs/g-impl-review-2.md", "docs", True),
                                          ("api/openapi-spec.md", "docs", False), ("docs/notes.md", "docs", False),
-                                         ("g-chain.json", "", True), ("docs/g-chain.json", None, False)):
+                                         ("g-chain.json", "", True), ("docs/g-chain.json", None, False),
+                                         (".BACKLOG.md.k2j3_x9a.tmp", None, True),  # spec 1 of plan-refactoring-05
+                                         ("docs/.BACKLOG.md.k2j3_x9a.tmp", "docs", False),
+                                         ("docs/.g-chain.json.ab12cd_3.tmp", "docs", True)):
             with self.subTest(path=path, plan_dir=plan_dir):
                 self.assertIs(module.is_pipeline_file(path, plan_dir), expected)
 

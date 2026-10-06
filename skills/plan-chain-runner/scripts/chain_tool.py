@@ -132,8 +132,9 @@ def _executor() -> Any:
 # when it is there; the two stay equal by contract (test SiblingLoaderTest). `roadmap\.md` covers the split
 # roadmap <X>-impl-roadmap.md and the goal roadmap <goal>-roadmap.md.
 _CHAIN_FILE_FALLBACK_RE = re.compile(
-    r".+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
-    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)")
+    r"(\.)?.+-(?:chain\.json(?:\.lock)?|diffs\.md|followups\.json|spec\.md|impl\.md|impl-[a-z]+\.md"
+    r"|roadmap\.md|completion\.md|review-\d+\.md|report-\d+(?:-final)?\.md)(?(1)\.[a-z0-9_]+\.tmp)"
+    r"|\.splitter-[a-z0-9_]+\.tmp|\.splitter-probe-[a-z0-9_]+|\..+-review-write-test-\d+(?:-\d+)?\.tmp")
 
 
 def _chain_file_re(warnings: List[str]) -> Any:

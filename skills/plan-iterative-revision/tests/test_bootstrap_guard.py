@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "scripts" / "next_review_index.py"
@@ -237,21 +238,45 @@ class Guard(unittest.TestCase):
         self.assertEqual(p.returncode, 1, p.stdout)
         self.assertEqual(json.loads(p.stdout)["violations"], ["code.py", "docs/BACKLOG.md"])
 
-    def test_ignored_files_and_the_plans_folder_are_seen(self):  # spec 2 of plan-refactoring-04
+    def test_ignored_files_outside_the_plan_folder_are_information(self):  # spec 1 of plan-refactoring-05
         (self.root / ".gitignore").write_text("docs/.*/\n*.log\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(self.root), "add", ".gitignore"], check=True)
         subprocess.run(["git", "-C", str(self.root), "commit", "-qm", "ignore"], check=True)
-        p = run("guard-begin", str(self.root), "tree")
+        plan = self.root / "docs" / ".plans" / "g" / "g-1-impl.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("plan\n", encoding="utf-8")
+        (plan.parent / "g-1-impl-review-1.md").write_text("r1\n", encoding="utf-8")
+        p = run("guard-begin", str(self.root), "ignored", "--plan", str(plan))
         self.assertEqual((p.returncode, json.loads(p.stdout)["files"]), (0, 3))
+        plan.write_text("plan v2\n", encoding="utf-8")
         (self.root / "build.log").write_text("x\n", encoding="utf-8")
-        notes = self.root / "docs" / ".plans" / "notes.md"
-        notes.parent.mkdir(parents=True)
-        notes.write_text("n\n", encoding="utf-8")
-        p = run("guard-check", str(self.root), "tree", str(self.root / "plan.md"))
+        (plan.parent / "g-1-impl-review-1.md").write_text("r2\n", encoding="utf-8")
+        (plan.parent / "g-chain.json").write_text("{}\n", encoding="utf-8")
+        p = run("guard-check", str(self.root), "ignored", str(plan))
         out = json.loads(p.stdout)
         self.assertEqual(p.returncode, 1, p.stdout)
-        self.assertEqual((out["changed"], out["free"], out["violations"]),
-                         (["build.log", "docs/.plans/notes.md"], [], ["build.log", "docs/.plans/notes.md"]))
+        folder = "docs/.plans/g/"
+        self.assertEqual((out["free"], out["violations"], out["ignored_changed"]),
+                         ([folder + "g-chain.json"], [folder + "g-1-impl-review-1.md"], ["build.log"]))
+        self.assertEqual(out["changed"], [folder + "g-1-impl-review-1.md", folder + "g-1-impl.md", folder + "g-chain.json"])
+
+    def test_a_commit_in_the_window_is_the_violation_head(self):
+        run("guard-begin", str(self.root), "head")
+        (self.root / "code.py").write_text("x = 7\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.root), "commit", "-qam", "phase"], check=True)
+        p = run("guard-check", str(self.root), "head", str(self.root / "plan.md"))
+        self.assertEqual((p.returncode, json.loads(p.stdout)["violations"]), (1, ["HEAD"]))
+
+    def test_temp_files_of_the_skills_are_free(self):  # spec 1 of plan-refactoring-05
+        plan = self.root / "docs" / "g" / "g-1-impl.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("plan\n", encoding="utf-8")
+        run("guard-begin", str(self.root), "temp", "--plan", str(plan))
+        (plan.parent / ".g-chain.json.ab12cd_3.tmp").write_text("{}\n", encoding="utf-8")
+        (self.root / ".BACKLOG.md.k2j3_x9a.tmp").write_text("x\n", encoding="utf-8")
+        p = run("guard-check", str(self.root), "temp", str(plan))
+        out = json.loads(p.stdout)
+        self.assertEqual((p.returncode, out["free"], out["violations"]), (0, ["docs/g/.g-chain.json.ab12cd_3.tmp"], []))
 
     def test_check_without_begin(self):
         p = run("guard-check", str(self.root), "never-started", "plan.md")
@@ -288,6 +313,23 @@ class GuardSplit(unittest.TestCase):
             stored = {"plan": {"path": str(Path(d) / "docs" / ".plans" / "p-impl.md")}}
             self.assertEqual(nri.guard_plan_rel(d, stored), "docs/.plans/p-impl.md")
             self.assertEqual([nri.guard_plan_rel(d, item) for item in ({}, {"plan": None}, None)], [None, None, None])
+
+
+class GuardSnapshotHelpers(unittest.TestCase):
+    """Spec 1 of plan-refactoring-05: the guard's snapshot tool and the plan's folder."""
+
+    def test_plan_dir_of_the_plan(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as other:
+            self.assertEqual(nri.guard_plan_dir(d, str(Path(d) / "docs" / ".plans" / "g" / "g-1-impl.md")),
+                             "docs/.plans/g")
+            self.assertEqual(nri.guard_plan_dir(d, str(Path(d) / "p-impl.md")), "")
+            self.assertEqual([nri.guard_plan_dir(d, None), nri.guard_plan_dir(d, str(Path(other) / "p.md"))],
+                             [None, None])
+
+    def test_snapshot_tool(self):
+        self.assertTrue(hasattr(nri.guard_snapshot_tool(), "worktree_snapshot"))
+        with mock.patch.object(nri, "_load_brainstorm_tool", return_value=None):
+            self.assertIsNone(nri.guard_snapshot_tool())
 
 
 def budget_plan(pad: int = 0) -> str:
@@ -432,12 +474,13 @@ class GuardWithoutBrainstorm(unittest.TestCase):
                                                 encoding="utf-8")
             (self.root / ".gitignore").write_text("*.log\n", encoding="utf-8")
             out = json.loads(solo("guard-begin", str(self.root), "solo").stdout)
-            self.assertEqual((out["changed_count"], out["warnings"]), (1, ["plan-unknown", "tree-snapshot-unavailable"]))
+            self.assertEqual((out["changed_count"], out["warnings"]), (1, ["plan-unknown", "snapshot-unavailable"]))
             (self.root / "build.log").write_text("x\n", encoding="utf-8")
             (self.root / "code.py").write_text("x = 5\n", encoding="utf-8")
             out = json.loads(solo("guard-check", str(self.root), "solo", "plan.md").stdout)
-            self.assertEqual((out["changed"], out["violations"], out["free"]), (["code.py"], ["code.py"], []))
-            self.assertEqual(out["warnings"], ["plan-unknown", "tree-snapshot-unavailable"])
+            self.assertEqual((out["changed"], out["violations"], out["free"], out["ignored_changed"]),
+                             (["code.py"], ["code.py"], [], []))
+            self.assertEqual(out["warnings"], ["plan-unknown", "snapshot-unavailable"])
 
 
 class BootstrapJournal(unittest.TestCase):

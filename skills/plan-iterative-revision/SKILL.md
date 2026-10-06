@@ -193,18 +193,24 @@ call, a chain run) is `autonomous`: `record --interaction autonomous` stops at t
 `result: limit` and never asks.
 
 A `guard-check` violation means a phase touched a forbidden file: stop and report the paths.
+A `guard-begin` that exits `1` (`snapshot-failed`: `git status` or `git hash-object` failed) opens no window: stop
+and report its `error`, never run the phase unguarded.
 `BACKLOG.md` at the repository root is never a violation: it is a free file (Language).
-The guard compares a snapshot of every file under the git root: size and SHA-256, the files git ignores and
-`docs/.plans/` included; `.git` and the directories `node_modules`, `.venv`, `venv`, `__pycache__`, `.pytest_cache`,
-`dist`, `build` (`TREE_SKIP_DIRS`) are skipped, and paths outside the repository are not seen. A changed file with a
+The guard compares two snapshots of the working tree by `git status` (`brainstorm_tool.worktree_snapshot`): `HEAD`,
+every changed, new or deleted path git does not ignore with its blob hash, a new ignored file or folder as one entry,
+and the ignored files of the plan's folder (from `guard-begin --plan`) one by one with size, mtime and SHA-256. A moved
+`HEAD` (a commit, reset or checkout in the phase) is the violation `HEAD`. An ignored path outside the plan's folder
+that appeared, vanished or changed is `ignored_changed`: information, never a violation and never written into the
+review; a write inside an ignored file or folder that already existed outside the plan's folder is not seen, nor are
+paths outside the repository. A changed file with a
 pipeline name (a plan, part, spec, review, completion, report, roadmap, `*-diffs.md`, `*-followups.json`, a
-`*-chain.json` and its lock) that is not one of this plan's own files is `free`, not a violation: another writer of
+`*-chain.json` and its lock, the skills' temporary files) that is not one of this plan's own files is `free`, not a violation: another writer of
 the chain wrote it (a plan written in parallel, the runner's journal). This plan's own files (PLAN, its reviews,
 completion file, parts, roadmap and `<X>-diffs.md`) outside the allowed path stay violations. The plan comes from
 `guard-begin --plan`; without it (`plan-unknown`) nothing is `free`. Without git `guard-check` gives no `free`:
 `FREE` stays 0. The loop sums the `free` paths of a pass's guard
 windows (`FREE`) and passes the sum to the next `record --free`, which writes `**Concurrent pipeline files**: N
-(previous pass)` into the review. Without plan-brainstorming alongside (warning `tree-snapshot-unavailable`) the guard
+(previous pass)` into the review. Without plan-brainstorming alongside (warning `snapshot-unavailable`) the guard
 sees only what `git status` sees, as before.
 Without git (`guard-begin`/`guard-check` exit 3) it checks no files: say once that the guard is unavailable and list
 the files you changed yourself; the budget fields of `guard-check` (`--plan`) still come and are used as with git.

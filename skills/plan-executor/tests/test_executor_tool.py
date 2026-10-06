@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1339,6 +1340,42 @@ class TestExtractFiles(unittest.TestCase):
         ])
 
 
+class TestCheckpointPruneDelegateFiles(unittest.TestCase):
+    """Spec 1 of plan-refactoring-05: checkpoint-prune also removes the delegate-check files of <exec_dir>."""
+
+    def setUp(self):
+        self.tool = load_tool()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.exec_dir = Path(tmp.name) / "exec"
+        for name in ("delegate-task-1.json", "delegate-task-1-reply.md", "delegate-task-2.json", "notes.md",
+                     "sub/delegate-task-3.json"):
+            (self.exec_dir / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.exec_dir / name).write_text("x\n", encoding="utf-8")
+        self.workdir = str(Path(tmp.name))  # not a git working tree
+
+    def test_delegate_files_are_removed_without_git_and_twice(self):
+        out = self.tool.checkpoint_prune(self.workdir, "run1", str(self.exec_dir))
+        self.assertEqual(out, {"pruned": [], "removed": ["delegate-task-1-reply.md", "delegate-task-1.json",
+                                                          "delegate-task-2.json"], "warnings": []})
+        self.assertEqual(sorted(path.name for path in self.exec_dir.iterdir()), ["notes.md", "sub"])
+        self.assertEqual(self.tool.checkpoint_prune(self.workdir, "run1", str(self.exec_dir)),
+                         {"pruned": [], "removed": [], "warnings": []})
+
+    def test_a_file_that_cannot_be_removed_is_a_warning(self):
+        real = Path.unlink
+
+        def unlink(path, *args, **kwargs):
+            if path.name == "delegate-task-2.json":
+                raise PermissionError(str(path))
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", autospec=True, side_effect=unlink):
+            out = self.tool.checkpoint_prune(self.workdir, "run1", str(self.exec_dir))
+        self.assertEqual((out["removed"], out["warnings"]), (["delegate-task-1-reply.md", "delegate-task-1.json"],
+                                                             ["delegate-remove-failed: delegate-task-2.json"]))
+
+
 @unittest.skipUnless(shutil.which("git"), "git required")
 class TestHiddenRefCheckpoints(CheckpointTestCase):
     def test_snapshot_does_not_touch_branch_history(self):
@@ -1354,7 +1391,8 @@ class TestHiddenRefCheckpoints(CheckpointTestCase):
         self.assertEqual(self.run_git("rev-parse", "HEAD").stdout.strip(), head)
         self.assertEqual(result["ref"], "refs/plan-executor/run1/task-1")
         self.assertIn("?? b.txt", self.run_git("status", "--porcelain").stdout)
-        self.assertEqual(self.tool.checkpoint_prune(str(self.workdir), "run1"), {"pruned": ["refs/plan-executor/run1/task-1"]})
+        self.assertEqual(self.tool.checkpoint_prune(str(self.workdir), "run1"),
+                         {"pruned": ["refs/plan-executor/run1/task-1"], "removed": [], "warnings": []})
 
     def test_restore_removes_files_created_after_snapshot(self):
         self.init_repo()
@@ -2281,51 +2319,69 @@ class TestDelegateHelpers(DelegateCase):
         self.link("out", other)
         self.assertIsNone(rel("out/x.md"))
 
-    def test_state_lists_each_changed_file_with_its_hash(self):
-        (self.repo / "docs" / "guide.md").unlink()
-        self.write("docs/new/a.md", "n\n")
-        state = self.tool._delegate_state(self.root)
-        self.assertEqual(sorted(state), ["app.py", "docs/guide.md", "docs/new/a.md"])
-        self.assertEqual((state["app.py"][0], state["docs/guide.md"], state["docs/new/a.md"][0]),
-                         (" M", [" D", None], "??"))
-        self.assertRegex(state["docs/new/a.md"][1], r"^[0-9a-f]{40,64}$")
-        self.assertNotIn("app.py", self.tool._delegate_state(self.root, {"app.py"}))
+    def test_the_plan_folder_comes_from_the_ledger_next_to_the_snapshot(self):  # spec 1 of plan-refactoring-05
+        out = str(self.base / "exec" / "delegate-task-1.json")
+        self.assertIsNone(self.tool._delegate_plan_dir(out, self.root))  # no ledger there
+        plan = self.repo / "docs" / ".plans" / "g" / "g-1-impl.md"
+        self.tool._load = lambda exec_dir: {"plan_path": str(plan)}
+        self.assertEqual(self.tool._delegate_plan_dir(out, self.root), "docs/.plans/g")
+
+    def test_the_snapshot_and_its_errors(self):
+        snap = self.tool._delegate_take(self.root, None, ())
+        self.assertEqual((snap["origin"], sorted(snap["entries"])), ("git", ["app.py"]))
+        module = self.tool._load_brainstorm_tool()
+        with mock.patch.object(module, "worktree_snapshot", side_effect=module.SnapshotError("snapshot-failed: boom")):
+            with self.assertRaises(ValueError) as ctx:
+                self.tool._delegate_take(self.root, None, ())
+        self.assertEqual((ctx.exception.code, str(ctx.exception)), (1, "snapshot-failed: boom"))
+        self.tool._load_brainstorm_tool = lambda: None
+        with self.assertRaises(ValueError) as ctx:
+            self.tool._delegate_tool()
+        self.assertEqual((ctx.exception.code, str(ctx.exception)[:21]), (1, "snapshot-unavailable:"))
 
 
 class TestDelegateSnapshot(DelegateCase):
-    def test_snapshot_records_root_and_entries(self):
+    def test_snapshot_records_root_and_entries(self):  # spec 1 of plan-refactoring-05: version 3
         out = self.tool.delegate_snapshot(str(self.repo), self.snapshot)
         data = json.loads(Path(self.snapshot).read_text(encoding="utf-8"))
-        self.assertEqual((out["ok"], out["root"], out["kind"], out["entries"], out["warnings"]),
-                         (True, self.root, "tree", 2, []))
-        self.assertEqual((data["version"], data["root"], data["kind"], sorted(data["entries"])),
-                         (2, self.root, "tree", ["app.py", "docs/guide.md"]))
-        self.assertEqual(self.tool._load_delegate_snapshot(self.snapshot, self.root), ("tree", data["entries"]))
+        self.assertEqual((out["ok"], out["root"], out["origin"], out["plan_dir"], out["entries"], out["warnings"]),
+                         (True, self.root, "git", None, 1, []))
+        self.assertEqual((data["version"], data["root"], data["origin"], sorted(data["entries"])),
+                         (3, self.root, "git", ["app.py"]))
+        self.assertEqual(data["entries"]["app.py"][0], " M")
+        self.assertEqual(self.tool._load_delegate_snapshot(self.snapshot, self.root), data)
 
     def test_a_snapshot_inside_the_repository_leaves_itself_out(self):
         inside = self.repo / "delegate.json"
         self.tool.delegate_snapshot(str(self.repo), str(inside))
-        self.assertEqual(sorted(json.loads(inside.read_text(encoding="utf-8"))["entries"]), ["app.py", "docs/guide.md"])
+        self.assertEqual(sorted(json.loads(inside.read_text(encoding="utf-8"))["entries"]), ["app.py"])
 
-    def test_ignored_files_are_in_the_snapshot(self):  # spec 2 of plan-refactoring-04
+    def test_an_ignored_file_is_one_entry_without_a_hash(self):
         self.write(".gitignore", "*.log\n")
         self.write("build.log", "x\n")
         self.tool.delegate_snapshot(str(self.repo), self.snapshot)
         entries = json.loads(Path(self.snapshot).read_text(encoding="utf-8"))["entries"]
-        self.assertEqual(sorted(entries), [".gitignore", "app.py", "build.log", "docs/guide.md"])
+        self.assertEqual((sorted(entries), entries["build.log"]), ([".gitignore", "app.py", "build.log"], ["!!"]))
 
-    def test_without_plan_brainstorming_the_snapshot_is_git_status(self):
+    def test_the_plan_folder_is_in_the_snapshot(self):
+        plan = self.repo / "docs" / ".plans" / "g" / "g-1-impl.md"
+        self.tool._load = lambda exec_dir: {"plan_path": str(plan)}
+        self.assertEqual(self.tool.delegate_snapshot(str(self.repo), self.snapshot)["plan_dir"], "docs/.plans/g")
+
+    def test_without_plan_brainstorming_the_snapshot_is_unavailable(self):
         self.tool._load_brainstorm_tool = lambda: None
-        out = self.tool.delegate_snapshot(str(self.repo), self.snapshot)
-        self.assertEqual((out["kind"], out["entries"], out["warnings"]),
-                         ("git-status", 1, ["tree-snapshot-unavailable"]))
+        with self.assertRaises(ValueError) as ctx:
+            self.tool.delegate_snapshot(str(self.repo), self.snapshot)
+        self.assertEqual((ctx.exception.code, str(ctx.exception)[:21]), (1, "snapshot-unavailable:"))
+        self.assertFalse(os.path.exists(self.snapshot))
 
     def test_invalid_snapshots(self):
         bad = self.base / "bad.json"
         cases = [(self.base / "missing.json", None), (bad, "{"),
-                 (bad, json.dumps({"version": 2, "root": self.root, "entries": {}})),  # no kind
+                 (bad, json.dumps({"version": 2, "root": self.root, "kind": "tree", "entries": {}})),
                  (bad, json.dumps({"version": 1, "root": self.root, "kind": "tree", "entries": {}})),
-                 (bad, json.dumps({"version": 2, "root": str(self.base), "kind": "tree", "entries": {}}))]
+                 (bad, json.dumps({"version": 3, "root": self.root, "origin": "walk", "entries": {}})),
+                 (bad, json.dumps({"version": 3, "root": str(self.base), "origin": "git", "entries": {}}))]
         for path, text in cases:
             if text is not None:
                 bad.write_text(text, encoding="utf-8")
@@ -2372,6 +2428,12 @@ class TestDelegateCheck(DelegateCase):
         out = self.check("docs/guide.md", "docs/other.md")
         self.assertEqual((out["verdict"], out["unreported"], out["phantom"]), ("fail", ["notes.txt"], ["docs/other.md"]))
 
+    def test_temp_files_of_the_skills_are_not_unreported(self):  # spec 1 of plan-refactoring-05
+        self.write("docs/.g-chain.json.ab12cd_3.tmp", "{}\n")
+        self.write(".BACKLOG.md.k2j3_x9a.tmp", "x\n")
+        out = self.check()
+        self.assertEqual((out["verdict"], out["unreported"]), ("pass", []))
+
     def test_paths_outside_the_repository_fail(self):
         other = self.base / "other"
         far = self.write("x.md", "o\n", other)
@@ -2381,22 +2443,43 @@ class TestDelegateCheck(DelegateCase):
         self.link("out", other)
         self.assertEqual(self.check("docs/guide.md", "out/x.md")["outside"], ["out/x.md"])
 
-    def test_an_ignored_file_not_named_is_unreported(self):  # spec 2 of plan-refactoring-04
+    def test_an_unnamed_new_ignored_file_outside_the_plan_folder_is_information(self):  # spec 1 of 05
         self.write(".gitignore", "*.log\n")
         self.tool.delegate_snapshot(str(self.repo), self.snapshot)
         self.write("docs/guide.md", "v2\n")
         self.write("build.log", "x\n")
         out = self.check("docs/guide.md")
-        self.assertEqual((out["verdict"], out["unreported"], out["warnings"]), ("fail", ["build.log"], []))
+        self.assertEqual((out["verdict"], out["unreported"], out["ignored_changed"], out["changed"], out["origin"]),
+                         ("pass", [], ["build.log"], ["docs/guide.md"], "git"))
 
-    def test_a_snapshot_of_another_kind_is_invalid(self):
-        real = self.tool._load_brainstorm_tool
-        self.tool._load_brainstorm_tool = lambda: None
+    def test_a_named_path_in_an_ignored_folder_is_no_phantom(self):
+        self.write(".gitignore", "build/\n")
+        self.write("build/out.txt", "1\n")
         self.tool.delegate_snapshot(str(self.repo), self.snapshot)
-        self.tool._load_brainstorm_tool = real
+        self.write("build/out.txt", "2\n")  # unseen: inside an ignored folder outside the plan folder
+        out = self.check("build/out.txt")
+        self.assertEqual((out["verdict"], out["phantom"], out["changed"]), ("pass", [], []))
+
+    def test_an_unnamed_write_in_the_ignored_plan_folder_is_unreported(self):
+        self.write(".gitignore", "docs/.*/\n")
+        notes = self.write("docs/.plans/g/notes.md", "1\n")
+        self.tool._load = lambda exec_dir: {"plan_path": str(notes.parent / "g-1-impl.md")}
+        self.tool.delegate_snapshot(str(self.repo), self.snapshot)
+        self.write("docs/.plans/g/notes.md", "2\n")
+        out = self.check()
+        self.assertEqual((out["verdict"], out["unreported"]), ("fail", ["docs/.plans/g/notes.md"]))
+
+    def test_a_commit_of_the_subagent_is_head_moved(self):
+        self.write("docs/guide.md", "v2\n")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "sub")
+        out = self.check("docs/guide.md")
+        self.assertEqual((out["verdict"], out["head_moved"]), ("fail", True))
+
+    def test_without_plan_brainstorming_the_check_is_unavailable(self):
+        self.tool._load_brainstorm_tool = lambda: None
         with self.assertRaises(ValueError) as ctx:
             self.check()
-        self.assertEqual((ctx.exception.code, str(ctx.exception)[:17]), (2, "snapshot-invalid:"))
+        self.assertEqual((ctx.exception.code, str(ctx.exception)[:21]), (1, "snapshot-unavailable:"))
 
     def test_snapshot_and_reply_in_an_ignored_exec_dir_inside_the_repository(self):
         self.write(".gitignore", ".exec/\n")
@@ -2436,7 +2519,7 @@ class TestDelegateCheck(DelegateCase):
                                            capture_output=True, text=True, encoding="utf-8", check=False)
         snapshot = str(self.base / "cli.json")
         proc = run(str(self.repo), "--snapshot-out", snapshot)
-        self.assertEqual((proc.returncode, json.loads(proc.stdout)["entries"]), (0, 2))
+        self.assertEqual((proc.returncode, json.loads(proc.stdout)["entries"]), (0, 1))
         self.write("docs/guide.md", "v2\n")
         proc = run(str(self.repo), "--snapshot", snapshot, "--reply", self.reply("docs/guide.md"))
         self.assertEqual((proc.returncode, json.loads(proc.stdout)["verdict"]), (0, "pass"))

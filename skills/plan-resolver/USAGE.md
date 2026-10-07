@@ -56,13 +56,13 @@ the reports are discovered next to the plan.
 Audit pass
 1. BOOTSTRAP      — validate the plan and reports, next report number (exit 64: plan already closed)
 2. PREFLIGHT      — the report file can be created; the chain journal marks the audit stage running
-3. FINGERPRINT    — workspace snapshot before the audit (git status; the plan's folder hashed in full)
+3. FINGERPRINT    — workspace snapshot before the audit (git-tracked changes from git status with blob hashes; only the plan folder's ignored files hashed one by one; without git a walk filtered by the root .gitignore, origin: walk)
 4. SCOPE          — later passes: rescan-scope compares the last report's evidence fingerprint with the evidence files hashed now → incremental or full
 5. AUDIT          — full: trace every task and known issue to real code lines; incremental: carry-forward drafts the report and only the tasks on changed evidence, open tasks and open issues are re-audited (read-only probes allowed)
 6. WRITE REPORT   — exactly one new report; defects outside the plan go to its Additional Context; evidence-fingerprint adds the hashes of its evidence files
 7. CENSUS + VALIDATE — every plan task covered; structure, statuses and evidence anchors verified against the code
-8. ASSERT-READONLY — nothing but the report and BACKLOG.md changed; ignored paths outside the plan's folder (probe caches, build output) are only noted in the report
-9. JOURNAL        — defects outside the plan → journal + BACKLOG.md (journal-finding); audit stage done with the report's status and scope; <goal>-followups.json rewritten
+8. ASSERT-READONLY — nothing but the report and BACKLOG.md changed: a moved HEAD (commit, reset, checkout) is the violation HEAD, and a changed file in the plan's folder is a violation even when git ignores it; ignored paths outside the plan's folder (probe caches, build output) are only noted in the report's Additional Context, and so is origin: walk (no git)
+9. JOURNAL        — defects outside the plan → journal + BACKLOG.md (journal-finding); audit stage done with the report's status and scope and the artifact guard=<git|walk>; <goal>-followups.json rewritten
 10. NEXT ACTION   — status, counts, suggested command; the commit command /plan-executor <plan> commit
 
 Fix cycle (fix / next / auto)
@@ -121,7 +121,7 @@ the read-only check); never delegates fixes to other skills.
 | Preflight failed | The next report name already exists | Check numbering; list all existing reports |
 | `anchor file not found` / `beyond end of file` | A report cites code that is not there | The audit must cite real lines; fix the report |
 | `task-census-no-units` | The plan has no recognisable tasks | Use a plan with task headings |
-| `probe-mutated-workspace` | Something changed files during the audit | Review the changes; re-run |
+| `probe-mutated-workspace` | Something changed files during the audit, or a commit or reset moved `HEAD` (violation `HEAD`) | Review the changes; re-run |
 | Warning: closed on the executor's report | A task needs an external system the audit may not touch | Re-verify it yourself on a permitted environment, or accept the executor's recorded result |
 | `auto` stopped: ask-user | Remaining issues need a decision | Answer, update the plan if needed, re-run |
 | `auto` stopped: stop-stalled | A cycle closed nothing | Check the Fix Log; fix manually |
@@ -129,6 +129,7 @@ the read-only check); never delegates fixes to other skills.
 | `use-full-pass` from `carry-forward` | `rescan-scope` chose a full pass (plan changed, old report, too many tasks touched) | Audit the whole plan; there is no draft |
 | `unfilled placeholder` | A `<!-- reaudit -->` or `<!-- re-verify -->` marker is left in an incremental report | Fill the stub or re-verify the issue |
 | `final report requires a full pass` | `-final` written after an incremental pass | Keep the report open; run the full pass (`full`) |
+| `invalid fingerprint snapshot` | The snapshot is from before goal 05 (old format without `entries`) or is not a snapshot | Fingerprint the workspace again |
 | `snapshot-root-mismatch` | The snapshot was taken of another workspace | Fingerprint this workspace |
 | `snapshot-unavailable` | `plan-brainstorming` is not installed next to `plan-resolver` | Install it alongside: the guard uses its workspace snapshot |
 | `snapshot-failed` | `git status` or `git hash-object` failed | Fix the repository (e.g. a stale lock file), re-run |

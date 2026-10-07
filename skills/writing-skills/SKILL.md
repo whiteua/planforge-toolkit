@@ -3,6 +3,8 @@ name: writing-skills
 description: Use when creating new skills, editing existing skills, or verifying skills work before deployment
 ---
 
+If the only argument is `help`: show this skill's USAGE.md in the dialogue language (the language of the user's message; commands and keys as they are) and do nothing else.
+
 # Writing Skills
 
 ## Overview
@@ -15,7 +17,7 @@ You write test cases (pressure scenarios with subagents), watch them fail (basel
 
 **Core principle:** If you didn't watch an agent fail without the skill, you don't know if the skill teaches the right thing.
 
-**REQUIRED BACKGROUND:** You MUST understand superpowers:test-driven-development before using this skill. That skill defines the fundamental RED-GREEN-REFACTOR cycle. This skill adapts TDD to documentation.
+**REQUIRED BACKGROUND:** the RED → GREEN → REFACTOR cycle of test-driven development. RED: write a test and watch it fail before any production code exists. GREEN: write the minimal code that makes it pass. REFACTOR: improve the code while the test stays green. This skill applies the cycle to documentation: the test is a pressure scenario run with a subagent, the production code is the skill (see TDD Mapping for Skills below).
 
 **RECOMMENDED:** For non-trivial skills, use `plan-brainstorming` to clarify goals before writing. See "Planning Before Creating" section below.
 
@@ -337,10 +339,10 @@ wc -w skills/path/SKILL.md
 **When writing documentation that references other skills:**
 
 Use skill name only, with explicit requirement markers:
-- ✅ Good: `**REQUIRED SUB-SKILL:** Use superpowers:test-driven-development`
-- ✅ Good: `**REQUIRED BACKGROUND:** You MUST understand superpowers:systematic-debugging`
-- ❌ Bad: `See skills/testing/test-driven-development` (unclear if required)
-- ❌ Bad: `@skills/testing/test-driven-development/SKILL.md` (force-loads, burns context)
+- ✅ Good: `**REQUIRED SUB-SKILL:** Use plan-writing`
+- ✅ Good: `**REQUIRED BACKGROUND:** You MUST understand plan-iterative-revision`
+- ❌ Bad: `See skills/plan-writing` (unclear if required)
+- ❌ Bad: `@skills/plan-writing/SKILL.md` (force-loads, burns context)
 
 **Why no @ links:** `@` syntax force-loads files immediately, consuming 200k+ context before you need them.
 
@@ -430,6 +432,17 @@ pptx/
 ```
 When: Reference material too large for inline
 
+### Skills in this repository
+
+A new skill under `skills/` follows the repository's conventions (`CLAUDE.md`, "Skill anatomy" and "Shared paragraphs"):
+
+- `SKILL.md` (`name` equals the directory name) with the `help` line right after the frontmatter, and `USAGE.md`, the human quick reference
+- `references/` for detailed docs loaded on demand from `SKILL.md`
+- `scripts/`: one stdlib-only Python CLI that prints JSON; exit 2 = input error, exit 1 = contract/state error
+- `assets/` with paired `*.en.md` / `*.ru.md` templates kept in sync
+- `tests/` for the script
+- A pipeline skill copies the shared Dialogue language and Free backlog paragraphs word for word into its `## Language` section
+
 ## The Iron Law (Same as TDD)
 
 ```
@@ -449,7 +462,7 @@ Edit skill without testing? Same violation.
 - Don't "adapt" while running tests
 - Delete means delete
 
-**REQUIRED BACKGROUND:** The superpowers:test-driven-development skill explains why this matters. Same principles apply to documentation.
+**Why:** a test written after the code passes immediately and proves nothing; only a test you watched fail shows that it checks the right thing. Same principle for documentation: only a baseline you watched fail shows that the skill teaches the right thing.
 
 ## Testing All Skill Types
 

@@ -37,7 +37,7 @@ $T consent     <exec_dir> <env> read|write  # the engineer chose "the whole run"
 $T run-diff    <exec_dir> [--markdown [<file>] [--include-fixes <journal>]]   # what this run changed: baseline vs last unit snapshot; --markdown writes the diff report to its one path (field markdown)
 $T accept-changes <exec_dir> [--note "<why>"]   # the engineer keeps files changed outside the run
 $T checkpoint-restore <repo> <sha> [--paths <file> ...] --exec-dir <exec_dir>   # only after engineer confirmation
-$T checkpoint-prune <exec_dir>            # after the run, with confirmation
+$T checkpoint-prune <exec_dir>            # after the run, with confirmation: snapshot refs + delegate files (also without git); {pruned, removed, warnings}
 $T ledger-path <plan_path> --workdir <repo>   # commit mode: where this plan's ledger is; reads only
 $T commit-run  <exec_dir> --message-file <file> [--journal <journal>]   # commit mode only: the run's files + the audit's fixes, with hooks
 $T delegate-check <repo> --snapshot-out <exec_dir>/delegate-<unit>.json   # a delegated unit: the snapshot before its subagent

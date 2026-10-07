@@ -96,12 +96,15 @@ Unlike every other command these two print text, not JSON: stdout is plan text, 
 |---|---|---|
 | "Spec preflight failed" | Missing section or non-empty Open Questions | Return to `plan-brainstorming` to fix the spec |
 | "plan-brainstorming not installed" | `../plan-brainstorming/scripts/brainstorm_tool.py` missing | Install both skills side by side |
-| Tasks too large | Complex feature crammed into one task | The agent splits it; `plan-check` warns above 100 lines of code in a task |
+| Tasks too large | Complex feature crammed into one task | The agent splits it; `plan-check` warns above 100 lines of code in a task and fails above 150 without a `**Size:**` line |
 | "No tier line" message | Legacy spec without `> Tier:` | Not an error — defaults to Standard |
 | "needs the access type (read) or (write)" / "is not allowed: write=deny" | `External` line without the access type, or access the settings deny | Add `(read)`/`(write)`; a denied access means the plan must change or the user must change the spec |
 | "settings are unavailable" | The plan has `External` lines, the spec at `**Spec:**` is missing and the header has no settings | Restore the spec path in `**Spec:**` |
 | `plan-incomplete` | The plan still carries the marker `> Writing: in progress`: the writer was cut off | Run `/plan-writing <spec>` again: it continues after the last written task |
 | `marker-spec-mismatch` | The marker's fingerprint is not the spec's: the spec changed after the writer was cut off | Run `/plan-writing <spec>` again: it writes the plan anew |
+| `journal-corrupt` (exit 2) | The chain journal file is broken | The skill goes on without the journal; repair it with `brainstorm_tool.py journal-reconcile <journal> --rebuild` |
+| `journal-locked` (exit 1) | Another process holds the journal's lock | Repeated once; still locked → you choose to continue without the journal or stop (a run without you stops) |
+| `journal-write-failed` (exit 1) | The file system refused the write (e.g. a read-only journal) | Said in one line; the skill goes on without the journal |
 
 ## Pipeline Position
 
@@ -110,4 +113,5 @@ plan-brainstorming → [YOU ARE HERE] → plan-iterative-revision → plan-split
 ```
 
 **Previous:** `plan-brainstorming` (produces the spec)  
-**Next:** `plan-iterative-revision` (validates the written plan)
+**Next:** `plan-iterative-revision` (validates the written plan)  
+In a chain run `plan-chain-runner` launches this skill and the later stages.

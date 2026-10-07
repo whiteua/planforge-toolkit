@@ -154,7 +154,7 @@ Every message you see (questions, answer options, summaries) and the spec body f
 | Standard | Feature touching 2–5 components | Short paragraph per section |
 | Deep | New subsystem, external integrations, complex failure modes | Full paragraphs, tables |
 
-> **Dependency:** `plan-writing` reads contract files from this skill, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through its `brainstorm_tool.py`; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it, and every skill keeps the chain journal through it. Install them in the same parent directory.
+> **Dependency:** `plan-writing` reads contract files from this skill, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through its `brainstorm_tool.py`; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it, and every skill keeps the chain journal through it. Its working-tree snapshot is required by `plan-resolver`'s audit (without it the audit does not start: `snapshot-unavailable`, exit 1) and by `plan-executor`'s `light` delegation (`delegate-check` fails with `snapshot-unavailable` and the unit runs in the main agent); the revision's diff guard falls back to plain `git status` with the warning `snapshot-unavailable`. Install them in the same parent directory.
 
 ---
 
@@ -221,6 +221,8 @@ In a chain, the `split` setting decides: `always` skips the gate, `never` means 
 **Invoke:**
 ```
 /plan-executor <plan-or-roadmap-path>
+/plan-executor <plan-or-roadmap-path> light=<model>   # green tasks go to a subagent on that model (off by default)
+/plan-executor <plan-path> --whole     # treat the plan as whole; a prose plan without task headings becomes one unit
 /plan-executor <plan-path> commit      # after the audit: commit the run's files and the audit's fixes
 ```
 
@@ -239,7 +241,7 @@ In a chain, the `split` setting decides: `always` skips the gate, `never` means 
 **Invariants:**
 - Never edits source plan or part files.
 - Progress lives only in `state.json`.
-- Only `commit-run` commits on your branch: in a chain after the audit, by hand with `/plan-executor <plan> commit`. Snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`; push, amend and force are never used.
+- Only `commit-run` commits on your branch: in a chain after the audit, by hand with `/plan-executor <plan> commit`. Snapshots live in hidden refs `refs/plan-executor/<run>/<unit>`; push, amend and force are never used. `checkpoint-prune` deletes the run's refs and the delegation files `delegate-*.json` and `delegate-*-reply.md` in `exec_dir` (a file it cannot remove is the warning `delegate-remove-failed`).
 - Destructive operations (restore) require explicit engineer confirmation.
 - A gate cannot pass silently when checks are absent.
 - A task marked `` **External:** `env` (read|write) `` runs without a question only when that access is `run` in the settings or you allowed it for this run (`consent`); `task` asks "this task only / the whole run / stop", `deny` stops, and a run without a confirmation channel stops with a report. Consents given during a run are cleared when the run resumes.
@@ -247,7 +249,7 @@ In a chain, the `split` setting decides: `always` skips the gate, `never` means 
 
 The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent tells you the path at the start. At the end it writes `<base>-diffs.md` next to the plan (what the run changed, separate from work that was uncommitted before) and records defects it noticed but did not fix in the chain journal and in `BACKLOG.md` (section from the `Backlog` setting, else the goal); `<goal>-followups.json` next to the spec collects them for `plan-brainstorming`. A run that stops without anyone to ask writes its question into the journal; the next run applies your answer and continues from the ledger.
 
-**Delegation (`light`, off by default).** `/plan-executor <plan> light=haiku` (or the runner's `light` setting of the `execution` role) lets the executor hand green tasks — documentation, test-only and Quick-tier tasks without `External`, not checkpoints (`unit-begin` marks them `delegable`) — to a subagent on that model, with the task's text and files only. The subagent changes only those files and ends its reply with a `Written files:` block (paths relative to the repository inside it, absolute outside it, or `none`); the executor saves the reply next to the ledger and checks it with `executor_tool.py delegate-check --reply` against a `git status` snapshot taken before the launch, with the plan folder's ignored files hashed (a missing block, a path outside the repository, a changed file the subagent did not name, a named file it did not change, or a commit fails the attempt; a new ignored file outside the plan folder is only reported), runs the gate itself and records `unit-finish --delegated`. A failed delegated task is retried in the main agent. The ledger (`delegated`, `settings.light`), the journal and `run-stats` (`quality.delegated`) record it, so the quality can be measured before it becomes a default ([docs/COST.md](COST.md), Delegation). Without a tool that starts a subagent with a model, those tasks run in the main agent and the ledger notes `subagent-unavailable`.
+**Delegation (`light`, off by default).** `/plan-executor <plan> light=haiku` (or the runner's `light` setting of the `execution` role) lets the executor hand green tasks — documentation, test-only and Quick-tier tasks without `External`, not checkpoints (`unit-begin` marks them `delegable`) — to a subagent on that model, with the task's text and files only. The subagent changes only those files and ends its reply with a `Written files:` block (paths relative to the repository inside it, absolute outside it, or `none`); the executor saves the reply next to the ledger and checks it with `executor_tool.py delegate-check --reply` against a `git status` snapshot taken before the launch, with the plan folder's ignored files hashed (a missing block, a path outside the repository, a changed file the subagent did not name, a named file it did not change, or a commit fails the attempt; a new ignored file outside the plan folder is only reported), runs the gate itself and records `unit-finish --delegated`. A failed delegated task is retried in the main agent. The snapshot and the saved reply stay next to the ledger until `checkpoint-prune` removes them. Delegation needs `plan-brainstorming` alongside: without it `delegate-check` fails with `snapshot-unavailable` and the task runs in the main agent. The ledger (`delegated`, `settings.light`), the journal and `run-stats` (`quality.delegated`) record it, so the quality can be measured before it becomes a default ([docs/COST.md](COST.md), Delegation). Without a tool that starts a subagent with a model, those tasks run in the main agent and the ledger notes `subagent-unavailable`.
 
 **Commit stage.** `/plan-executor <plan> commit` finds the ledger without changing it (`ledger-path`) and the journal, rebuilds `<base>-diffs.md` with the audit's fixes, writes the message (`<type>(<scope>): …`, the spec's goal, the audit status, the fixed files) and calls `commit-run`, which commits only the run's files and the audit's fixes, with your hooks. With audit fixes, a manual run lists them first and waits for your explicit "yes"; "no" leaves everything uncommitted. It stops instead of committing when something is already staged (`index-not-empty`), when a file held your uncommitted work before the run and the run changed it too (`mixed-files`), when a file changed outside the run (`foreign-changes`), or when a task failed and files the commit would take differ from the last finished task (`failed-attempt`: the half-done attempt was not rolled back, or the files changed outside the run; the agent restores only those files, so the audit's fixes stay). A second call after new audit fixes commits only them. Without git the stage is `skipped`.
 
@@ -282,11 +284,15 @@ The ledger lives in `<repo parent>/.exec/<repo>-<plan>/` by default; the agent t
 - Max iterations reached → asks: +3 / +5 / stop (autonomous runs stop with `limit`)
 - Same issue set as the previous audit, or nothing resolved for 2 audits → stagnation
 - A previously resolved issue comes back, or one issue survives 3 audits → escalation
-- Only nits remain (`pragmatic` policy) → stop
+- Only nits remain (`pragmatic` policy) → `converged`, with a final review that lists the nits
 
 Stop decisions use only the reviews of the current run.
 
 **Incremental re-audits.** From the second audit on, the review's table of task hashes tells which tasks Phase B changed: the next audit reads the plan's header plus the changed and new tasks, the tasks of the open contracts and the tasks that depend on them through `Preconditions`, and cross-checks only those against the code. A plan unchanged byte for byte, with unchanged files in its tasks' `Files` blocks (the review's `## Code digest`), skips the audit, while a changed file puts its tasks into the scope; more than half of the tasks touched, or a contract that names no task, makes it full. A clean incremental audit is always followed by one full audit, and only that one ends the run as `converged`. Without `plan-brainstorming` alongside every audit is full.
+
+**Size budget.** With issues to apply, `record` also returns the plan's room in the budget of 150 000 bytes, and Phase B applies the issues within it: an issue that does not fit is deferred (`budget`) and stays open in the next review, and a plan pushed over the budget gets one compression of the tasks Phase B changed. The issues deferred for the budget that stay open are recorded in the chain journal and `BACKLOG.md` (`budget: <title>`).
+
+**Diff guard.** Each phase runs between two snapshots of the working tree by `git status` (`HEAD`, every changed path git does not ignore, the plan folder's ignored files with their hashes). A commit (a moved `HEAD`) or a change outside the phase's own file stops the run; an ignored file outside the plan folder that appeared, vanished or changed is only reported; other plans' pipeline files (a plan written in parallel, the chain journal) are only counted in the next review's `**Concurrent pipeline files**` line. Without `plan-brainstorming` alongside the guard falls back to plain `git status` (warning `snapshot-unavailable`); without git it checks no files.
 
 In a chain, the preset and the stop policy come from the `Chain` setting of the spec and are not asked; a run without a confirmation channel stops at the iteration limit. A read allowed for the whole run (`read=run`) lets the audit check that environment, read-only. A remark about the code rather than the plan goes to the chain journal and `BACKLOG.md` (`journal-finding`), and a stop that needs your decision is recorded there as a question.
 
@@ -332,7 +338,7 @@ In audit mode, always provide the full list of previous reports for delta analys
 | ‼️ | Deviates from the plan |
 | `not-applicable` | Explanatory item, nothing to implement |
 
-**Invariants:** The resolver never edits the plan. An audit pass never edits code or previous reports and creates exactly one report (plus appended lines in `BACKLOG.md` for defects outside the plan; `assert-readonly` allows only these two paths: it compares two `git status` snapshots, the plan's folder included, and only notes ignored paths outside that folder, such as probe caches), validated with `validate-report --root` (structure, statuses, anchors pointing at real lines) and `task-census` (every plan task covered). The fix phase edits code only; previous reports change only through the Fix Log (`mark-fix`). With `read=run` in the settings, tasks marked `External (read)` are re-checked by the audit itself instead of being closed on the executor's record. Every report carries its evidence fingerprint (`evidence-fingerprint`), and only a full pass may write `-final`.
+**Invariants:** The resolver never edits the plan. An audit pass never edits code or previous reports and creates exactly one report (plus appended lines in `BACKLOG.md` for defects outside the plan; `assert-readonly` allows only these two paths: it compares two `git status` snapshots, the plan's folder included, and only notes ignored paths outside that folder, such as probe caches; a moved `HEAD` — a commit, reset or checkout — is a violation; without `--plan` (warning `plan-unknown`) every changed ignored path is a violation; without git it walks the tree filtered by the root `.gitignore` only, `origin: walk`), validated with `validate-report --root` (structure, statuses, anchors pointing at real lines) and `task-census` (every plan task covered). The fix phase edits code only; previous reports change only through the Fix Log (`mark-fix`). With `read=run` in the settings, tasks marked `External (read)` are re-checked by the audit itself instead of being closed on the executor's record. Every report carries its evidence fingerprint (`evidence-fingerprint`), and only a full pass may write `-final`.
 
 **Prerequisites:** Python ≥ 3.8 in PATH.
 
@@ -560,7 +566,7 @@ for skill in plan-brainstorming plan-writing plan-splitter plan-executor plan-re
 done
 ```
 
-> **Note:** `plan-writing` reads contract files from `plan-brainstorming`, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through it; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it. `plan-chain-runner` loads it too and launches the six pipeline skills by name. Install them in the **same parent directory**.
+> **Note:** `plan-writing` reads contract files from `plan-brainstorming`, and `plan-executor`, `plan-iterative-revision`, `plan-splitter` and `plan-resolver` read the chain settings through it; `plan-executor` and `plan-resolver` also write `BACKLOG.md` through it. The resolver's audit and the executor's `light` delegation need its working-tree snapshot (`snapshot-unavailable` without it). `plan-chain-runner` loads it too and launches the six pipeline skills by name. Install them in the **same parent directory**.
 
 ---
 
@@ -660,7 +666,7 @@ Only `plan-executor` commits on your branch, at its commit stage (`/plan-executo
 | `<base>-spec.md` | `plan-brainstorming` | Design spec |
 | `<root>-1-spec.md`, `<root>-2-spec.md`, … | `plan-brainstorming` | Several specs of one goal |
 | `<goal>-roadmap.md` | `plan-brainstorming` (`roadmap-write`) | Goal roadmap: order of the specs, dependencies, groups, shared touchpoints, Mermaid graph; the argument of `plan-chain-runner`, recorded in the journal as `runner.roadmap` with its hash |
-| `BACKLOG.md` (repository root) | `plan-brainstorming`, `plan-executor`, `plan-resolver` | Shared backlog; skills only append |
+| `BACKLOG.md` (repository root) | `plan-brainstorming`, `plan-executor`, `plan-resolver`, `plan-iterative-revision` (`journal-finding`, budget deferrals), `plan-chain-runner` (`run-checklist`, findings) | Shared backlog; skills append lines, and `plan-brainstorming` changes only checkboxes (`backlog-mark`, `backlog-unmark`) |
 | `<base>-impl.md` | `plan-writing` | Implementation plan |
 | `<base>-roadmap.md` | `plan-splitter` | Part roadmap |
 | `<base>-a.md`, `<base>-b.md`, … | `plan-splitter` | Individual part |
@@ -674,6 +680,8 @@ Only `plan-executor` commits on your branch, at its commit stage (`/plan-executo
 | `~/.planforge/runner.json` | `plan-chain-runner` (`settings-save`, with your consent) | Models and effort per profile and role; outside the repository |
 | `~/.planforge/sessions/<sha1>.json` | `plan-chain-runner` | Mark of the active run with its heartbeat; outside the repository |
 | `~/.claude/agents/planforge-<role>.md` | `plan-chain-runner` (Claude Code, with your consent) | Agent definitions that set a role's model and effort |
+
+The environment variable `PLANFORGE_HOME` replaces `~/.planforge` in both paths above.
 
 ---
 
@@ -691,6 +699,10 @@ Only `plan-executor` commits on your branch, at its commit stage (`/plan-executo
 | `plan-writing` cannot find contract files | `plan-brainstorming` not installed in same directory | Install both skills side-by-side |
 | `plan-check`: `lines of code (limit 100, error above 150)` | A task is too large and has no justification | Split the task, or add `**Size:** <N> lines — <reason>` |
 | `plan-executor` stops with `foreign-changes` | Files changed between tasks outside the run | Accept them, restore the listed files, or stop |
+| `snapshot-unavailable` | `plan-resolver`'s audit or `plan-executor`'s delegation without `plan-brainstorming` installed alongside | Install `plan-brainstorming` next to the other skills |
+| `snapshot-failed` | `git status` or `git hash-object` failed while taking the working-tree snapshot | Read git's stderr quoted in the error; fix the repository (e.g. a stale lock file) and re-run |
+| `plan-incomplete` | The plan still carries plan-writing's marker `> Writing: in progress` | Let `plan-writing` finish: run `/plan-writing <spec>` again, it resumes after the last written task |
+| `ledger-init`: `exec-dir-inside-workdir` / `exec-dir-ephemeral` | The ledger directory is inside the repository and not ignored by git / inside the OS temp dir | Use the default (`auto`) or another directory outside the repository; `--allow-temp` for a throwaway run in temp |
 | `plan-executor` stops with `settings-drift` | The spec (or plan header) with the settings changed since the last session | Check the changed keys, then resume with `--accept-drift` |
 | `spec-check` / `plan-check` reject `write=run` | Production changes cannot be allowed for a whole run | Use `write=task` or `write=deny` |
 | `journal-locked` | Another skill is writing the chain journal, or a crashed run left `<journal>.lock` (taken over after 60 s) | Wait and re-run the skill |

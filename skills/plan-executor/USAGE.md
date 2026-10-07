@@ -4,7 +4,7 @@ Execute a ready plan or staged roadmap one unit at a time with ledger-backed pro
 
 ## How to Invoke
 
-In VS Code Copilot chat, type:
+In the agent's chat (Claude Code, GitHub Copilot or another host), type:
 
 ```
 /plan-executor <plan-or-roadmap-path>
@@ -35,7 +35,7 @@ In VS Code Copilot chat, type:
 |---|---|---|
 | Plan/Roadmap path | **Yes** | Plan `.md` with task headings, or a `-roadmap.md` from plan-splitter |
 | `--whole` | No | Treat the plan as whole even if a roadmap exists; a plan without task headings becomes one unit |
-| `light=<model>` | No | Delegate green tasks (documentation, test-only and Quick-tier tasks without `External`, not checkpoints) to a subagent on this model; the executor checks the files, runs the gate itself and retries a failure in the main agent. Off by default; a chain passes the runner's `light` setting |
+| `light=<model>` | No | Delegate green tasks (documentation and Quick-tier tasks, and test-only tasks of a Standard plan — a test-only task drops one weight step, so a Deep one is yellow and not delegable — without `External`, not checkpoints) to a subagent on this model; the executor checks the files, runs the gate itself and retries a failure in the main agent. Off by default; a chain passes the runner's `light` setting |
 | `commit` | No | Commit mode, a separate call after the audit: rebuilds the diff report with the audit's fixes and commits the run's files plus those fixes; asks before committing audit fixes |
 
 ## Input Types
@@ -52,7 +52,8 @@ BOOTSTRAP:  ledger-init  → units, ledger, baseline snapshot; you are told wher
 LOOP:       unit-begin   → (external unit: asks you first) → execute the unit → gate → unit-finish
                            (pass: snapshot + done / fail: retry or stop)
 FINALIZE:   <X>-diffs.md at the path run-diff returns (what this run changed), findings → journal + BACKLOG.md + <goal>-followups.json, propose plan-resolver
-COMMIT:     /plan-executor <plan> commit (after the audit) → diff report with the audit's fixes → commit-run → offer to prune snapshots
+COMMIT:     /plan-executor <plan> commit (after the audit) → diff report with the audit's fixes → commit-run → offer checkpoint-prune
+            (deletes the snapshot refs and the delegate files in exec_dir, also without git; returns pruned, removed, warnings)
 ```
 
 Per unit the agent calls the tool twice and reads only that unit's section and files, not the whole plan. The unit's files are the paths of its `Files` action lines: the first name of each line (two for `Move:`), not the names in the line's explanation or a `<…>` placeholder.
@@ -63,7 +64,7 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 - 3 attempts per unit (1 primary + 2 retries); the same error signature twice → immediate STOP
 - A gate cannot pass silently if tests are missing → escalation, not fake success
 - Gate depth follows the plan tier, lowered for checkpoint tasks, documentation-only tasks (light) and test-only tasks (one step down)
-- With `light=<model>` a green task may be done by a subagent on that model with the task's text and files only; the subagent ends its reply with a `Written files:` list, and `delegate-check` compares a snapshot of the working tree by `git status` (HEAD, every changed path git does not ignore, the plan folder's ignored files with their hashes) with that list (a path outside the repository, a changed file it did not name, a named file it did not change, a commit or a reply without the list fails the attempt; a new ignored file outside the plan folder is only reported); the ledger (`delegated`), the journal and `run-stats` (`quality.delegated`) record it, so its quality can be measured before it becomes a default. Without a tool that starts a subagent with a model the task runs in the main agent and the ledger notes `subagent-unavailable`
+- With `light=<model>` a green task may be done by a subagent on that model with the task's text and files only; the subagent ends its reply with a `Written files:` list, and `delegate-check` compares a snapshot of the working tree by `git status` (HEAD, every changed path git does not ignore, the plan folder's ignored files with their hashes) with that list (a path outside the repository, a changed file it did not name, a named file it did not change, a commit or a reply without the list fails the attempt; any ignored path outside the plan folder that appeared, vanished or changed is `ignored_changed`, information only). `delegate-check` needs `plan-brainstorming` alongside: before the launch `snapshot-unavailable`, `snapshot-failed`, `snapshot-invalid` or `no-git` means the unit is not delegated and runs in the main agent; after it `reply-unreadable` (or `snapshot-unavailable`/`snapshot-failed`) fails the attempt, and the retry runs in the main agent. The ledger (`delegated`), the journal and `run-stats` (`quality.delegated`) record it, so its quality can be measured before it becomes a default. Without a tool that starts a subagent with a model the task runs in the main agent and the ledger notes `subagent-unavailable`
 - A task marked `**External:** <environment> (read|write)` runs without a question only when the spec allows that access for the whole run (`read=run` / `write=run`); otherwise you are asked: only this task / the whole run / stop ("the whole run" only when the task names `(read)` or `(write)` and the environment is in the settings). `deny` stops the run, changes on prod are confirmed task by task, and the executor never runs a step on an environment the plan does not list
 - Work beyond a task's text (a defect the gate found) is done only with your consent and recorded as a note in the ledger
 - Snapshots are stored in hidden git refs `refs/plan-executor/<run>/<unit>`: no commits on your branch during the run. Only the `commit` mode commits, after the audit: the run's files and the audit's fixes, with your hooks; never push, amend or force. Files you changed before the run that the run also changed are not committed (`mixed-files`)
@@ -84,6 +85,7 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 
 - `<exec_dir>/state.json` — ledger (source of truth for progress)
 - `<exec_dir>/progress.md` — human-readable progress
+- `<exec_dir>/delegate-<unit>.json` and `<exec_dir>/delegate-<unit>-reply.md` — with `light=<model>`: the snapshot before a delegated unit and its subagent's saved reply (`checkpoint-prune` removes them)
 
 - `BACKLOG.md` at the repository root — the same out-of-scope defects, appended to the plan's goal section (`/plan-brainstorming BACKLOG.md` starts the next cycle from them)
 - `<X>-diffs.md` next to the master plan `<X>-impl.md`, one for the plan and its roadmap (the path `run-diff --markdown` returns) — the diff report: a summary table and one diff block per changed file, without the pipeline's own files (rebuilt with the audit's fixes in the `commit` mode; not written without git)
@@ -95,6 +97,7 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 ## Prerequisites
 
 - Git for snapshots and rollback (without git, rollback is manual)
+- `plan-brainstorming` installed alongside: the chain journal, the chain settings and `delegate-check` (without it the run has no journal and no unit is delegated)
 - Plan validated (ideally by `plan-iterative-revision`)
 - Python ≥ 3.8
 
@@ -120,6 +123,8 @@ Per unit the agent calls the tool twice and reads only that unit's section and f
 | `exec-dir-inside-workdir` | Ledger directory inside the repo | Move `exec_dir` outside or git-ignore it |
 | `exec-dir-ephemeral` | Ledger directory inside the OS temp dir | Use the default (`auto`), or `--allow-temp` for a throwaway run |
 | `exhausted` / `stagnated` | Unit failed 3 times / same error twice | Read the stop-report, fix manually, resume |
+| `commit`: `snapshots-missing` | The run's snapshots were pruned (`checkpoint-prune`) and garbage-collected before the commit | Commit by hand; when only the expected tree is missing, the agent names `accept-changes`, then `commit` again |
+| `commit`: `commit-failed` | A repository hook refused the commit; the index is restored | Fix what the hook reports, then `commit` again (never `--no-verify`) |
 | `commit`: `index-not-empty` | Changes already staged in the index | Commit or unstage them yourself, then `commit` again |
 | `commit`: `mixed-files` | Files had your uncommitted work before the run, and the run changed them | Commit them by hand, or separate the changes |
 | `commit`: `foreign-changes` | Files changed after the run's last task and not by the audit | Accept them when asked, or stop |

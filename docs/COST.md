@@ -125,11 +125,12 @@ output tokens. With one FIX cycle the incremental audit after the fix comes on t
 pass, so the input is not lower than today's single full audit after FIX; the input saving starts with
 the second cycle (`auto` with several cycles, repeated `fix`/`next`). The output drops at once: the
 model writes only the re-audited lines and `carry-forward` copies the rest (on `fix-03` the stages
-section of report 1 is about 53 KB). The reads model counts an incremental report as the plan's header
-plus the tasks of `audit_tasks` plus every file of its evidence table; on `fix-03` that table names 54
-files of 1.34 MB, more than the plan (551 KB), so until the model counts only the changed files
-(BACKLOG, section `plan-refactoring-01`) `bytes_read_est` overstates an incremental pass, and the
-comparison uses `bytes_written` and the output tokens.
+section of report 1 is about 53 KB). When spec 6 was measured, the reads model counted an incremental
+report as the plan's header plus the tasks of `audit_tasks` plus every file of its evidence table; on
+`fix-03` that table names 54 files of 1.34 MB, more than the plan (551 KB), so `bytes_read_est`
+overstated an incremental pass and the comparison used `bytes_written` and the output tokens. Since F11
+of `plan-refactoring-02` the model counts only the evidence files changed since the previous report and
+the files of the tasks of `audit_tasks` (Model above).
 
 ## Delegation (`light`)
 
@@ -138,7 +139,9 @@ comparison uses `bytes_written` and the output tokens.
 subagent on that model; the parent checks the files with `delegate-check`, runs the gate and records `unit-finish
 --delegated`. `run-stats` reports per plan `quality.delegated`: `units` (distinct units with a
 delegated `unit-finish` event) and `retries` (delegated attempts that failed; each is retried in the
-main agent). Without a journal (`--plan`) it is `null`.
+main agent). Without a journal (`--plan`) it is `null`. Delegation needs `plan-brainstorming` installed
+alongside: without it `delegate-check` fails with `snapshot-unavailable` and the unit runs in the main
+agent, at the main model's price.
 
 **Criterion for a default.** `light` stays an option, off in every profile, until on real goals both
 hold: the failed share of delegated attempts (`delegated.retries / delegated.units`) is no higher than
@@ -182,7 +185,7 @@ every writer agent to the stage's `cost_tokens`):
 
 ## Size budgets
 
-One plan's budget is 40 tasks or 150000 bytes (`SIZE_BUDGET` in `skills/plan-brainstorming/scripts/brainstorm_tool.py`). `spec-check` estimates a spec's volume before any plan exists: `estimate_tasks = components × k + testing_items`, k = 1 (Quick), 2 (Standard), 3 (Deep); `over_budget` above 40 tasks makes `plan-brainstorming` propose several specs of one goal. `plan-check` returns `size_class` (`small` ≤ 15 tasks, `large` over the budget, else `medium`) and warns `plan-oversized`; the splitter gate uses the same 40 tasks / 150000 bytes. Every stage costs in proportion to the plan's size and the revision more than linearly, so the budget is held before the plan is written.
+One plan's budget is 40 tasks or 150000 bytes (`SIZE_BUDGET` in `skills/plan-brainstorming/scripts/brainstorm_tool.py`). `spec-check` estimates a spec's volume before any plan exists: `estimate_tasks = components × k + testing_items`, k = 1 (Quick), 2 (Standard), 3 (Deep); `over_budget` above 40 tasks makes `plan-brainstorming` propose several specs of one goal. `plan-check` returns `size_class` (`small` ≤ 15 tasks, `large` over the budget, else `medium`) and warns `plan-oversized`; the splitter gate uses the same 40 tasks / 150000 bytes. Every stage costs in proportion to the plan's size and the revision more than linearly, so the budget is held before the plan is written. The revision holds it too: its Phase B applies issues within the plan's room under 150000 bytes, defers what does not fit (`budget`) and compresses the changed tasks once when the plan goes over, which caps how far a revision grows the plan.
 
 ### Calibration
 

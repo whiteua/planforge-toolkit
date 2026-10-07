@@ -34,7 +34,7 @@ Without `<goal>` the runner looks for `*-chain.json` journals with unfinished st
 
 ## Tool
 
-`<SKILL_DIR>` is the directory containing this file; always call the scripts by absolute path. Python 3.8 or newer, stdlib only. Every command prints JSON; errors are `{"ok": false, "errors": [...]}` with exit `2` (input, unreadable file, `unknown-spec`, `roadmap-mismatch`, `not-in-roadmap`, journal input errors) or `1` (contract: `graph-cycle`, `session-active`, `session-stale-running`, `session-taken-over`, `runner-missing`, `no-model`, `stage-not-open`, `no-marker`). `session-taken-over` from `--heartbeat` or `--end` means another window took the run over: stop at once with one line, write nothing to the journal, no `--end`.
+`<SKILL_DIR>` is the directory containing this file; always call the scripts by absolute path. Python 3.8 or newer, stdlib only. Every command prints JSON; errors are `{"ok": false, "errors": [...]}` with exit `2` (input, unreadable file, `unknown-spec`, `roadmap-mismatch`, `not-in-roadmap`, journal input errors) or `1` (contract: `graph-cycle`, `session-active`, `session-stale-running`, `session-taken-over`, `runner-missing`, `no-model`, `stage-not-open`, `no-marker`, `open-questions` from `host-wait`; `scheduler-bug` from `run-next`, `run-eta`, `run-status`, `run-stats`, `subset-check`, `run-checklist`). `session-taken-over` from `--heartbeat` or `--end` means another window took the run over: stop at once with one line, write nothing to the journal, no `--end`.
 
 `C` = `python "<SKILL_DIR>/scripts/chain_tool.py"`; `J` = `python "<SKILL_DIR>/../plan-brainstorming/scripts/brainstorm_tool.py"`.
 

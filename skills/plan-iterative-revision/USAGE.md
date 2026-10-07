@@ -6,7 +6,7 @@ the plan, and repeat until the plan is clean or a stop gate fires.
 ## How to Invoke
 
 ```
-/plan-iterative-revision <plan-path> [preset=...] [stop_policy=...] [interaction=...] [audit-only]
+/plan-iterative-revision <plan-path> [preset=...] [lenses=...] [rigor=...] [max=...] [stop_policy=...] [interaction=...] [audit-only] [parts=...]
 /plan-iterative-revision help   # show this quick reference in the dialogue language, nothing else
 ```
 
@@ -81,8 +81,9 @@ bootstrap (numbering, language, config, write check; a plan still carrying plan-
     unchanged code skips the audit
   → each phase runs inside the diff guard: a snapshot of the working tree by `git status` (HEAD,
     every changed path git does not ignore, the plan folder's ignored files with their hashes); a
-    change outside the phase's own file or a commit stops the run, a new ignored file elsewhere is
-    only reported, while other plans' pipeline files (a plan written in parallel, the chain journal)
+    change outside the phase's own file or a commit stops the run, any ignored path outside the
+    plan folder that appeared, vanished or changed is `ignored_changed` (information only, not
+    written into the review), while other plans' pipeline files (a plan written in parallel, the chain journal)
     are only counted in the next review's `**Concurrent pipeline files**` line
   → repeat; a clean incremental audit is followed by one full audit before `converged`
 ```
@@ -113,7 +114,11 @@ Only reviews created in the current run count for these gates.
 
 - Python ≥ 3.8 in PATH, shell access for the helper script
 - The plan's directory is writable
-- `plan-brainstorming` installed alongside for incremental re-audits (without it every audit reads the whole plan)
+- `plan-brainstorming` installed alongside for incremental re-audits (without it every audit reads the whole plan),
+  for the budget (without it `budget-unavailable`, no budget) and for the diff guard's snapshot (without it the
+  guard falls back to plain `git status`, warning `snapshot-unavailable`, and does not hash the plan folder's
+  ignored files)
+- Git for the diff guard: without it the guard checks no files (exit 3) and only measures the plan for the budget
 
 ## Common Errors
 
@@ -122,6 +127,9 @@ Only reviews created in the current run count for these gates.
 | "Cannot create review file" | Plan directory not writable | Check permissions |
 | "Plan is clean" but you see issues | Preset too shallow | Re-run with `preset=deep` |
 | Stagnation after 2 audits | The same issues survive plan edits | Resolve them manually, then re-run |
+| Guard violation (`guard-check` exit 1) | A phase changed a file outside its own file, or `HEAD` moved | The run stops with the paths; review them, then re-run |
+| `snapshot-failed` from `guard-begin` (exit 1) | `git status` or `git hash-object` failed; no phase runs unguarded | Fix the repository (e.g. a stale lock file), re-run |
+| `plan-incomplete` from `bootstrap` | The plan still carries plan-writing's marker `> Writing: in progress` | Finish the plan: `/plan-writing <spec>` |
 
 ## Pipeline Position
 
